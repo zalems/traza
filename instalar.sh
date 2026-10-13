@@ -458,7 +458,7 @@ $out"
     info "Descargando el recorte (puede tardar varios minutos)…"
     extract_to "$target" --bbox="$BBOX" \
       || die "Falló la descarga del recorte. El mapa que estaba en uso no se tocó; se puede volver a ejecutar."
-    ok "Mapa de calles descargado: $(basename "$target") ($(du -h "$target" | cut -f1))"
+    ok "Mapa de calles descargado: $(basename "$target") ($(du -h --apparent-size "$target" | cut -f1))"
   fi
 
   # 2) El mundo entero a poco zoom, para que al alejar no quede un hueco fuera de la zona.
@@ -466,7 +466,7 @@ $out"
   if [[ -s "$world" ]]; then
     ok "Mapa del mundo: $(basename "$world") ya está"
   elif extract_to "$world" --maxzoom=5; then
-    ok "Mapa del mundo descargado: $(basename "$world") ($(du -h "$world" | cut -f1))"
+    ok "Mapa del mundo descargado: $(basename "$world") ($(du -h --apparent-size "$world" | cut -f1))"
   else
     warn "No se pudo descargar el mapa del mundo. Al alejar el mapa se va a ver gris fuera de la zona."
     world=""
