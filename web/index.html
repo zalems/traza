@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#16222c">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Mapa FTTH</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316222c'/%3E%3Cpath d='M6 22 13 11l6 7 7-9' fill='none' stroke='%23fbfcfb' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='13' cy='11' r='2.6' fill='%23e8590c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="vendor/maplibre-gl-6.11.2/maplibre-gl.css">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="modulepreload" href="vendor/maplibre-gl-6.11.2/maplibre-gl.mjs">
+  <link rel="modulepreload" href="vendor/maplibre-gl-6.11.2/maplibre-gl-shared.mjs">
+</head>
+<body>
+  <div id="map" aria-label="Mapa"></div>
+
+  <form id="search" class="panel search" role="search" autocomplete="off">
+    <label class="sr-only" for="search-input">Buscar una localidad, una dirección o coordenadas</label>
+    <input id="search-input" type="search" inputmode="search" enterkeyhint="search"
+           placeholder="Buscar lugar o coordenadas">
+    <button id="search-go" type="submit" aria-label="Buscar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg>
+    </button>
+    <div id="search-results" class="search-results" hidden></div>
+  </form>
+
+  <div id="notice" class="panel notice" role="status" aria-live="polite" hidden>
+    <p id="notice-text"></p>
+    <button id="notice-close" type="button" aria-label="Cerrar aviso">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+
+  <div id="bases" class="panel bases">
+    <div id="base-options" class="segments" role="radiogroup" aria-label="Mapa de base"></div>
+    <button id="more-toggle" class="more-toggle" type="button" aria-expanded="false" aria-controls="more-panel"
+            aria-label="Más capas">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 3 9l9 5 9-5-9-5Z"/><path d="m3 14 9 5 9-5"/></svg>
+    </button>
+    <div id="more-panel" class="panel more-panel" hidden>
+      <label id="ortho-option" class="check" for="ortho-toggle">
+        <input id="ortho-toggle" type="checkbox">
+        <span>
+          <strong>Ortofotos del IGN</strong>
+          <small>Fotos aéreas de 2011 a 2022, más nítidas que el satélite. Cubren solo algunas localidades y cargan lento.</small>
+        </span>
+      </label>
+      <p id="streets-date" class="more-note"></p>
+      <p id="session" class="more-note session">Sesión de <strong id="session-user"></strong> <button id="logout" type="button">Salir</button></p>
+    </div>
+  </div>
+
+  <output id="readout" class="panel readout" aria-label="Posición del cursor" hidden></output>
+
+  <noscript><p class="panel noscript">Este mapa necesita JavaScript.</p></noscript>
+
+  <script src="vendor/pmtiles-4.5.0/pmtiles.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

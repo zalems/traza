@@ -1,0 +1,14 @@
+# Los scripts se ejecutan en Linux: siempre con saltos de línea LF, aunque se editen en Windows.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.pbf binary
+*.png binary
+*.woff2 binary
+*.ttf binary

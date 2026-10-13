@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#16222c">
+  <meta name="robots" content="noindex">
+  <title>Entrar · Mapa FTTH</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316222c'/%3E%3Cpath d='M6 22 13 11l6 7 7-9' fill='none' stroke='%23fbfcfb' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='13' cy='11' r='2.6' fill='%23e8590c'/%3E%3C/svg%3E">
+  <style>
+    @font-face {
+      font-family: 'Overpass Variable';
+      font-style: normal;
+      font-display: swap;
+      font-weight: 100 900;
+      src: url('assets/ui/overpass-latin-wght-normal.woff2') format('woff2-variations');
+    }
+    :root {
+      --ink: #16222c;
+      --paper: #fbfcfb;
+      --paper-dim: #e9edea;
+      --line: #b9c3bd;
+      --muted: #4d5b65;
+      --signal: #e8590c;
+      --shadow: 0 1px 1px rgb(22 34 44 / 0.22), 0 3px 10px rgb(22 34 44 / 0.16);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --ink: #eef2f0;
+        --paper: #18232c;
+        --paper-dim: #24323d;
+        --line: #3d4c57;
+        --muted: #a9b6bd;
+        --signal: #ff8a3d;
+        --shadow: 0 1px 1px rgb(0 0 0 / 0.5), 0 3px 12px rgb(0 0 0 / 0.4);
+        color-scheme: dark;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      background: var(--paper-dim);
+      color: var(--ink);
+      font: 500 16px/1.4 'Overpass Variable', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    }
+    form {
+      width: min(380px, 100%);
+      padding: 26px 24px 22px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.005em;
+    }
+    .sub { margin: 0 0 22px; color: var(--muted); }
+    label {
+      display: block;
+      margin: 0 0 14px;
+      font-weight: 650;
+    }
+    input {
+      display: block;
+      width: 100%;
+      height: 46px;
+      margin-top: 6px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      color: inherit;
+      font: inherit;
+    }
+    input:focus-visible, button:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; }
+    button {
+      width: 100%;
+      height: 48px;
+      margin-top: 6px;
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      background: var(--ink);
+      color: var(--paper);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button[disabled] { opacity: 0.6; cursor: wait; }
+    .error {
+      margin: 0 0 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--signal);
+      color: #fff;
+      font-weight: 600;
+    }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <form id="form" autocomplete="on">
+    <h1>Mapa FTTH</h1>
+    <p class="sub">Entrá con tu usuario para ver y cargar la red.</p>
+    <p id="error" class="error" role="alert" hidden></p>
+    <label>Usuario
+      <input id="usuario" name="usuario" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+    </label>
+    <label>Contraseña
+      <input id="clave" name="clave" type="password" autocomplete="current-password" required>
+    </label>
+    <button id="entrar" type="submit">Entrar</button>
+  </form>
+  <script>
+    const form = document.getElementById('form');
+    const error = document.getElementById('error');
+    const button = document.getElementById('entrar');
+
+    // La posición del mapa viaja en el #hash y se conserva al entrar.
+    const destino = './' + location.hash;
+
+    // Si ya hay sesión, no hay nada que pedir.
+    fetch('auth/session', { cache: 'no-store' }).then((res) => {
+      if (res.ok) location.replace(destino);
+    }).catch(() => {});
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      button.disabled = true;
+      try {
+        const res = await fetch('auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ usuario: form.usuario.value.trim(), clave: form.clave.value }),
+        });
+        if (res.ok) {
+          location.replace(destino);
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        error.textContent = data.error || `No se pudo entrar (error ${res.status}).`;
+        error.hidden = false;
+        form.clave.value = '';
+        form.clave.focus();
+      } catch {
+        error.textContent = 'No hay conexión con el servidor. Probá de nuevo.';
+        error.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
