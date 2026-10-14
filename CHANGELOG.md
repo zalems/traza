@@ -1,5 +1,13 @@
 # Cambios
 
+## Sin publicar
+
+- `herramientas/muestras-olt-wispro.py`: muestra cómo responden el panel de
+  la OLT y la API de Wispro, para preparar la integración de la 0.6.0. Solo
+  consulta; oculta claves, usuarios, IP y MAC, y de los clientes muestra la
+  forma de los textos y la ubicación redondeada. El token de Wispro se pide
+  sin mostrarlo y no se guarda.
+
 ## 0.5.0 · 14/10/2026
 
 Acomodar la carta, aspecto más real, colores en el recorrido y potencias.
