@@ -10,6 +10,8 @@ const DIA = 24 * 60 * MINUTO;
 export const VIEJO_MS = 30 * MINUTO; // lecturas del panel más viejas que esto: se avisa
 export const DESVIO_DB = 3; // una ONT, o la caja contra la carta, con esta diferencia: se avisa
 const VENTANA_JUNTAS_MS = 3 * MINUTO; // caídas de varias ONTs dentro de esta ventana: juntas
+const SEMANA_CASI = 6.5 * DIA; // una serie que empieza antes que esto cuenta como "los últimos 7 días"
+const TENDENCIA_MIN = 2 * DIA; // con menos datos, una tendencia "por semana" exagera cualquier variación
 const CAIDA = /down|offline|\blos\b|lost|gasp|fail|ca[ií]da/i;
 
 export const tiempo = (iso) => {
@@ -151,14 +153,32 @@ export function medicionVirtual(state, nap, contratos) {
   };
 }
 
+// Cuánto abarca la serie de una ONT (el panel pudo haber dejado de leer un tiempo).
+export function lapsoSerie(tend) {
+  const d = tiempo(tend?.desde);
+  const h = tiempo(tend?.hasta);
+  return d !== null && h !== null && h >= d ? h - d : null;
+}
+
+// La tendencia por semana, solo si la serie alcanza para sacarla (si no, null).
+export function ritmoSemanal(tend) {
+  const l = lapsoSerie(tend);
+  return Number.isFinite(tend?.db_semana) && (l === null || l >= TENDENCIA_MIN) ? tend.db_semana : null;
+}
+
+// Si lo leído cubre la semana: si la serie empieza hace poco (el panel estuvo sin
+// leer), el visor dice "desde el …" en vez de "en los últimos 7 días".
+export const semanaCompleta = (desde, ahora = Date.now()) => desde === null || desde === undefined || ahora - desde >= SEMANA_CASI;
+
 // Caídas, potencia que varía o que viene bajando, en los últimos 7 días, y las
-// ONTs que hoy están fuera de línea.
+// ONTs que hoy están fuera de línea. desde: dónde empieza la serie más corta.
 export function estabilidad(contratos, ahora = Date.now()) {
   const desde = ahora - 7 * DIA;
   const caidas = [];
   const inestables = [];
   const bajando = [];
   let conHistoria = 0;
+  let desdeSerie = null;
   const vistas = new Set();
   for (const c of contratos ?? []) {
     const h = c.historia;
@@ -176,10 +196,13 @@ export function estabilidad(contratos, ahora = Date.now()) {
       caidas.push({ id: ont, cliente: c.cliente, t, causa: c.medida.causa });
     }
     const tend = h?.tendencia;
+    const inicio = tend?.muestras > 0 ? tiempo(tend.desde) : null;
+    if (inicio !== null && (desdeSerie === null || inicio > desdeSerie)) desdeSerie = inicio;
     if (Number.isFinite(tend?.rx_min) && Number.isFinite(tend?.rx_max) && tend.rx_max - tend.rx_min >= 2) {
       inestables.push({ id: c.id, cliente: c.cliente, rango: tend.rx_max - tend.rx_min });
     }
-    if (Number.isFinite(tend?.db_semana) && tend.db_semana <= -0.5) bajando.push({ id: c.id, cliente: c.cliente, ritmo: tend.db_semana });
+    const ritmo = ritmoSemanal(tend);
+    if (ritmo !== null && ritmo <= -0.5) bajando.push({ id: c.id, cliente: c.cliente, ritmo });
   }
   caidas.sort((a, b) => a.t - b.t);
   const grupos = [];
@@ -194,7 +217,7 @@ export function estabilidad(contratos, ahora = Date.now()) {
     const m = medidaVigente(c);
     return !Number.isFinite(m.rx) && m.estado && m.estado !== 'online';
   });
-  return { caidas, juntas, inestables, bajando, fuera, conLectura: conLectura.length, conHistoria };
+  return { caidas, juntas, inestables, bajando, fuera, conLectura: conLectura.length, conHistoria, desde: desdeSerie };
 }
 
 // Los puertos PON donde están las ONTs de la caja: { '0/19/3': 6, ... }.

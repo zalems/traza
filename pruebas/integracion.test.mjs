@@ -107,6 +107,19 @@ assert.deepEqual(est.fuera.map((x) => x.id), ['d']);
 assert.equal(est.conLectura, 4);
 assert.equal(est.conHistoria, 4);
 
+// Una serie corta (el panel estuvo sin leer): de unas horas no se saca una tendencia
+// "por semana", y la semana no se da por cubierta.
+const corta = { rx_min: -21.5, rx_max: -21, muestras: 30, db_semana: -6, desde: '2026-10-14T09:00:00Z', hasta: '2026-10-14T12:00:00Z' };
+const estCorta = I.estabilidad([con('a', [], corta)], ahora);
+assert.equal(I.ritmoSemanal(corta), null);
+assert.deepEqual(estCorta.bajando, []);
+assert.equal(estCorta.desde, Date.parse('2026-10-14T09:00:00Z'));
+assert.equal(I.semanaCompleta(estCorta.desde, ahora), false);
+const larga = { ...corta, desde: '2026-10-07T12:00:00Z' };
+assert.deepEqual(I.estabilidad([con('a', [], larga)], ahora).bajando.map((x) => x.id), ['a']);
+assert.equal(I.semanaCompleta(Date.parse(larga.desde), ahora), true);
+assert.equal(I.semanaCompleta(null, ahora), true);
+
 // La misma ONT en dos contratos: una sola caída, no "dos que se cayeron juntas".
 const misma = { ...panel, panel_id: 77 };
 const dobles = I.estabilidad([con('x', [evento('2026-10-13T22:00:00Z', 'offline')], null, misma),

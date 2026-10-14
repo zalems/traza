@@ -591,7 +591,8 @@ export function setupFicha({ root, red, acciones }) {
       porCliente.get(id).textos.push(texto);
     };
     for (const f of virtual?.bajas ?? []) anotar(f.id, f.cliente, `llega ${formatDb(virtual.boca - f.boca)} por debajo del resto`);
-    for (const x of est.inestables) anotar(x.id, x.cliente, `varió ${formatDb(x.rango)} en la semana`);
+    const enPeriodo = I.semanaCompleta(est.desde) ? 'en la semana' : `desde el ${formatFecha(new Date(est.desde).toISOString())}`;
+    for (const x of est.inestables) anotar(x.id, x.cliente, `varió ${formatDb(x.rango)} ${enPeriodo}`);
     for (const x of est.bajando) anotar(x.id, x.cliente, `viene bajando ${formatDb(-x.ritmo)} por semana`);
     for (const { nombre, textos } of porCliente.values()) {
       const lista = textos.length > 1 ? `${textos.slice(0, -1).join(', ')} y ${textos.at(-1)}` : textos[0];
@@ -735,8 +736,9 @@ export function setupFicha({ root, red, acciones }) {
     // "Sin caídas" solo si el panel está al día y llegó la semana de cada ONT que tiene.
     const conSemana = contratos.some((c) => c.historia?.tendencia?.muestras > 0);
     const historiaCompleta = contratos.every((c) => c.medida?.panel_id === undefined || c.medida?.panel_id === null || c.historia);
+    const periodo = I.semanaCompleta(est.desde) ? 'en los últimos 7 días' : `desde el ${formatFecha(new Date(est.desde).toISOString())}`;
     const bien = !avisos.length && conSemana && historiaCompleta && !I.viejo(d.panel?.leido) && !est.caidas.length
-      ? 'Sin caídas en los últimos 7 días.' : null;
+      ? `Sin caídas ${periodo}.` : null;
     const faltan = contratos.filter((c) => (!c.traza || soloLejos(c.traza)) && c.ubicacion && !c.lejos_m);
 
     const cambiar = boton('Cambiar', () => cargarIntegracion(feature, { candidatas: true }),
@@ -873,16 +875,20 @@ export function setupFicha({ root, red, acciones }) {
     const historia = d.historia;
     const tend = historia?.tendencia;
     const lineas = [];
-    if (tend && Number.isFinite(tend.rx_min) && Number.isFinite(tend.rx_max) && tend.muestras) {
-      lineas.push(`En 7 días: entre ${formatDbm(tend.rx_max)} y ${formatDbm(tend.rx_min)} (${plural(tend.muestras, 'lectura', 'lecturas')})`
-        + (Number.isFinite(tend.db_semana) && Math.abs(tend.db_semana) >= 0.05
-          ? `; ${tend.db_semana < 0 ? 'baja' : 'sube'} ${formatDb(Math.abs(tend.db_semana))} por semana.` : '.'));
-    }
     const est = I.estabilidad([{ id: c?.id ?? 'x', cliente: '', medida: d.medida, historia }]);
+    // Si el panel estuvo sin leer, la serie empieza hace poco: se dice desde cuándo.
+    const completa = I.semanaCompleta(est.desde);
+    const desdeTexto = completa ? '' : `desde el ${formatFecha(new Date(est.desde).toISOString())}`;
+    if (tend && Number.isFinite(tend.rx_min) && Number.isFinite(tend.rx_max) && tend.muestras) {
+      const ritmo = I.ritmoSemanal(tend);
+      lineas.push(`${completa ? 'En 7 días' : `Desde el ${formatFecha(new Date(est.desde).toISOString())}`}: entre ${formatDbm(tend.rx_max)} y ${formatDbm(tend.rx_min)} (${plural(tend.muestras, 'lectura', 'lecturas')})`
+        + (Number.isFinite(ritmo) && Math.abs(ritmo) >= 0.05
+          ? `; ${ritmo < 0 ? 'baja' : 'sube'} ${formatDb(Math.abs(ritmo))} por semana.` : '.'));
+    }
     if (est.caidas.length) {
       const ultimas = est.caidas.slice(-3).reverse().map((x) => `${formatFecha(new Date(x.t).toISOString())}${x.causa ? ` (${x.causa})` : ''}`);
-      lineas.push(`${plural(est.caidas.length, 'caída', 'caídas')} en 7 días: ${ultimas.join(', ')}${est.caidas.length > 3 ? '…' : ''}.`);
-    } else if (tend?.muestras > 0 && !I.viejo(d.panel?.leido)) lineas.push('Sin caídas en los últimos 7 días.');
+      lineas.push(`${plural(est.caidas.length, 'caída', 'caídas')} ${completa ? 'en 7 días' : desdeTexto}: ${ultimas.join(', ')}${est.caidas.length > 3 ? '…' : ''}.`);
+    } else if (tend?.muestras > 0 && !I.viejo(d.panel?.leido)) lineas.push(`Sin caídas ${completa ? 'en los últimos 7 días' : desdeTexto}.`);
     const avisos = [];
     // La lectura es vieja si el panel dejó de leer la OLT (una ONT apagada tiene su última lectura vieja, y está bien).
     if (m?.fuente === 'panel' && d.panel?.leido && I.viejo(d.panel.leido)) {

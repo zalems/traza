@@ -1,6 +1,16 @@
 # Cambios
 
-## 0.6.0 · 14/10/2026
+## 0.6.1 · 14/10/2026
+
+Lecturas de la OLT con huecos: el visor no afirma más de lo que tiene.
+
+- Si la historia de una ONT empieza hace poco (el panel de la OLT estuvo un
+  tiempo sin leer), la ficha dice "desde el …" en vez de "en los últimos 7
+  días" (rango de potencia, caídas, "sin caídas" y lo que varió).
+- La tendencia "viene bajando X dB por semana" se calcula solo con al menos
+  2 días de lecturas: sacada de unas horas exageraba cualquier variación.
+
+## 0.6.0 · 14/10/2026 · commit 5ea5b6d
 
 Wispro y el panel de la OLT en las NAP: clientes de cada caja, potencias,
 medición virtual y estabilidad.

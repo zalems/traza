@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.6.0
+# Plataforma FTTH · kit 0.6.1
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -267,7 +267,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.6.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.6.1-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -304,21 +304,22 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.6.0
-a 0.5.0 alcanza con `git checkout 59f7e0f` e instalar: misma estructura de
-base; la conexión con Wispro queda guardada sin usarse y los clientes
-agregados desde Wispro quedan como cualquier otro. La copia diaria de 0.5.0
-no incluye `integraciones.json` (queda igual en `data/`), y
-`bin/integraciones` queda pero no anda con la API de 0.5.0: se puede borrar
-con `rm /srv/ftth/bin/integraciones`. De 0.5.0
-a 0.4.0 alcanza con `git checkout 6006a67` e instalar: usan la misma
-estructura de base. Después hay que recargar la página en todos los
-dispositivos (una pestaña de 0.5.0 que quede abierta puede borrar cómo están
-acomodadas las cartas), y lo acomodado se pierde en cada carta la primera vez
-que se cambia un cable de lado en 0.4.0. Para volver a una versión con una
-estructura de base anterior (por ejemplo de 0.4.0 a 0.3.0), se restaura la
-copia que el script hizo antes de actualizar y se instala la versión vieja; lo
-cargado después de esa copia se pierde:
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.6.1 a
+0.6.0 alcanza con `git checkout 5ea5b6d` e instalar (solo cambia el visor). De
+0.6.0 a 0.5.0 alcanza con `git checkout 59f7e0f` e instalar: misma estructura
+de base; la conexión con Wispro queda guardada sin usarse y los clientes
+agregados desde Wispro quedan como cualquier otro. La copia diaria de 0.5.0 no
+incluye `integraciones.json` (queda igual en `data/`), y `bin/integraciones`
+queda pero no anda con la API de 0.5.0: se puede borrar con
+`rm /srv/ftth/bin/integraciones`. De 0.5.0 a 0.4.0 alcanza con
+`git checkout 6006a67` e instalar: usan la misma estructura de base. Después
+hay que recargar la página en todos los dispositivos (una pestaña de 0.5.0 que
+quede abierta puede borrar cómo están acomodadas las cartas), y lo acomodado
+se pierde en cada carta la primera vez que se cambia un cable de lado en
+0.4.0. Para volver a una versión con una estructura de base anterior (por
+ejemplo de 0.4.0 a 0.3.0), se restaura la copia que el script hizo antes de
+actualizar y se instala la versión vieja; lo cargado después de esa copia se
+pierde:
 
 ```bash
 systemctl stop ftth-api
