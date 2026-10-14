@@ -149,7 +149,7 @@ def panel(base, olt_elegida):
 
     estado, dato, s = pedir(f"{base}/api/olts/{oid}/summary")
     titulo(f"Resumen: GET /api/olts/{oid}/summary", estado, s)
-    imprimir(resumir(dato, personal=False))
+    imprimir(resumir(dato))
 
     estado, dato, s = pedir(f"{base}/api/olts/{oid}/onts")
     titulo(f"ONTs: GET /api/olts/{oid}/onts", estado, s)
@@ -193,7 +193,7 @@ def panel(base, olt_elegida):
     if slot is not None and port is not None:
         estado, dato, s = pedir(f"{base}/api/olts/{oid}/ports/{slot}/{port}/series")
         titulo(f"Serie de su puerto PON: GET /api/olts/{oid}/ports/{slot}/{port}/series", estado, s)
-        imprimir(resumir(dato, personal=False))
+        imprimir(resumir(dato))
     estado, dato, s = pedir(f"{base}/api/thresholds")
     titulo("Umbrales: GET /api/thresholds", estado, s)
     imprimir(resumir(dato, personal=False))
@@ -228,7 +228,8 @@ def wispro(base):
         print("Wispro no aceptó el token. Revisalo (Configuración avanzada → ISP) y volvé a correr el comando.")
         return
     print("Paginación:", paginas(dato))
-    imprimir(resumir(dato.get("data"), personal=True, nombres_visibles=True))
+    olts = [o for o in (dato.get("data") or []) if isinstance(o, dict)]
+    imprimir(resumir(olts, personal=True, nombres_visibles=True))
 
     dato = get("/naps?per_page=1000")
     naps = [n for n in (dato.get("data") or []) if isinstance(n, dict)]
@@ -239,24 +240,30 @@ def wispro(base):
           f"contratos en total: {sum(n.get('contracts_count') or 0 for n in naps)}")
     print("Primeros nombres:", ", ".join(str(n.get("name")) for n in naps[:15]))
     print("Valores de fbp:", ", ".join(str(n.get("fbp")) for n in naps[:15]))
+    for o in olts:
+        de_esta = [n for n in naps if n.get("olt_id") == o.get("id")]
+        print(f"NAPs de la OLT {o.get('name')}: {len(de_esta)}, con {sum(n.get('contracts_count') or 0 for n in de_esta)} contratos; "
+              f"fbp: {', '.join(sorted({str(n.get('fbp')) for n in de_esta})[:12])}")
     imprimir(resumir(naps[:2], personal=True, decimales=4, nombres_visibles=True))
 
-    con = sorted((n for n in naps if (n.get("contracts_count") or 0) > 0), key=lambda n: n.get("contracts_count"))
-    contrato = None
-    if con:
-        nap = con[0]
+    # Una NAP de la OLT Huawei (si hay) con algunos contratos, para ver números de serie e interfaces.
+    huawei = {o.get("id") for o in olts if "huawei" in json.dumps(o, default=str).lower()}
+    con = sorted((n for n in naps if (n.get("contracts_count") or 0) >= 2),
+                 key=lambda n: (n.get("olt_id") not in huawei, n.get("contracts_count") or 0))
+    con_ont = []
+    for nap in con[:3]:
         dato = get(f"/contracts?nap_id_eq={urllib.parse.quote(str(nap.get('id')))}&per_page=1000")
         contratos = [c for c in (dato.get("data") or []) if isinstance(c, dict)]
-        print("Paginación:", paginas(dato))
         print(f"La NAP {nap.get('name')} dice {nap.get('contracts_count')} contratos; el filtro devolvió {len(contratos)}.")
-        if contratos:
-            contrato = contratos[0]
-            print("Campos del contrato:", ", ".join(sorted(contrato)))
-            ftth = {k: v for k, v in contrato.items() if FTTH.search(k) and not OCULTAR.search(k)}
-            print("Campos de fibra:", json.dumps(ftth, ensure_ascii=False, default=str))
-            imprimir(resumir(contrato))
-    if contrato:
-        dato = get(f"/contracts/{contrato.get('id')}/status_ont")
+        for c in contratos[:4]:
+            ftth = {k: c.get(k) for k in ("public_id", "state", "nap_name", "ont_serial_number", "ont_number",
+                                           "interface_gpon", "ont_id", "fiber_id", "olt_id")}
+            print("  ", json.dumps(ftth, ensure_ascii=False, default=str))
+        con_ont += [c for c in contratos if c.get("ont_serial_number")]
+        if len(con_ont) >= 2:
+            break
+    for c in con_ont[:2]:
+        dato = get(f"/contracts/{c.get('id')}/status_ont")
         imprimir(resumir(dato, personal=False))
 
     dato = get("/contracts?per_page=1")
