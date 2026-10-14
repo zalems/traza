@@ -1,6 +1,47 @@
 # Cambios
 
-## 0.4.0 · 14/10/2026
+## 0.5.0 · 14/10/2026
+
+Acomodar la carta, aspecto más real, colores en el recorrido y potencias.
+
+- Carta en columnas: cada cable y equipo se sube, se baja o se pasa de lado
+  arrastrándolo desde su asa (con el mouse, también desde el nombre), con
+  los botones Subir y Bajar o con las flechas. El orden queda guardado para
+  todos.
+- Carta libre: cada cable y equipo donde se lo deja, sobre una bandeja con
+  zoom (dos dedos, rueda con Control, + y −) que se mueve arrastrando el
+  fondo; "Ajustar" y "Reacomodar". Las posiciones quedan guardadas para
+  todos; columnas o libre lo elige cada dispositivo. Acomodar no traba la
+  carta: se ve al instante y se guarda un momento después; después de
+  arrastrar o reacomodar se puede deshacer. Acomodar no choca con quien está
+  editando la ficha del elemento (el servidor deja pasar la edición si lo
+  único que cambió en el medio es la disposición).
+- Pasar una unión a otra fibra o puerto sin quitarla (`PUT /api/fusiones/ID`),
+  con el tipo recalculado (conector si el equipo tiene conectores) y quién la
+  movió.
+- Aspecto más real: la chaqueta de cada cable con la raya de su tipo, tubos
+  con volumen y anillos del 13 en adelante, fibras como cuentas con brillo,
+  uniones como fibras de dos colores con su protector de empalme (o el
+  adaptador SC, verde APC o azul UPC), splitters y OLT como cajas con sus
+  bocas. Lo que pasa sin cortar se dibuja junto, un trazo por color, para
+  que un cable grande se vea rápido.
+- Recorrido: en el mapa, cada tramo con el color de su fibra rodeado por el
+  de su tubo (las marcas como anillos), cambiando en cada empalme; en la
+  lista, el color de cada tramo.
+- Potencia estimada a lo largo del recorrido desde la potencia de la OLT
+  (0,3 dB/km, 0,1 dB por fusión, 0,5 dB por conector, PLC según salidas,
+  desbalanceados según el porcentaje), y en la ficha del cliente, comparada
+  con la medida en la ONT.
+- `/api/salud` informa, a quien tiene la clave de nginx, el código de la API
+  que atiende; el instalador verifica que sea el recién instalado antes de
+  publicar el visor nuevo (que no quedó una API vieja andando).
+- La API rechaza con 400 (no con un error interno) números imposibles en
+  coordenadas y posiciones, y NaN o Infinity en el cuerpo.
+- La disposición de la carta (`carta` del elemento) llega como cambio
+  parcial: `lados`, `orden` y `pos` (las posiciones se suman; `null` quita).
+- Pruebas de la lógica de fibras del visor en `pruebas/fibras.test.mjs`.
+
+## 0.4.0 · 14/10/2026 · commit 6006a67
 
 Cartas de empalme.
 

@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.4.0
+# Plataforma FTTH · kit 0.5.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -58,11 +58,31 @@ se consultan recién cuando alguien las elige.
   conector; en el nodo, la OLT con sus puertos PON. "Ver lista" la muestra
   como tabla y "Copiar" la deja como texto para mandar por mensaje. Si un
   cable termina cerca sin quedar pegado, la carta ofrece pegarlo.
+- **Acomodar la carta.** En "Columnas", cada cable y equipo se sube, se baja
+  o se pasa de lado arrastrándolo desde su asa (los seis puntos), con los
+  botones Subir y Bajar o con las flechas del teclado. En "Libre", cada uno
+  va donde se lo deja, sobre una bandeja que se mueve arrastrando el fondo y
+  se acerca con dos dedos, con la rueda y Control o con + y −; "Ajustar"
+  muestra toda la carta y "Reacomodar" vuelve a ponerla en columnas. Lo que
+  se acomoda queda guardado para todos (después de arrastrar o reacomodar,
+  "Deshacer" lo vuelve atrás); columnas o libre lo elige cada dispositivo (en
+  el teléfono suelen convenir las columnas). Acomodar no le quita a nadie lo
+  que está editando en la ficha del elemento.
+- **Pasar una unión a otra fibra.** Tocando una unión, "Pasar a otra fibra",
+  se elige qué punta se mueve y se toca la fibra o el puerto nuevo: la unión
+  cambia sin quitarla y volver a hacerla, y queda dicho quién la movió.
 - **Recorrido de un pelo.** Desde una unión de la carta, una fibra de la
   ficha del cable o la ficha del cliente: por dónde va el pelo, de la OLT al
-  cliente, con largo, fusiones, conectores y splitters, y resaltado en el
-  mapa. La ficha del cliente dice en qué NAP y puerto está conectado y de qué
-  PON viene.
+  cliente, con largo, fusiones, conectores y splitters. En el mapa cada tramo
+  se pinta con el color de su fibra, rodeado por el de su tubo, y cambia en
+  cada empalme. La ficha del cliente dice en qué NAP y puerto está conectado
+  y de qué PON viene.
+- **Potencia estimada.** Si la OLT tiene cargada su potencia de salida, el
+  recorrido dice con cuánto se llega después de cada fusión, conector y
+  splitter, y la ficha del cliente la compara con la potencia medida en la
+  ONT (3 dB o más por debajo es para revisar). Se estima con 0,3 dB/km,
+  0,1 dB por fusión, 0,5 dB por conector y la pérdida típica de cada splitter
+  (PLC 1x8: 10,5 dB; desbalanceado: según el porcentaje de cada salida).
 - **Ver, mover, editar, borrar.** Con "Ver", tocar algo abre su ficha. Desde
   la ficha: Editar, Mover (y tocar el lugar nuevo), Trazado en los cables
   (mover puntos, agregar con los puntos blancos intermedios, quitar), Borrar.
@@ -220,10 +240,15 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. Para
-volver todo (por ejemplo de 0.4.0 a 0.3.0, que usa una estructura de base
-anterior), se restaura la copia que el script hizo antes de actualizar y se
-instala la versión vieja; lo cargado después de esa copia se pierde:
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.5.0
+a 0.4.0 alcanza con `git checkout 6006a67` e instalar: usan la misma
+estructura de base. Después hay que recargar la página en todos los
+dispositivos (una pestaña de 0.5.0 que quede abierta puede borrar cómo están
+acomodadas las cartas), y lo acomodado se pierde en cada carta la primera vez
+que se cambia un cable de lado en 0.4.0. Para volver a una versión con una
+estructura de base anterior (por ejemplo de 0.4.0 a 0.3.0), se restaura la
+copia que el script hizo antes de actualizar y se instala la versión vieja; lo
+cargado después de esa copia se pierde:
 
 ```bash
 systemctl stop ftth-api
@@ -318,7 +343,10 @@ instalación normal sirve de referencia.
 
 `python3 -m unittest discover -s pruebas` prueba la API (validaciones,
 cables pegados que siguen a los elementos, conflictos entre dos usuarios,
-historial, clave de nginx) con una base temporal.
+historial, clave de nginx, cartas de empalme y su disposición) con una base
+temporal. `node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores,
+recorridos y potencias del visor (Node 20.19 o más nuevo; el de Debian 13
+sirve).
 
 ## Qué se probó y qué no
 
@@ -338,10 +366,15 @@ Probado en una instalación real (0.2.0, Debian 13 en LXC con systemd): la
 descarga de `pmtiles` desde GitHub, systemd para nginx y el servicio de
 sesión, y la emisión del certificado con certbot.
 
-No se pudo probar, y hay que mirarlo en la primera actualización real:
+Probado en la instalación real (Debian 13 en LXC con systemd): el servicio
+`ftth-api` (0.3.0 y 0.4.0) y la actualización de 0.3.0 a 0.4.0 con la copia
+previa y la migración de la base.
 
-- El servicio nuevo `ftth-api` con systemd (unidad, arranque, reinicio).
-- Teléfonos reales, Safari y Firefox.
+No se pudo probar, y hay que mirarlo en el uso real:
+
+- Teléfonos reales, Safari y Firefox (en especial arrastrar y pellizcar en
+  la carta en modo libre).
+- El timer de systemd de la copia diaria funcionando solo.
 - Ubuntu 22.04 y la arquitectura arm64.
 
 ## Licencias

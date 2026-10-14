@@ -245,7 +245,12 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.pedir("POST", "/api/equipos", {"elemento": "--4", "tipo": "splitter"})[0], 400)
         self.assertEqual(self.pedir("POST", "/api/fusiones/borrar", {"ids": ["--3"]})[0], 400)
         self.assertEqual(self.pedir("DELETE", "/api/fusiones/1?version=--2")[0], 400)
-        self.assertEqual(self.ok("GET", "/api/salud", usuario=None)["esquema"], api.ESQUEMA)
+        salud = self.ok("GET", "/api/salud", usuario=None)
+        self.assertEqual(salud["esquema"], api.ESQUEMA)
+        # El código que atiende es el del archivo (el instalador lo compara con el instalado).
+        import hashlib
+        with open(os.path.join(RAIZ, "api", "ftth-api.py"), "rb") as fh:
+            self.assertEqual(salud["codigo"], hashlib.sha256(fh.read()).hexdigest()[:12])
         self.assertEqual(self.pedir("GET", f"/api/cambios?red={red}&desde={2 ** 70}")[0], 400)
         self.assertEqual(self.pedir("GET", f"/api/red?red={2 ** 70}")[0], 400)
         self.assertEqual(self.pedir("GET", "/api/elementos/%C2%B2")[0], 404)
@@ -528,6 +533,147 @@ class ApiTest(unittest.TestCase):
         red = self.ok("GET", f"/api/red?red={x['red']}")
         self.assertEqual(red["fusiones"], [])
         self.assertEqual([e["tipo"] for e in red["equipos"]], ["olt"])
+
+    def test_disposicion_de_la_carta(self):
+        x = self.armar("Disposición")
+        t, r, bot = x["t"], x["r"], x["bot"]
+        url = f"/api/elementos/{bot['id']}"
+        poner = lambda carta, **kw: self.ok("PUT", url, {"carta": carta}, **kw)["elemento"]["properties"]["carta"]  # noqa: E731
+        lados = {f"c{t}:a": "i", f"c{r}:b": "d"}
+        self.assertEqual(poner({"lados": lados}), {"lados": lados})
+        # Cada parte llega por separado y lo demás queda como estaba.
+        orden = [f"c{r}:b", f"c{t}:a", "q7"]
+        self.assertEqual(poner({"orden": orden}), {"lados": lados, "orden": orden})
+        c = poner({"pos": {f"c{t}:a": [10.4, -20], f"c{r}:b": [300, 40]}})
+        self.assertEqual(c["pos"], {f"c{t}:a": [10, -20], f"c{r}:b": [300, 40]})
+        # Las posiciones se suman; null quita una.
+        c = poner({"pos": {f"c{t}:a": [50, 60], "q7": [0, 0], f"c{r}:b": None}})
+        self.assertEqual(c["pos"], {f"c{t}:a": [50, 60], "q7": [0, 0]})
+        self.assertEqual((c["lados"], c["orden"]), (lados, orden))
+        # Columnas o libre es de cada dispositivo: no se guarda (se descarta).
+        c = poner({"modo": "libre"})
+        self.assertNotIn("modo", c)
+        self.assertEqual(c["pos"], {f"c{t}:a": [50, 60], "q7": [0, 0]})
+        self.assertEqual(poner({"pos": None, "orden": None}), {"lados": lados})
+        self.assertEqual(poner({}), {"lados": lados})  # sin cambios
+        self.assertEqual(poner(None), {})  # todo automático otra vez
+        # Lo que no es de la disposición se descarta; lo mal formado es 400.
+        self.assertEqual(poner({"color": "rojo", "lados": None}), {})
+        malos = [
+            {"orden": "c1:a"}, {"orden": ["c1:a", "c1:a"]}, {"orden": ["x"]}, {"orden": [f"c{t}:c"]},
+            {"pos": []}, {"pos": {"c1:a": [1]}}, {"pos": {"c1:a": [1, "2"]}},
+            {"pos": {"c1:a": [1, True]}}, {"pos": {"c1:a": [1, 1e9]}}, {"pos": {"zz": [1, 2]}},
+            {"lados": []}, {"lados": {"q3": "i"}},
+        ]
+        for malo in malos:
+            with self.subTest(malo=malo):
+                self.assertEqual(self.pedir("PUT", url, {"carta": malo})[0], 400)
+        demasiadas = {f"q{i}": [i, i] for i in range(1, 802)}
+        self.assertEqual(self.pedir("PUT", url, {"carta": {"pos": demasiadas}})[0], 400)
+        # Acomodar no exige versión ni pisa el resto del elemento.
+        self.ok("PUT", url, {"nombre": "BOT-1"})
+        e = self.ok("PUT", url, {"carta": {"orden": ["q1"]}})["elemento"]
+        self.assertEqual((e["properties"]["nombre"], e["properties"]["carta"]), ("BOT-1", {"orden": ["q1"]}))
+        # Un elemento nuevo puede llegar con su disposición.
+        nuevo = self.elemento(x["red"], "caja", -58.1, -26.1, "CJ", carta={"pos": {"q1": [1, 2]}})
+        self.assertEqual(nuevo["properties"]["carta"], {"pos": {"q1": [1, 2]}})
+
+    def test_pasar_una_union_a_otra_fibra(self):
+        x = self.armar("Mover uniones")
+        t, r, bot, nap = x["t"], x["r"], x["bot"], x["nap"]
+        f = self.unir(bot, [(f"c{t}:a:1", f"c{r}:b:1")])["fusiones"][0]
+        g = self.unir(bot, [(f"c{t}:a:2", f"c{r}:b:2")])["fusiones"][0]
+        url = f"/api/fusiones/{f['id']}"
+        movida = self.ok("PUT", url, {"b": f"c{r}:b:3", "version": f["version"]}, usuario="beto")["fusiones"][0]
+        self.assertEqual((movida["id"], movida["a"], movida["b"], movida["tipo"], movida["modificado_por"], movida["creado_por"]),
+                         (f["id"], f"c{t}:a:1", f"c{r}:b:3", "fusion", "beto", "ana"))
+        # Con la versión vieja: 409 con la unión actual.
+        code, data = self.pedir("PUT", url, {"b": f"c{r}:b:4", "version": f["version"]})
+        self.assertEqual(code, 409, data)
+        # A una fibra ya unida: 409 con la unión que la ocupa.
+        code, data = self.pedir("PUT", url, {"a": f"c{t}:a:2"})
+        self.assertEqual(code, 409, data)
+        self.assertEqual(data["fusiones"][0]["id"], g["id"])
+        malos = [
+            ({"a": f"c{r}:b:3"}, 400),          # consigo misma
+            ({"b": f"c{r}:b:13"}, 400),         # R tiene 12 fibras
+            ({"b": f"c{r}:a:5"}, 409),          # R no llega a BOT por el lado a
+            ({"b": f"c{x['d']}:a:1"}, 409),     # D no pasa por BOT
+            ({"b": "nada"}, 400),
+            ({}, 400),
+        ]
+        for cuerpo, esperado in malos:
+            with self.subTest(cuerpo=cuerpo):
+                self.assertEqual(self.pedir("PUT", url, cuerpo)[0], esperado)
+        self.assertEqual(self.pedir("PUT", "/api/fusiones/99999", {"a": f"c{t}:a:9"})[0], 404)
+        # Sin cambios: responde la misma unión.
+        igual = self.ok("PUT", url, {"a": f"c{t}:a:1"})["fusiones"][0]
+        self.assertEqual(igual["version"], movida["version"])
+        # A un splitter con conectores: pasa a ser conector; de vuelta a una fibra, fusión.
+        spl = self.ok("POST", "/api/equipos", {"elemento": nap["id"], "tipo": "splitter", "salidas": 8,
+                                                "datos": {"modo": "plc", "conectores": True}}, status=201)["equipos"][0]
+        # En la NAP termina T (lado a) y empieza D (lado b).
+        h = self.unir(nap, [(f"c{t}:a:1", f"c{x['d']}:b:1")])["fusiones"][0]
+        self.assertEqual(h["tipo"], "fusion")
+        h = self.ok("PUT", f"/api/fusiones/{h['id']}", {"a": f"q{spl['id']}:s:3"})["fusiones"][0]
+        self.assertEqual((h["a"], h["tipo"]), (f"q{spl['id']}:s:3", "conector"))
+        h = self.ok("PUT", f"/api/fusiones/{h['id']}", {"a": f"c{t}:a:4"})["fusiones"][0]
+        self.assertEqual(h["tipo"], "fusion")
+        self.assertEqual(self.pedir("PUT", f"/api/fusiones/{h['id']}", {"a": f"q{spl['id']}:s:1", "b": f"q{spl['id']}:e:1"})[0], 400)
+        # Queda en el historial con lo que había antes, y los demás lo ven en los cambios.
+        hist = self.ok("GET", f"/api/historial?red={x['red']}&limite=1")["historial"][0]
+        self.assertEqual((hist["accion"], hist["tabla"]), ("editar", "fusiones"))
+        self.assertEqual(hist["detalle"]["antes"]["a"], f"q{spl['id']}:s:3")
+        cambios = self.ok("GET", f"/api/cambios?red={x['red']}&desde={h['version'] - 1}")
+        self.assertEqual([c["id"] for c in cambios["fusiones"]], [h["id"]])
+
+    def test_acomodar_no_choca_con_editar(self):
+        x = self.armar("Acomodar y editar")
+        bot = x["bot"]
+        url = f"/api/elementos/{bot['id']}"
+        v0 = bot["properties"]["version"]
+        # Otro acomoda la carta dos veces mientras uno tiene la ficha abierta.
+        self.ok("PUT", url, {"carta": {"orden": [f"c{x['r']}:b"]}}, usuario="beto")
+        self.ok("PUT", url, {"carta": {"pos": {f"c{x['r']}:b": [10, 20]}}}, usuario="beto")
+        e = self.ok("PUT", url, {"notas": "revisada", "version": v0})["elemento"]
+        self.assertEqual(e["properties"]["notas"], "revisada")
+        self.assertEqual(e["properties"]["carta"]["pos"], {f"c{x['r']}:b": [10, 20]})  # lo acomodado queda
+        # Pero si otro editó de verdad, sí choca.
+        v1 = e["properties"]["version"]
+        self.ok("PUT", url, {"nombre": "BOT-B"}, usuario="beto")
+        self.ok("PUT", url, {"carta": {"orden": []}}, usuario="beto")
+        self.assertEqual(self.pedir("PUT", url, {"notas": "otra", "version": v1})[0], 409)
+        # Acomodar con una versión vieja también choca (la disposición sí se controla).
+        self.assertEqual(self.pedir("PUT", url, {"carta": {"orden": []}, "version": v1})[0], 409)
+        # Borrar con la versión de antes de que solo se acomodara: se puede.
+        nap2 = x["nap2"]
+        u2 = f"/api/elementos/{nap2['id']}"
+        self.ok("PUT", u2, {"carta": {"pos": {"q1": [0, 0]}}}, usuario="beto")
+        self.ok("DELETE", f"{u2}?version={nap2['properties']['version']}")
+        # El historial de acomodar es corto: la versión y la disposición de antes.
+        hist = [h for h in self.ok("GET", f"/api/historial?red={x['red']}&limite=50")["historial"] if h["accion"] == "ordenar"]
+        self.assertTrue(hist)
+        self.assertEqual(set(hist[0]["detalle"]["antes"]["properties"]), {"version", "carta"})
+
+    def test_numeros_imposibles(self):
+        red = self.nueva_red("Números")
+        e = self.elemento(red, "caja", -58.1, -26.1, "CJ")
+        url = f"/api/elementos/{e['id']}"
+        for carta in ({"pos": {"q1": [10 ** 400, 0]}}, {"pos": {"q1": [1.5e308 * 10, 0]}}):
+            with self.subTest(carta=carta):
+                self.assertEqual(self.pedir("PUT", url, {"carta": carta})[0], 400)
+        self.assertEqual(self.pedir("PUT", url, {"lon": 10 ** 400, "lat": 0})[0], 400)
+        self.assertEqual(self.pedir("PUT", url, raw=b'{"lon": NaN, "lat": 0}', headers={"Content-Type": "application/json"})[0], 400)
+
+    def test_salud_con_y_sin_clave(self):
+        api.Handler.secreto = "k" * 40
+        try:
+            salud = self.ok("GET", "/api/salud", usuario=None)
+            self.assertNotIn("codigo", salud)  # sin la clave no se informa
+            salud = self.ok("GET", "/api/salud", usuario=None, headers={"X-Ftth-Secreto": "k" * 40})
+            self.assertEqual(salud["codigo"], api.CODIGO)
+        finally:
+            api.Handler.secreto = ""
 
 
 if __name__ == "__main__":

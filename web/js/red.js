@@ -11,6 +11,7 @@ const POLL_MS = 10000;
 const REINTENTO_MS = 8000;
 const ESPERA_CARGA_MS = 90000; // una red grande por 3G tarda en bajar
 const SIGNAL = '#e8590c';
+const TINTA = '#16222c';
 
 const FONT_REGULAR = ['Noto Sans Regular'];
 const FONT_MEDIUM = ['Noto Sans Medium'];
@@ -134,20 +135,47 @@ export function setupRed({ map, maplibregl, usuario }) {
       paint: { 'text-color': '#16222c', ...halo },
     });
 
-    // Recorrido de un pelo: por dónde va, encima de los cables y debajo de los elementos.
+    // Recorrido de un pelo, encima de los cables y debajo de los elementos: cada
+    // tramo con el color de su fibra, rodeado por el de su tubo (o tinta, si el
+    // cable tiene uno solo); un borde de tinta deja ver hasta la fibra blanca.
+    // Del 13 en adelante, la marca va como anillos.
+    const anchoRec = (desde, hasta) => ['interpolate', ['linear'], ['zoom'], 12, desde, 18, hasta];
+    const redondo = { 'line-cap': 'round', 'line-join': 'round' };
     add({
       id: 'red-recorrido-halo',
       type: 'line',
       source: 'red-recorrido',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 7, 18, 14], 'line-opacity': 0.9 },
+      layout: redondo,
+      paint: { 'line-color': '#ffffff', 'line-width': anchoRec(11, 20), 'line-opacity': 0.92 },
+    });
+    add({
+      id: 'red-recorrido-tubo',
+      type: 'line',
+      source: 'red-recorrido',
+      layout: redondo,
+      paint: { 'line-color': ['coalesce', ['get', 'tubo'], TINTA], 'line-width': anchoRec(8, 15) },
+    });
+    add({
+      id: 'red-recorrido-borde',
+      type: 'line',
+      source: 'red-recorrido',
+      layout: redondo,
+      paint: { 'line-color': TINTA, 'line-width': anchoRec(5, 9.5) },
     });
     add({
       id: 'red-recorrido',
       type: 'line',
       source: 'red-recorrido',
-      layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': SIGNAL, 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 3.5, 18, 7] },
+      layout: redondo,
+      paint: { 'line-color': ['coalesce', ['get', 'color'], SIGNAL], 'line-width': anchoRec(3.2, 6.5) },
+    });
+    add({
+      id: 'red-recorrido-marca',
+      type: 'line',
+      source: 'red-recorrido',
+      filter: ['>', ['get', 'marcas'], 0],
+      layout: { 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-color': ['get', 'marca'], 'line-width': anchoRec(3.2, 6.5), 'line-dasharray': [0.45, 2.2] },
     });
 
     add({
@@ -559,11 +587,20 @@ export function setupRed({ map, maplibregl, usuario }) {
     if (ready) map.getSource('red-dibujo').setData(collection(features));
   }
 
-  // Resalta en el mapa los tramos de un recorrido (listas de coordenadas).
-  function resaltarRecorrido(lineas) {
+  // Resalta en el mapa los tramos de un recorrido, cada uno con los colores de
+  // su fibra y de su tubo (los da fibras.recorrido en "segmentos").
+  function resaltarRecorrido(segmentos) {
     if (!ready) return;
-    const features = (lineas ?? []).filter((l) => l.length >= 2)
-      .map((coordinates) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }));
+    const features = (segmentos ?? []).filter((x) => x.coords?.length >= 2).map((x) => ({
+      type: 'Feature',
+      properties: {
+        color: x.color?.hex ?? null,
+        tubo: x.tubo?.hex ?? null,
+        marcas: x.color?.marcas ?? 0,
+        marca: x.color?.marca ?? TINTA,
+      },
+      geometry: { type: 'LineString', coordinates: x.coords },
+    }));
     map.getSource('red-recorrido').setData(collection(features));
   }
 

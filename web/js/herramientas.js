@@ -271,7 +271,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
         ext,
         volver: desdeCarta && elemento ? () => acciones.abrirCarta(red.state.elementos.get(elementoId) ?? elemento, ext) : null,
       });
-      red.resaltarRecorrido(resultado.lineas);
+      red.resaltarRecorrido(resultado.segmentos);
       encuadrar(resultado.lineas.flat(), elemento?.geometry.coordinates);
     },
     limpiarRecorrido() {

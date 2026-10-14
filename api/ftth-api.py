@@ -7,7 +7,8 @@ con sesión y agrega dos cabeceras: X-Usuario (la obtiene de ftth-auth.py) y
 X-Ftth-Secreto, una clave que comparten nginx y este servicio para que ningún
 otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx.
 
-  GET    /api/salud                    el servicio está vivo (sin sesión)
+  GET    /api/salud                    el servicio está vivo (sin sesión): esquema de la base y, con
+                                       la clave de nginx, el código del programa que atiende
   GET    /api/yo                       quién está conectado
   GET    /api/redes                    redes (una por cliente o despliegue)
   POST   /api/redes                    {nombre}
@@ -15,7 +16,9 @@ otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx
   GET    /api/red?red=ID               toda la red (GeoJSON, equipos y uniones) y la versión actual
   GET    /api/cambios?red=ID&desde=V   lo que cambió después de la versión V (incluye bajas)
   POST   /api/elementos                {red, tipo, nombre, estado, lon, lat, datos, notas}
-  PUT    /api/elementos/ID             los mismos campos y carta, todos opcionales; mover = lon y lat
+  PUT    /api/elementos/ID             los mismos campos y carta, todos opcionales; mover = lon y lat.
+                                       carta es la disposición de la carta de empalme y llega como
+                                       cambio parcial: {lados, orden, pos} (ver carta_field)
   DELETE /api/elementos/ID?version=V   baja lógica; los cables pegados quedan sueltos en ese punto
   POST   /api/cables                   {red, nombre, tipo, fibras, por_tubo, colores, estado, tendido, coords, nodos, datos, notas}
   PUT    /api/cables/ID
@@ -24,6 +27,7 @@ otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx
   PUT    /api/equipos/ID
   DELETE /api/equipos/ID?version=V     también quita las uniones de sus puertos
   POST   /api/fusiones                 {elemento, pares: [{a, b}], tipo}: une fibras y puertos en un elemento
+  PUT    /api/fusiones/ID              {a o b, version}: pasa una punta de la unión a otra fibra o puerto
   DELETE /api/fusiones/ID?version=V
   POST   /api/fusiones/borrar          {ids}: quita varias uniones (deshacer)
   GET    /api/historial?red=ID&limite=N   últimos cambios (quién, qué, cuándo)
@@ -43,6 +47,7 @@ Uso:
 """
 
 import argparse
+import hashlib
 import hmac
 import json
 import logging
@@ -66,6 +71,9 @@ MAX_FIBRAS = 864
 MAX_POR_TUBO = 48
 MAX_PARES = 864
 MAX_LADOS = 400
+MAX_BLOQUES = 800  # cables y equipos que se pueden acomodar en una carta
+MAX_POS = 100000  # coordenadas del modo libre, en píxeles
+MAX_CARTA = 96 * 1024
 
 TIPOS_ELEMENTO = ("nodo", "poste", "caja", "nap", "botella", "cliente", "reserva")
 TIPOS_CABLE = ("troncal", "distribucion", "bajada")
@@ -86,11 +94,27 @@ TIPOS_UNION = ("fusion", "conector")
 EXTREMO_CABLE = re.compile(r"c([1-9][0-9]{0,15}):([ab]):([1-9][0-9]{0,3})")
 EXTREMO_EQUIPO = re.compile(r"q([1-9][0-9]{0,15}):([es]):([1-9][0-9]{0,3})")
 LADO_CARTA = re.compile(r"c([1-9][0-9]{0,15}):([ab])")
+# Un bloque de la carta: el lado de un cable (c12:a) o un equipo (q3).
+BLOQUE_CARTA = re.compile(r"c[1-9][0-9]{0,15}:[ab]|q[1-9][0-9]{0,15}")
 RELACION_FBT = re.compile(r"([1-9][0-9]?)/([1-9][0-9]?)")
 
 # Versión del esquema de la base (PRAGMA user_version). Cada cambio de
 # estructura suma un paso en MIGRACIONES.
 ESQUEMA = 2
+
+
+def codigo_propio() -> str:
+    """Resumen de este archivo tal como se cargó: el instalador lo compara con el
+    instalado para saber que la API que atiende es la nueva (y no una vieja que
+    no se reinició)."""
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+CODIGO = codigo_propio()
 
 log = logging.getLogger("ftth-api")
 
@@ -605,7 +629,7 @@ class Store:
                 (
                     red_id, fields["tipo"], fields.get("nombre", ""), fields.get("estado", "instalado"),
                     fields["lon"], fields["lat"], json.dumps(fields.get("datos", {}), ensure_ascii=False),
-                    json.dumps(fields.get("carta", {})), fields.get("notas", ""), t, usuario, t, usuario, v,
+                    json.dumps(merge_carta({}, fields.get("carta", {}))), fields.get("notas", ""), t, usuario, t, usuario, v,
                 ),
             )
             element_id = cur.lastrowid
@@ -640,13 +664,38 @@ class Store:
                                    f"El cable {cable['nombre'] or cable['id']} pasa dos veces por {nombre}: así no puede tener "
                                    "carta de empalme. Corregí ese cable antes de cambiarle el tipo.")
 
+    def _solo_acomodado(self, row, expected) -> bool:
+        """Si desde la versión que el usuario tenía a la vista el elemento solo
+        cambió su disposición de carta ("ordenar"), editar sus datos no choca con
+        eso: lo que se acomodó queda y lo editado también."""
+        if expected is None or expected >= row["version"]:
+            return False
+        filas = self.conn().execute(
+            "SELECT accion, detalle FROM historial WHERE tabla = 'elementos' AND registro_id = ? ORDER BY id DESC LIMIT 500",
+            (row["id"],),
+        ).fetchall()
+        for h in filas:
+            if h["accion"] != "ordenar":
+                return False
+            try:
+                antes = json.loads(h["detalle"] or "{}").get("antes") or {}
+            except ValueError:
+                return False
+            version = (antes.get("properties") or {}).get("version")
+            if version == expected:
+                return True
+            if not isinstance(version, int) or version < expected:
+                return False
+        return False
+
     def update_element(self, element_id: int, fields: dict, expected, usuario: str) -> dict:
         self.begin()
         try:
             row = self.get_element(element_id)
             if row is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
-            self.check_version(row, expected, self.element_feature)
+            if "carta" in fields or not self._solo_acomodado(row, expected):
+                self.check_version(row, expected, self.element_feature)
             if "tipo" in fields:
                 self._check_new_type(row, fields["tipo"])
             v = self.next_version()
@@ -658,7 +707,8 @@ class Store:
                 "lon": fields.get("lon", row["lon"]),
                 "lat": fields.get("lat", row["lat"]),
                 "datos": json.dumps(fields["datos"], ensure_ascii=False) if "datos" in fields else row["datos"],
-                "carta": json.dumps(fields["carta"]) if "carta" in fields else row["carta"],
+                "carta": (json.dumps(merge_carta(json.loads(row["carta"] or "{}"), fields["carta"]))
+                          if "carta" in fields else row["carta"]),
                 "notas": fields.get("notas", row["notas"]),
             }
             self.conn().execute(
@@ -670,9 +720,12 @@ class Store:
             moved = (merged["lon"], merged["lat"]) != (row["lon"], row["lat"])
             cables = self._follow_element(element_id, [merged["lon"], merged["lat"]], v, t, usuario) if moved else []
             solo_carta = set(fields) == {"carta"}
+            # Acomodar la carta pasa seguido: se anota solo la versión y la disposición anteriores.
+            antes = ({"id": row["id"], "properties": {"version": row["version"], "carta": json.loads(row["carta"] or "{}")}}
+                     if solo_carta else self.element_feature(row))
             self.log_change(row["red_id"], usuario,
                             "mover" if moved else ("ordenar" if solo_carta else "editar"), "elementos", element_id,
-                            {"tipo": merged["tipo"], "nombre": merged["nombre"], "antes": self.element_feature(row)})
+                            {"tipo": merged["tipo"], "nombre": merged["nombre"], "antes": antes})
             out = {"elemento": self.element_feature(self.get_element(element_id)), "cables": cables, "version": v}
             self.commit()
         except Exception:
@@ -686,7 +739,8 @@ class Store:
             row = self.get_element(element_id)
             if row is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
-            self.check_version(row, expected, self.element_feature)
+            if not self._solo_acomodado(row, expected):
+                self.check_version(row, expected, self.element_feature)
             v = self.next_version()
             t = now_iso()
             self.conn().execute(
@@ -1177,6 +1231,61 @@ class Store:
             raise
         return {"ok": True, "fusiones": fusiones, "version": v if v is not None else self.version()}
 
+    def update_fusion(self, fusion_id: int, cambios: dict, expected, usuario: str) -> dict:
+        """Pasa una punta (o las dos) de una unión a otra fibra o puerto del
+        mismo elemento, sin quitarla y volver a hacerla."""
+        t = now_iso()
+        self.begin()
+        try:
+            row = self.get_fusion(fusion_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Esa unión ya no existe: la quitó otro usuario.")
+            self.check_version(row, expected, self.fusion_json)
+            elemento = self.get_element(row["elemento_id"])
+            if elemento is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
+            a, b = cambios.get("a", row["a"]), cambios.get("b", row["b"])
+            pa, pb = parse_extremo(a), parse_extremo(b)
+            if a == b:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Un extremo no se puede unir consigo mismo.")
+            if pa[0] == "q" and pb[0] == "q" and pa[1] == pb[1]:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "No se pueden unir dos puertos del mismo equipo.")
+            cables, equipos = {}, {}
+            ra = self._check_extremo(elemento, pa, cables, equipos)
+            rb = self._check_extremo(elemento, pb, cables, equipos)
+            nuevos = {x for x in (a, b) if x not in (row["a"], row["b"])}
+            ocupadas = [f for f in self._live_fusions("elemento_id = ? AND id != ?", (row["elemento_id"], fusion_id))
+                        if f["a"] in nuevos or f["b"] in nuevos]
+            if ocupadas:
+                quien = ocupadas[0]["creado_por"] or "otro usuario"
+                raise ApiError(HTTPStatus.CONFLICT,
+                               f"Esa fibra o puerto ya está unida (la unió {quien}). Se cargó la carta actual.",
+                               {"fusiones": [self.fusion_json(f) for f in ocupadas]})
+            if (a, b) == (row["a"], row["b"]):
+                self.rollback()
+                return {"fusiones": [self.fusion_json(row)], "version": self.version()}
+            # Si en la unión hay (o había) un equipo, el tipo se recalcula como al unir.
+            tipo = row["tipo"]
+            if any(parse_extremo(x)[0] == "q" for x in (row["a"], row["b"], a, b)):
+                con_conector = any(
+                    p[0] == "q" and json.loads(r["datos"] or "{}").get("conectores") for p, r in ((pa, ra), (pb, rb))
+                )
+                tipo = "conector" if con_conector else "fusion"
+            v = self.next_version()
+            self.conn().execute(
+                "UPDATE fusiones SET a = ?, b = ?, tipo = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                (a, b, tipo, t, usuario, v, fusion_id),
+            )
+            self.log_change(row["red_id"], usuario, "editar", "fusiones", fusion_id,
+                            {"elemento": row["elemento_id"], "a": a, "b": b, "tipo": tipo,
+                             "antes": {"a": row["a"], "b": row["b"], "tipo": row["tipo"]}})
+            out = {"fusiones": [self.fusion_json(self.get_fusion(fusion_id))], "version": v}
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return out
+
 
 # ------------------------------------------------------------------ validación
 
@@ -1242,12 +1351,16 @@ def check_text(value: str, name: str) -> str:
     return value
 
 
+def constante_invalida(nombre):
+    raise ValueError(f"constante no admitida: {nombre}")
+
+
 def coord_pair(lon, lat):
     if isinstance(lon, bool) or isinstance(lat, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Coordenadas inválidas.")
     try:
         lon, lat = float(lon), float(lat)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Coordenadas inválidas.")
     if not (math.isfinite(lon) and math.isfinite(lat)) or not (-180 <= lon <= 180 and -85 <= lat <= 85):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Coordenadas fuera de rango.")
@@ -1284,25 +1397,96 @@ def datos_field(data: dict):
     return clean
 
 
+def bloque_carta(key, campo: str) -> str:
+    if not isinstance(key, str) or not BLOQUE_CARTA.fullmatch(key):
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"carta.{campo} inválido.")
+    return key
+
+
 def carta_field(data: dict):
-    """Disposición de la carta de empalme: de qué lado (i, d) se dibuja cada
-    cable. Es solo presentación; lo que no se entiende se descarta."""
+    """Disposición de la carta de empalme, la misma para todos. Es solo
+    presentación y llega como cambio parcial (lo que no viene queda como estaba):
+      lados  {c12:a: i|d}       de qué lado se dibuja cada cable (reemplaza los anteriores)
+      orden  [c12:a, q3, ...]   de arriba abajo, en las columnas (reemplaza)
+      pos    {c12:a: [x, y]}    dónde quedó cada bloque en el modo libre: se suma a lo que
+                                había; null en un bloque lo quita, pos: null las quita todas
+    Columnas o libre lo elige cada dispositivo y no se guarda acá.
+    carta: null vuelve a la disposición automática. Las claves desconocidas se descartan."""
     if "carta" not in data:
         return None
     value = data["carta"]
     if value is None:
-        return {}
+        return {"_vaciar": True}
     if not isinstance(value, dict):
         raise ApiError(HTTPStatus.BAD_REQUEST, "carta tiene que ser un objeto.")
-    lados = value.get("lados", {})
-    if not isinstance(lados, dict) or len(lados) > MAX_LADOS:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "carta.lados inválido.")
-    clean = {}
-    for key, side in lados.items():
-        if not isinstance(key, str) or not LADO_CARTA.fullmatch(key) or side not in ("i", "d"):
+    patch = {}
+    if "lados" in value:
+        lados = {} if value["lados"] is None else value["lados"]
+        if not isinstance(lados, dict) or len(lados) > MAX_LADOS:
             raise ApiError(HTTPStatus.BAD_REQUEST, "carta.lados inválido.")
-        clean[key] = side
-    return {"lados": clean} if clean else {}
+        clean = {}
+        for key, side in lados.items():
+            if not isinstance(key, str) or not LADO_CARTA.fullmatch(key) or side not in ("i", "d"):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "carta.lados inválido.")
+            clean[key] = side
+        patch["lados"] = clean
+    if "orden" in value:
+        orden = [] if value["orden"] is None else value["orden"]
+        if not isinstance(orden, list) or len(orden) > MAX_BLOQUES:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "carta.orden inválido.")
+        clean = []
+        for key in orden:
+            if bloque_carta(key, "orden") in clean:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "carta.orden inválido.")
+            clean.append(key)
+        patch["orden"] = clean
+    if "pos" in value:
+        pos = value["pos"]
+        if pos is None:
+            patch["pos"] = None
+        else:
+            if not isinstance(pos, dict) or len(pos) > MAX_BLOQUES:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "carta.pos inválido.")
+            clean = {}
+            for key, xy in pos.items():
+                bloque_carta(key, "pos")
+                if xy is None:
+                    clean[key] = None
+                    continue
+                if (not isinstance(xy, list) or len(xy) != 2
+                        or any(isinstance(n, bool) or not isinstance(n, (int, float))
+                               or (isinstance(n, float) and not math.isfinite(n)) or abs(n) > MAX_POS for n in xy)):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "carta.pos inválido.")
+                clean[key] = [int(round(xy[0])), int(round(xy[1]))]
+            patch["pos"] = clean
+    return patch
+
+
+def merge_carta(guardada: dict, patch: dict) -> dict:
+    """Aplica un cambio parcial de carta_field sobre la disposición guardada."""
+    if patch.get("_vaciar"):
+        return {}
+    out = dict(guardada) if isinstance(guardada, dict) else {}
+    for key in ("lados", "orden"):
+        if key in patch:
+            if patch[key]:
+                out[key] = patch[key]
+            else:
+                out.pop(key, None)
+    if "pos" in patch:
+        pos = {} if patch["pos"] is None else dict(out.get("pos") or {})
+        for key, xy in (patch["pos"] or {}).items():
+            if xy is None:
+                pos.pop(key, None)
+            else:
+                pos[key] = xy
+        if pos:
+            out["pos"] = pos
+        else:
+            out.pop("pos", None)
+    if len(out.get("pos") or {}) > MAX_BLOQUES or len(json.dumps(out)) > MAX_CARTA:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "La disposición de la carta es demasiado grande.")
+    return out
 
 
 def version_field(value):
@@ -1477,7 +1661,8 @@ class Handler(BaseHTTPRequestHandler):
         if length > MAX_BODY:
             raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Pedido demasiado grande.")
         try:
-            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            # NaN e Infinity no son JSON: se rechazan como cualquier otro cuerpo inválido.
+            data = json.loads(self.rfile.read(length).decode("utf-8"), parse_constant=constante_invalida)
         except (ValueError, UnicodeDecodeError, RecursionError):
             raise ApiError(HTTPStatus.BAD_REQUEST, "El cuerpo no es JSON válido.")
         if not isinstance(data, dict):
@@ -1526,11 +1711,15 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         query = parse_qs(url.query)
         try:
+            con_clave = not self.secreto or hmac.compare_digest(
+                (self.headers.get("X-Ftth-Secreto") or "").encode(), self.secreto.encode())
             if path == "/api/salud" and method == "GET":
-                self.send_json(HTTPStatus.OK, {"ok": True, "esquema": ESQUEMA})
+                salud = {"ok": True, "esquema": ESQUEMA}
+                if con_clave:
+                    salud["codigo"] = CODIGO  # el instalador comprueba que atiende la versión instalada
+                self.send_json(HTTPStatus.OK, salud)
                 return
-            if self.secreto and not hmac.compare_digest(
-                    (self.headers.get("X-Ftth-Secreto") or "").encode(), self.secreto.encode()):
+            if not con_clave:
                 raise ApiError(HTTPStatus.FORBIDDEN, "Pedido no autorizado: la API solo atiende a través de nginx.")
             user = self.user()
             if method != "GET" and not self.same_origin():
@@ -1639,6 +1828,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fusiones/borrar" and method == "POST":
             return HTTPStatus.OK, store.delete_fusiones(ids_field(self.read_json()), None, user)
         fusion_id = self.route_id(path, "/api/fusiones/")
+        if fusion_id is not None and method == "PUT":
+            data = self.read_json()
+            cambios = {}
+            for key in ("a", "b"):
+                if key in data:
+                    parse_extremo(data[key])
+                    cambios[key] = data[key]
+            if not cambios:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Falta la punta nueva (a o b).")
+            return HTTPStatus.OK, store.update_fusion(fusion_id, cambios, version_field(data.get("version")), user)
         if fusion_id is not None and method == "DELETE":
             return HTTPStatus.OK, store.delete_fusiones([fusion_id], version_field(q("version")), user)
 

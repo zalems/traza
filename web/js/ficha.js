@@ -52,6 +52,11 @@ const firma = (props) => h('p.ficha-firma', {
 const marcasClase = (c) => (c?.marcas ? `.punto-marca${c.marcas > 1 ? 's' : ''}` : '');
 const estiloColor = (c) => `--c:${c.hex};--m:${c.marca ?? '#1c1c1c'}`;
 
+// Pérdidas y potencias con coma decimal y signo menos tipográfico.
+const numero = (x) => Math.abs(x).toFixed(1).replace('.', ',');
+const formatDb = (x) => `${numero(x)} dB`;
+const formatDbm = (x) => `${x < -0.05 ? '−' : ''}${numero(x)} dBm`;
+
 export function setupFicha({ root, red, acciones }) {
   let modo = null; // 'elemento' | 'cable' | 'redes' | 'recorrido' | 'form-elemento' | 'form-cable'
   let actual = null;
@@ -299,11 +304,27 @@ export function setupFicha({ root, red, acciones }) {
       if (con) {
         const donde = F.nombreElemento(s, con.union.elemento);
         const origen = con.origen?.motivo === 'olt' ? s.equipos.get(con.origen.equipo) : null;
+        // Potencia que debería llegar según la carta, y cómo se compara con la medida.
+        const pot = origen ? F.potencias(s, F.recorrido(s, feature.id, con.ext)) : null;
+        const medida = Number.isFinite(datos.potencia) ? datos.potencia : null;
+        let estimada = null;
+        if (pot?.llega !== null && pot?.llega !== undefined) {
+          let comparacion = '';
+          if (medida !== null) {
+            // Con más de 3 dB menos de lo esperable, algo pierde de más en el camino.
+            const dif = medida - pot.llega;
+            if (Math.abs(dif) < 1.5) comparacion = ' · la medida coincide';
+            else if (dif <= -3) comparacion = ` · la medida está ${formatDb(-dif)} por debajo: revisá conectores y empalmes`;
+            else comparacion = ` · la medida está ${formatDb(Math.abs(dif))} ${dif < 0 ? 'por debajo' : 'por encima'}`;
+          }
+          estimada = h('p.ficha-sub', { text: `Potencia estimada en la ONT: ≈ ${formatDbm(pot.llega)}${comparacion}` });
+        }
         conexion = h('div.ficha-conexion', {},
           h('p', {}, h('strong', { text: `${donde} · ${F.etiquetaExtremo(s, con.union.a)}` })),
           h('p.ficha-sub', { text: origen
             ? `Llega desde ${F.etiquetaPuerto(origen, 's', con.origen.puerto)} (${F.nombreElemento(s, con.origen.elemento)}).`
             : 'Según la carta de empalme. Del otro lado el pelo todavía no llega a una OLT.' }),
+          estimada,
           botones(boton('Ver recorrido', () => acciones.verRecorrido(feature.id, con.ext))));
       }
     }
@@ -571,6 +592,7 @@ export function setupFicha({ root, red, acciones }) {
           texto: props ? `${props.nombre} · ${F.etiquetaFibra(props, paso.fibra)}` : 'Cable borrado',
           sub: [formatLargo(paso.metros), paso.pasaPor.length ? `pasa por ${paso.pasaPor.map(nombre).join(', ')}` : '']
             .filter(Boolean).join(' · '),
+          ...F.coloresDeTramo(s, paso),
         };
       }
       case 'union':
@@ -612,17 +634,37 @@ export function setupFicha({ root, red, acciones }) {
 
   function verRecorrido({ resultado, elementoId, ext, volver }) {
     const s = red.state;
+    const pot = F.potencias(s, resultado);
     const partes = [formatLargo(resultado.metros) + ' de fibra'];
     if (resultado.fusiones) partes.push(plural(resultado.fusiones, 'fusión', 'fusiones'));
     if (resultado.conectores) partes.push(plural(resultado.conectores, 'conector', 'conectores'));
     for (const eq of resultado.splitters) partes.push(`splitter ${F.describirEquipo(eq)}`);
     const pasos = resultado.pasos.map((paso, i) => {
       const t = textoPaso(s, paso, i === 0);
-      return h(`li.rec-paso.rec-${t.clase}`, {}, h('strong', { text: t.texto }), t.sub ? h('small', { text: t.sub }) : null);
+      const p = pot.porPaso[i];
+      // Lo que se pierde en el paso y, si se sabe, con cuánto se sale de él.
+      let cuenta = '';
+      if (p.perdida >= 0.05) cuenta = `−${formatDb(p.perdida)}`;
+      if (p.potencia !== null && (paso.tipo === 'union' || paso.tipo === 'equipo' || (paso.tipo === 'fin' && i > 0))) {
+        cuenta = [cuenta, `≈ ${formatDbm(p.potencia)}`].filter(Boolean).join(' → ');
+      }
+      const color = t.color ? `--c:${t.color.hex};--t:${(t.tubo ?? t.color).hex};--m:${t.color.marca ?? '#1c1c1c'}` : null;
+      return h(`li.rec-paso.rec-${t.clase}${t.color?.marcas ? '.rec-marca' : ''}`, { style: color },
+        h('strong', {},
+          t.color ? h(`span.punto${marcasClase(t.color)}`, { style: estiloColor(t.color), 'aria-hidden': 'true' }) : null,
+          t.texto),
+        t.sub ? h('small', { text: t.sub }) : null,
+        cuenta ? h('small.rec-pot', { text: cuenta }) : null);
     });
+    const balance = [];
+    if (pot.total >= 0.05) balance.push(`Pérdida estimada: ${formatDb(pot.total)}${pot.incompleta ? ' (sin un splitter de tamaño desconocido)' : ''}`);
+    if (pot.llega !== null) balance.push(`llega con ≈ ${formatDbm(pot.llega)} (la OLT sale con ${formatDbm(pot.inicial)})`);
+    else if (pot.olt) balance.push('cargá la potencia de la OLT para estimar con cuánto llega');
     abrir('recorrido', [
       h('p.ficha-sub', { text: partes.join(' · ') }),
+      balance.length ? h('p.rec-balance', { text: balance.join(' · ') }) : null,
       h('ol.recorrido', {}, ...pasos),
+      h('p.ficha-nota', { text: `Estimación con ${String(F.PERDIDAS.fibraKm).replace('.', ',')} dB/km, ${String(F.PERDIDAS.fusion).replace('.', ',')} dB por fusión, ${String(F.PERDIDAS.conector).replace('.', ',')} dB por conector y la pérdida típica de cada splitter.` }),
       botones(
         volver ? boton('Volver a la carta', volver, { class: 'primario' }) : null,
         boton('Cerrar', () => acciones.cancelar()),

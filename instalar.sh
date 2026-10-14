@@ -587,6 +587,14 @@ BACKUP_KEEP="${FTTH_RESPALDOS:-30}"   # copias diarias que se conservan
 # Responde el servicio que corresponde (no cualquier cosa que esté en ese puerto).
 auth_health() { curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$AUTH_PORT/auth/health" 2>/dev/null | grep -q '"ok": true'; }
 api_health() { curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$API_PORT/api/salud" 2>/dev/null | grep -q '"ok": true'; }
+# El resumen del programa que atiende la API (lo informa solo con la clave de nginx;
+# la cabecera va en un archivo para que la clave no quede a la vista en la lista de procesos).
+api_codigo() {
+  [[ -r "$API_SECRET" ]] || return 0
+  ( umask 077; printf 'X-Ftth-Secreto: %s\n' "$(cat "$API_SECRET")" > "$WORK/cabecera-api" )
+  curl -fsS --noproxy '*' --max-time 3 -H @"$WORK/cabecera-api" "http://127.0.0.1:$API_PORT/api/salud" 2>/dev/null \
+    | sed -n 's/.*"codigo": "\([0-9a-f]*\)".*/\1/p'
+}
 
 # usuarios SUBCOMANDO [NOMBRE]: la herramienta de usuarios, siempre como el usuario del servicio.
 usuarios() { runuser -u "$AUTH_USER" -- /usr/bin/python3 -I "$AUTH_PY" --db "$AUTH_DB" usuarios "$@"; }
@@ -829,6 +837,22 @@ WRAP
   install_service api "API de la red de la plataforma FTTH" "API de la red FTTH" \
     "$KIT_DIR/api/ftth-api.py" "$API_PY" "$API_PORT" "$API_UNIT" api_health \
     "/usr/bin/python3 -I $API_PY --db $API_DB serve --host 127.0.0.1 --port $API_PORT --secreto $API_SECRET"
+  # Que atienda la API recién instalada y no una anterior que siguió andando: el
+  # visor nuevo no tiene que hablar con una API vieja.
+  local esperado
+  esperado="$(sha256sum "$API_PY" | cut -c1-12)"
+  if [[ -d /run/systemd/system && "$(api_codigo)" != "$esperado" ]]; then
+    # Quedó andando otra versión (por ejemplo, de una ejecución anterior que no llegó a reiniciarla).
+    systemctl restart "$APP-api.service"
+  fi
+  for _ in $(seq 1 20); do
+    [[ "$(api_codigo)" == "$esperado" ]] && break
+    sleep 0.5
+  done
+  if [[ "$(api_codigo)" != "$esperado" ]]; then
+    [[ -d /run/systemd/system ]] && die "La API que atiende no es la recién instalada. Revisá: systemctl restart $APP-api y journalctl -u $APP-api -n 30"
+    warn "La API que atiende no es la recién instalada: reiniciala a mano antes de usar la plataforma."
+  fi
   install_backup_timer
 
   if [[ "$(usuarios listar)" == "No hay usuarios." ]]; then
@@ -1263,10 +1287,13 @@ verify_site() {
 
   code="$(curl "${opts[@]}" -o "$WORK/salud.json" -w '%{http_code}' "$base/api/salud" || true)"
   check "La API de la red responde a través de nginx" '[[ "$code" == 200 ]]'
-  local esquema
+  local esquema codigo
   esquema="$(sed -n 's/^ESQUEMA = \([0-9][0-9]*\)$/\1/p' "$API_PY")"
+  # El programa que atiende es el instalado (su resumen coincide): no quedó uno viejo andando.
+  # shellcheck disable=SC2034  # se usa dentro de la condición que evalúa check
+  codigo="$(sha256sum "$API_PY" | cut -c1-12)"
   check "La API que atiende es la de esta versión (base con esquema $esquema)" \
-    '[[ -n "$esquema" ]] && grep -q "\"esquema\": $esquema[,}]" "$WORK/salud.json"'
+    '[[ -n "$esquema" ]] && grep -q "\"esquema\": $esquema[,}]" "$WORK/salud.json" && [[ "$(api_codigo)" == "$codigo" ]]'
   code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/api/yo" || true)"
   check "Sin sesión, la API responde 401 (HTTP $code)" '[[ "$code" == 401 ]]'
   code="$(curl -sS --max-time 5 --noproxy '*' -H 'X-Usuario: verificacion' -o /dev/null -w '%{http_code}' \

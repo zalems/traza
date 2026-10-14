@@ -569,7 +569,68 @@ export function recorrido(state, elementoId, ext) {
     conectores: uniones.filter((x) => x.fusion.tipo === 'conector').length,
     splitters: pasos.filter((x) => x.tipo === 'equipo').map((x) => state.equipos.get(x.equipo)).filter(Boolean),
     lineas: tramos.map((x) => x.coords),
+    // Cada tramo con el color de su fibra (y el de su tubo, si el cable tiene varios).
+    segmentos: tramos.map((x) => ({ coords: x.coords, ...coloresDeTramo(state, x) })),
   };
+}
+
+// El color de la fibra que lleva un tramo y el de su tubo (null con un solo tubo).
+export function coloresDeTramo(state, tramo) {
+  const cable = state.cables.get(tramo.cable);
+  if (!cable) return { color: null, tubo: null };
+  const info = infoFibra(cable.properties, tramo.fibra);
+  return { color: info.color, tubo: info.tubos > 1 ? info.colorTubo : null };
+}
+
+// ------------------------------------------------------------- potencias
+
+// Pérdidas para estimar (valores de planificación, no de medición): fibra en
+// 1490 nm, la bajada de GPON; una fusión; un conector (par SC); los splitters
+// PLC según cuántas salidas tienen y los desbalanceados según el porcentaje de
+// cada salida. Es una guía para comparar con lo medido, no un reemplazo.
+export const PERDIDAS = { fibraKm: 0.3, fusion: 0.1, conector: 0.5, excesoFbt: 0.3, entradaDoble: 0.3 };
+const PLC_DB = { 2: 3.8, 4: 7.2, 8: 10.5, 16: 13.8, 32: 17.1, 64: 20.5, 128: 24 };
+
+// Lo que pierde una salida de un splitter (dB), o null si no se sabe.
+export function perdidaSplitter(eq, salida) {
+  const datos = eq?.datos ?? {};
+  if (datos.modo === 'fbt') {
+    const [x, y] = String(datos.relacion ?? '').split('/').map(Number);
+    const pct = salida === 2 ? y : x;
+    if (!(pct > 0 && pct < 100)) return null;
+    return -10 * Math.log10(pct / 100) + PERDIDAS.excesoFbt;
+  }
+  const base = PLC_DB[Number(eq?.salidas)];
+  if (base === undefined) return null;
+  return base + (Number(eq?.entradas) > 1 ? PERDIDAS.entradaDoble : 0);
+}
+
+// Pérdida de cada paso de un recorrido y lo acumulado desde su comienzo (la
+// central, si se llega). Si el recorrido sale de una OLT con su potencia
+// cargada, también la potencia estimada después de cada paso. Llegar a un
+// cliente suma el conector de la ONT.
+export function potencias(state, resultado) {
+  const pasos = resultado.pasos;
+  const primero = pasos[0];
+  const olt = primero?.motivo === 'olt' ? state.equipos.get(primero.equipo) ?? null : null;
+  const inicial = Number.isFinite(olt?.datos?.potencia) ? olt.datos.potencia : null;
+  let acumulada = 0;
+  let incompleta = false;
+  const porPaso = pasos.map((paso) => {
+    let perdida = 0;
+    if (paso.tipo === 'tramo') perdida = (paso.metros / 1000) * PERDIDAS.fibraKm;
+    else if (paso.tipo === 'union') perdida = paso.fusion.tipo === 'conector' ? PERDIDAS.conector : PERDIDAS.fusion;
+    else if (paso.tipo === 'equipo') {
+      const eq = state.equipos.get(paso.equipo);
+      const salida = [paso.de, paso.a].map(parseExtremo).find((x) => x?.lado === 's');
+      const l = eq ? perdidaSplitter(eq, salida?.n) : null;
+      if (l === null) incompleta = true;
+      else perdida = l;
+    } else if (paso.tipo === 'fin' && paso.motivo === 'cliente') perdida = PERDIDAS.conector;
+    acumulada += perdida;
+    return { perdida, acumulada, potencia: inicial === null ? null : inicial - acumulada };
+  });
+  return { porPaso, total: acumulada, olt, inicial, llega: inicial === null ? null : inicial - acumulada, incompleta };
 }
 
 // Hasta dónde llega lo que sale de un extremo (por su unión): el último paso.
