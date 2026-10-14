@@ -230,7 +230,7 @@ systemctl stop ftth-api
 cp /root/respaldos-ftth/AAAAMMDD-HHMMSS-antes-de-0.4.0/red.db /srv/ftth/data/red.db
 rm -f /srv/ftth/data/red.db-wal /srv/ftth/data/red.db-shm
 chown ftth:ftth /srv/ftth/data/red.db
-git checkout v0.3.0
+git checkout 67b5a4e          # el commit de 0.3.0 (cada versión tiene el suyo en CHANGELOG.md)
 ./instalar.sh --dominio …      # las mismas opciones de siempre
 ```
 

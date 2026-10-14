@@ -35,7 +35,7 @@ Cartas de empalme.
 - Los datos que la versión anterior guardaba en campos que ya no están en el
   formulario (el splitter anotado de cajas y NAP) se conservan y se muestran.
 
-## 0.3.0 · 14/10/2026
+## 0.3.0 · 14/10/2026 · commit 67b5a4e
 
 Herramientas para cargar la red.
 
@@ -63,7 +63,7 @@ Herramientas para cargar la red.
   la actualización desde 0.2.0 no reinicia el servicio de sesión.
 - Pruebas automáticas de la API en `pruebas/`.
 
-## 0.2.0 · 13/10/2026
+## 0.2.0 · 13/10/2026 · commit 6dc516a
 
 Login y entrega por repositorio.
 
