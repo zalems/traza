@@ -40,7 +40,7 @@ row "IPv6" "$([[ -e /proc/net/if_inet6 ]] && echo disponible || echo 'no disponi
 sec "Puertos web en escucha"
 if have ss; then
   found=0
-  for port in 80 443 8080 8900; do
+  for port in 80 443 8080 8900 8901; do
     line="$(ss -H -ltnp "sport = :$port" 2>/dev/null | head -n1)"
     if [[ -n "$line" ]]; then
       found=1
@@ -107,10 +107,17 @@ if [[ -d /srv/ftth ]]; then
   [[ -f /srv/ftth/tiles/basemap.json ]] && row "  mapa de calles" "$(sed -nE 's/.*"file"[^"]*"([^"]*)".*/\1/p' /srv/ftth/tiles/basemap.json)"
   if [[ -d /run/systemd/system ]] && have systemctl; then
     row "  servicio de sesión" "ftth-auth: $(systemctl is-active ftth-auth 2>/dev/null || true)"
+    row "  servicio de API" "ftth-api: $(systemctl is-active ftth-api 2>/dev/null || true)"
   fi
   if have curl; then
     code="$(curl -sS -o /dev/null --max-time 5 --noproxy '*' -w '%{http_code}' "http://127.0.0.1:${FTTH_AUTH_PORT:-8900}/auth/health" 2>/dev/null || true)"
     row "  login (puerto ${FTTH_AUTH_PORT:-8900})" "$([[ "$code" == 200 ]] && echo responde || echo 'no responde')"
+    code="$(curl -sS -o /dev/null --max-time 5 --noproxy '*' -w '%{http_code}' "http://127.0.0.1:${FTTH_API_PORT:-8901}/api/salud" 2>/dev/null || true)"
+    row "  API (puerto ${FTTH_API_PORT:-8901})" "$([[ "$code" == 200 ]] && echo responde || echo 'no responde')"
+  fi
+  if [[ -f /srv/ftth/data/red.db ]]; then
+    # Lo último puede estar todavía en el archivo -wal: se cuentan los dos.
+    row "  base de la red" "$(du -ch --apparent-size /srv/ftth/data/red.db* 2>/dev/null | tail -n1 | cut -f1) (respaldo: sudo /srv/ftth/bin/respaldo)"
   fi
   if [[ $EUID -eq 0 && -x /srv/ftth/bin/usuarios ]]; then
     n="$(/srv/ftth/bin/usuarios listar 2>/dev/null | grep -c . || true)"

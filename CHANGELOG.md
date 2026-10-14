@@ -1,5 +1,33 @@
 # Cambios
 
+## 0.3.0 · 14/10/2026
+
+Herramientas para cargar la red.
+
+- Redes: una por cliente, localidad o despliegue, con selector en la barra.
+- Siete tipos de elemento (nodo/OLT, poste, caja, NAP, botella, cliente,
+  reserva), cada uno con ícono propio en el mapa y ficha con estado, datos
+  propios y notas. La potencia en la ONT del cliente se califica (buena,
+  justa, baja).
+- Cables dibujados punto por punto; los puntos que caen sobre un elemento
+  quedan pegados y lo siguen si se lo mueve. Tipo, fibras, tendido, reservas y
+  largo calculado.
+- Mover elementos, editar el trazado de los cables (arrastrar, agregar y
+  quitar puntos) y borrar, con confirmación.
+- En pantallas táctiles, una mira en el centro del mapa con botones "Colocar
+  acá", "Agregar punto" y "Mover acá".
+- Buscador: encuentra elementos y cables por nombre o número de abonado.
+- Varios usuarios a la vez: lo que carga uno aparece a los demás en pocos
+  segundos; si dos editan lo mismo, al segundo se le avisa y se le muestra la
+  versión actual. Historial de cambios con usuario y fecha.
+- API nueva (`api/ftth-api.py`, servicio `ftth-api`, base `data/red.db`),
+  detrás de nginx con el mismo login y una clave compartida con nginx.
+- `bin/respaldo`: copia coherente de usuarios, red y ajustes sin detener nada.
+- Instalador: activa el visor nuevo recién cuando la API y nginx están listos;
+  espera a que nginx atienda con la configuración nueva antes de verificar;
+  la actualización desde 0.2.0 no reinicia el servicio de sesión.
+- Pruebas automáticas de la API en `pruebas/`.
+
 ## 0.2.0 · 13/10/2026
 
 Login y entrega por repositorio.

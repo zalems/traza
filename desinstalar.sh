@@ -28,18 +28,21 @@ done
 [[ $EUID -eq 0 ]] || die "Hace falta root: ejecutá con sudo."
 [[ "$ROOT" == /* && "$ROOT" != "/" ]] || die "--raiz tiene que ser una ruta absoluta distinta de /."
 
-# Servicio de sesión (login)
-if [[ -f "/etc/systemd/system/$APP-auth.service" ]]; then
-  if [[ -d /run/systemd/system ]]; then
-    systemctl disable --now "$APP-auth.service" >/dev/null 2>&1 || true
+# Servicios del kit: sesión (login) y API de la red
+for svc in "$APP-auth" "$APP-api"; do
+  if [[ -f "/etc/systemd/system/$svc.service" ]]; then
+    if [[ -d /run/systemd/system ]]; then
+      systemctl disable --now "$svc.service" >/dev/null 2>&1 || true
+    fi
+    rm -f "/etc/systemd/system/$svc.service"
+    [[ -d /run/systemd/system ]] && systemctl daemon-reload
+    echo "   quitado el servicio $svc"
   fi
-  rm -f "/etc/systemd/system/$APP-auth.service"
-  [[ -d /run/systemd/system ]] && systemctl daemon-reload
-  echo "   quitado el servicio $APP-auth"
-fi
+done
 
 removed=0
-for f in "/etc/nginx/sites-enabled/$APP.conf" "/etc/nginx/sites-available/$APP.conf" "/etc/nginx/conf.d/$APP.conf"; do
+for f in "/etc/nginx/sites-enabled/$APP.conf" "/etc/nginx/sites-available/$APP.conf" "/etc/nginx/conf.d/$APP.conf" \
+         "/etc/nginx/$APP-api-secreto.inc"; do
   if [[ -e "$f" || -L "$f" ]]; then
     rm -f "$f"
     echo "   quitado $f"
@@ -63,7 +66,7 @@ fi
 if (( PURGE )); then
   # Solo se borra lo que creó instalar.sh, y solo en una carpeta marcada por él.
   [[ -f "$ROOT/.ftth-kit" ]] || die "$ROOT no tiene la marca de una instalación de este kit: no borro nada."
-  for entry in web web.nuevo bin tiles config releases acme backups auth data .lock .ftth-kit; do
+  for entry in web web.nuevo bin tiles config releases acme backups auth api data .lock .ftth-kit; do
     rm -rf "${ROOT:?}/$entry"
   done
   rm -rf "${ROOT:?}"/.tmp.*

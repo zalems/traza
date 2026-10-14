@@ -3,6 +3,7 @@ import defaults from './config.js';
 import { BASES, buildStyle, allBaseLayerIds } from './style.js';
 import { registerEsriProtocol } from './esri.js';
 import { setupSearch } from './search.js';
+import { setupHerramientas } from './herramientas.js';
 
 const STORAGE_KEY = 'ftth.mapa.v1';
 const IMAGERY_BASES = new Set(['imagery', 'hybrid']);
@@ -77,6 +78,36 @@ function sessionFlag(name) {
 function showNotice(text) {
   $('notice-text').textContent = text;
   $('notice').hidden = false;
+}
+
+// Confirmación breve que desaparece sola. Va por encima de lo que esté abierto
+// abajo (el cartel del modo o, en el teléfono, la ficha), y se corre si eso
+// aparece o cambia de tamaño mientras se ve.
+let toastTimer;
+function ubicarToast() {
+  const box = $('toast');
+  let tope = window.innerHeight;
+  for (const id of ['modo', 'ficha', 'bases']) {
+    const el = $(id);
+    if (!el || el.hidden) continue;
+    const r = el.getBoundingClientRect();
+    // Solo cuenta lo que ocupa el centro de abajo de la pantalla.
+    if (r.bottom > window.innerHeight - 40 || id === 'modo') {
+      if (r.left < window.innerWidth / 2 && r.right > window.innerWidth / 2) tope = Math.min(tope, r.top);
+    }
+  }
+  box.style.bottom = `${Math.round(window.innerHeight - tope + 10)}px`;
+}
+
+function toast(text) {
+  const box = $('toast');
+  box.textContent = text;
+  ubicarToast();
+  box.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    box.hidden = true;
+  }, 2600);
 }
 
 // Ubica el archivo vigente del mapa de calles (lo nombra el manifiesto) y
@@ -335,6 +366,7 @@ async function start() {
   let pointPopup;
   let lastPopupAt = 0;
   function showPoint(lngLat) {
+    if (herramientas && herramientas.modo() !== 'ver') return;
     if (Date.now() - lastPopupAt < 800) return;
     lastPopupAt = Date.now();
     const text = formatLngLat(lngLat, 6);
@@ -387,14 +419,26 @@ async function start() {
 
   // ---------------------------------------------------------------- buscador
 
-  setupSearch({ map, maplibregl, config });
+  // --------------------------------------------------------- la red (carga)
+
+  const herramientas = user ? setupHerramientas({ map, maplibregl, usuario: user, notify: showNotice, toast }) : null;
+  if (!user) $('herramientas').hidden = true;
+
+  setupSearch({ map, maplibregl, config, buscarEnRed: (texto) => herramientas?.buscarEnRed(texto) ?? [] });
+
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(() => {
+      if (!$('toast').hidden) ubicarToast();
+    });
+    for (const id of ['modo', 'ficha']) observer.observe($(id));
+  }
 
   $('notice-close').addEventListener('click', () => {
     $('notice').hidden = true;
   });
 
   // Para depurar desde la consola del navegador.
-  window.ftth = { map, setBase, config, state };
+  window.ftth = { map, setBase, config, state, herramientas };
 }
 
 start().catch((err) => {

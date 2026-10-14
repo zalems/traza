@@ -1,11 +1,12 @@
-// Buscador: acepta coordenadas ("-26.1849, -58.1731") o un texto que se
-// consulta en Nominatim (OpenStreetMap). Una búsqueda por envío, nunca mientras
-// se escribe: es la condición de uso del servicio público.
+// Buscador: acepta coordenadas ("-26.1849, -58.1731"), el nombre de algo de la
+// red ("NAP-012", que se busca en lo ya cargado) o un texto que se consulta en
+// Nominatim (OpenStreetMap). Nominatim: una búsqueda por envío, nunca mientras
+// se escribe; es la condición de uso del servicio público.
 
 const COORDS = /^\s*(-?\d{1,2}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*$/;
 const MIN_INTERVAL_MS = 1100;
 
-export function setupSearch({ map, maplibregl, config }) {
+export function setupSearch({ map, maplibregl, config, buscarEnRed = () => [] }) {
   const form = document.getElementById('search');
   const input = document.getElementById('search-input');
   const results = document.getElementById('search-results');
@@ -62,6 +63,54 @@ export function setupSearch({ map, maplibregl, config }) {
     results.hidden = false;
   }
 
+  // Coincidencias en la red, con la opción de seguir buscando el texto como lugar.
+  function showNetwork(matches, query) {
+    const list = document.createElement('ul');
+    for (const match of matches) {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'search-red';
+      const title = document.createElement('strong');
+      title.textContent = match.titulo;
+      const detail = document.createElement('small');
+      detail.textContent = match.detalle;
+      button.append(title, detail);
+      button.addEventListener('click', () => {
+        marker?.remove();
+        closeResults();
+        input.blur();
+        match.ir();
+      });
+      item.append(button);
+      list.append(item);
+    }
+    const children = [list];
+    if (geocoder) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'search-more';
+      more.textContent = `Buscar "${query}" como lugar`;
+      more.addEventListener('click', () => searchAsPlace(query));
+      children.push(more);
+    }
+    results.replaceChildren(...children);
+    results.hidden = false;
+  }
+
+  async function searchAsPlace(query) {
+    showMessage('Buscando…');
+    try {
+      const places = await searchPlaces(query);
+      if (places.length === 0) showMessage(`No hay resultados para "${query}". Probá con la localidad y la provincia.`);
+      else showPlaces(places);
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn(err);
+      showMessage('El buscador no respondió. Revisá la conexión y probá de nuevo.');
+    }
+  }
+
   async function searchPlaces(query) {
     const wait = lastRequestAt + MIN_INTERVAL_MS - Date.now();
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
@@ -96,18 +145,17 @@ export function setupSearch({ map, maplibregl, config }) {
       return goTo([lng, lat]);
     }
 
-    if (!geocoder) return showMessage('Escribí las coordenadas como latitud, longitud. Por ejemplo: -26.1849, -58.1731');
-
-    showMessage('Buscando…');
-    try {
-      const places = await searchPlaces(query);
-      if (places.length === 0) showMessage(`No hay resultados para "${query}". Probá con la localidad y la provincia.`);
-      else showPlaces(places);
-    } catch (err) {
-      if (err.name === 'AbortError') return;
-      console.warn(err);
-      showMessage('El buscador no respondió. Revisá la conexión y probá de nuevo.');
+    const matches = buscarEnRed(query);
+    if (matches.length === 1 && matches[0].titulo.toLowerCase() === query.toLowerCase()) {
+      closeResults();
+      input.blur();
+      marker?.remove();
+      return matches[0].ir();
     }
+    if (matches.length) return showNetwork(matches, query);
+
+    if (!geocoder) return showMessage('No hay nada con ese nombre en la red. Las coordenadas van como latitud, longitud: -26.1849, -58.1731');
+    return searchAsPlace(query);
   });
 
   input.addEventListener('keydown', (event) => {

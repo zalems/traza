@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# instalar.sh: instala o actualiza el mapa base de la plataforma FTTH.
+# instalar.sh: instala o actualiza la plataforma FTTH (mapa, login y red).
 #
 # Es idempotente. Cada paso mira cómo está el servidor y cambia solo lo que
 # falta, así que se puede ejecutar las veces que haga falta. Agrega un único
@@ -26,6 +26,7 @@ ROOT="/srv/$APP"
 # en esta máquina y nginx le consulta cada pedido.
 AUTH_USER="ftth"
 AUTH_PORT="${FTTH_AUTH_PORT:-8900}"
+API_PORT="${FTTH_API_PORT:-8901}"
 
 # Herramienta que recorta el mapa (https://github.com/protomaps/go-pmtiles).
 PMTILES_VERSION="1.31.2"
@@ -295,6 +296,10 @@ if (( SKIP_NGINX == 0 )); then
   if port_busy "$AUTH_PORT" && [[ "$owner" != python3 ]]; then
     die "El puerto $AUTH_PORT (servicio de sesión) ya lo usa '${owner:-otro proceso}'. Se puede cambiar con la variable FTTH_AUTH_PORT."
   fi
+  owner="$(port_owner "$API_PORT" || true)"
+  if port_busy "$API_PORT" && [[ "$owner" != python3 ]]; then
+    die "El puerto $API_PORT (API de la red) ya lo usa '${owner:-otro proceso}'. Se puede cambiar con la variable FTTH_API_PORT."
+  fi
   # Sin dominio el sitio responde a cualquier nombre: necesita el puerto para él solo.
   if [[ -z "$DOMAIN" ]] && other_site_listens "$PORT"; then
     die "En el puerto $PORT ya escucha otro sitio de nginx. Elegí otro con --puerto o indicá --dominio para convivir por nombre."
@@ -306,7 +311,7 @@ ok "Chequeos previos superados"
 
 step "2/7 Carpetas y paquetes"
 
-DIRS=("$ROOT" "$ROOT/bin" "$ROOT/tiles" "$ROOT/config" "$ROOT/releases" "$ROOT/acme" "$ROOT/backups" "$ROOT/auth" "$ROOT/data")
+DIRS=("$ROOT" "$ROOT/bin" "$ROOT/tiles" "$ROOT/config" "$ROOT/releases" "$ROOT/acme" "$ROOT/backups" "$ROOT/auth" "$ROOT/api" "$ROOT/data")
 if [[ -d "$ROOT" && ! -f "$ROOT/.ftth-kit" && ! ( -d "$ROOT/releases" && -d "$ROOT/tiles" ) && -n "$(ls -A "$ROOT" 2>/dev/null)" ]]; then
   die "La carpeta $ROOT ya existe con contenido ajeno a este kit. Elegí una carpeta propia con --raiz."
 fi
@@ -511,9 +516,8 @@ else
   install_basemap
 fi
 
-# ------------------------------------------------------------------- 4. visor
-
-step "4/7 Visor web"
+# ------------------------------------------------------------------- visor
+# (se activa en el paso 6, cuando la API y nginx ya están listos para él)
 
 deploy_web() {
   local hash release current
@@ -562,32 +566,40 @@ deploy_web() {
     [[ "$name" == "$release" || "$name" == "$current" ]] || { rm -rf "$d"; info "Borrada una versión vieja: $name"; }
   done < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
 }
-deploy_web
 
-# ------------------------------------------------------ 5. servicio de sesión
+# ------------------------------------------------------------- 4. servicios
 
-step "5/7 Servicio de sesión (login)"
+step "4/7 Servicios: sesión (login) y API de la red"
 
 AUTH_DB="$ROOT/data/ftth.db"
 AUTH_PY="$ROOT/auth/ftth-auth.py"
 AUTH_UNIT="/etc/systemd/system/$APP-auth.service"
+API_DB="$ROOT/data/red.db"
+API_PY="$ROOT/api/ftth-api.py"
+API_UNIT="/etc/systemd/system/$APP-api.service"
+API_SECRET="$ROOT/data/api.secreto"
+API_SECRET_INC="/etc/nginx/$APP-api-secreto.inc"
 
-auth_health() { curl -sS --noproxy '*' --max-time 3 -o /dev/null "http://127.0.0.1:$AUTH_PORT/auth/health" 2>/dev/null; }
+# Responde el servicio que corresponde (no cualquier cosa que esté en ese puerto).
+auth_health() { curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$AUTH_PORT/auth/health" 2>/dev/null | grep -q '"ok": true'; }
+api_health() { curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$API_PORT/api/salud" 2>/dev/null | grep -q '"ok": true'; }
 
 # usuarios SUBCOMANDO [NOMBRE]: la herramienta de usuarios, siempre como el usuario del servicio.
 usuarios() { runuser -u "$AUTH_USER" -- /usr/bin/python3 -I "$AUTH_PY" --db "$AUTH_DB" usuarios "$@"; }
 
+# render_unit NOMBRE COMENTARIO DESCRIPCIÓN COMANDO: unidad de systemd de un servicio del kit.
+# (La del servicio de sesión sale idéntica a la de 0.2.0: así actualizar no lo reinicia.)
 render_unit() {
   cat <<UNIT
-# $APP-auth: servicio de sesión (login) de la plataforma FTTH. Generado por instalar.sh.
+# $APP-$1: $2. Generado por instalar.sh.
 [Unit]
-Description=Sesión de la plataforma FTTH (login)
+Description=$3
 After=network.target
 
 [Service]
 User=$AUTH_USER
 Group=$AUTH_USER
-ExecStart=/usr/bin/python3 -I $AUTH_PY --db $AUTH_DB serve --host 127.0.0.1 --port $AUTH_PORT
+ExecStart=$4
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
@@ -601,10 +613,102 @@ WantedBy=multi-user.target
 UNIT
 }
 
+# install_service NOMBRE COMENTARIO DESCRIPCIÓN ORIGEN DESTINO PUERTO UNIDAD SALUD COMANDO: copia
+# el programa, escribe la unidad y deja el servicio andando.
+install_service() {
+  local name="$1" comment="$2" desc="$3" src="$4" dst="$5" port="$6" unit="$7" health="$8" command="$9" changed=0
+  if ! cmp -s "$src" "$dst"; then
+    install -m 0644 "$src" "$dst"
+    changed=1
+  fi
+  if [[ -d /run/systemd/system ]]; then
+    render_unit "$name" "$comment" "$desc" "$command" > "$WORK/unit-$name"
+    if ! cmp -s "$WORK/unit-$name" "$unit"; then
+      install -m 0644 "$WORK/unit-$name" "$unit"
+      systemctl daemon-reload
+      changed=1
+    fi
+    systemctl enable "$APP-$name.service" >/dev/null 2>&1
+    if (( changed )) || ! systemctl is-active --quiet "$APP-$name.service"; then
+      systemctl restart "$APP-$name.service"
+    fi
+  elif ! "$health"; then
+    warn "Este sistema no tiene systemd: el servicio $APP-$name hay que iniciarlo a mano:"
+    warn "  runuser -u $AUTH_USER -- $command &"
+  fi
+  for _ in $(seq 1 20); do
+    "$health" && break
+    sleep 0.5
+  done
+  "$health" || die "El servicio $APP-$name no responde en 127.0.0.1:$port. Revisá: journalctl -u $APP-$name -n 30"
+  ok "$desc: andando en 127.0.0.1:$port"
+}
+
+# La API solo atiende pedidos que traen esta clave, y solo nginx la conoce: así
+# ningún otro programa de la máquina puede hablarle haciéndose pasar por un usuario.
+install_api_secret() {
+  if [[ ! -s "$API_SECRET" ]]; then
+    ( umask 077; od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$API_SECRET.nuevo" )
+    mv -f "$API_SECRET.nuevo" "$API_SECRET"
+    ok "Clave nueva entre nginx y la API"
+  fi
+  chown "root:$AUTH_USER" "$API_SECRET"
+  chmod 0640 "$API_SECRET"
+  if [[ -d /etc/nginx ]]; then
+    printf '# Generado por instalar.sh: clave que nginx le pasa a la API. No compartir.\nproxy_set_header X-Ftth-Secreto "%s";\n' \
+      "$(cat "$API_SECRET")" > "$WORK/secreto.inc"
+    if ! cmp -s "$WORK/secreto.inc" "$API_SECRET_INC"; then
+      install -m 0640 -o root -g root "$WORK/secreto.inc" "$API_SECRET_INC"
+    fi
+  fi
+}
+
+# Copias de seguridad coherentes de las bases (se pueden hacer con todo andando).
+install_backup_tool() {
+  cat > "$WORK/respaldo" <<'TOOL'
+#!/usr/bin/env bash
+# Copia coherente de los usuarios, la red y los ajustes, con todo andando.
+#   respaldo [CARPETA]   (por defecto /root/respaldos-ftth)
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "Ejecutar con sudo." >&2; exit 1; }
+TOOL
+  cat >> "$WORK/respaldo" <<TOOL
+ROOT="$ROOT"
+SERVICE_USER="$AUTH_USER"
+TOOL
+  cat >> "$WORK/respaldo" <<'TOOL'
+dest="${1:-/root/respaldos-ftth}/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$dest"
+chmod 0700 "$dest"
+# La copia la hace el usuario del servicio: si la hiciera root, SQLite podría
+# dejar archivos auxiliares de root que después el servicio no puede abrir.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+chown "$SERVICE_USER:" "$tmp"
+for db in ftth red; do
+  [[ -f "$ROOT/data/$db.db" ]] || continue
+  runuser -u "$SERVICE_USER" -- /usr/bin/python3 -I -c 'import sqlite3, sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close()
+src.close()' "$ROOT/data/$db.db" "$tmp/$db.db"
+  install -m 0600 -o root -g root "$tmp/$db.db" "$dest/$db.db"
+done
+cp -p "$ROOT/config/config.local.js" "$dest/" 2>/dev/null || true
+echo "Respaldo en $dest:"
+ls -l "$dest"
+TOOL
+  cmp -s "$WORK/respaldo" "$ROOT/bin/respaldo" || install -m 0755 "$WORK/respaldo" "$ROOT/bin/respaldo"
+}
+
 install_auth() {
   if (( SIMULATE )); then
     id "$AUTH_USER" >/dev/null 2>&1 || sim "crear el usuario del sistema $AUTH_USER"
     sim "instalar $AUTH_PY y el servicio $AUTH_UNIT (puerto $AUTH_PORT)"
+    [[ -s "$API_SECRET" ]] || sim "crear la clave entre nginx y la API ($API_SECRET)"
+    sim "instalar $API_PY y el servicio $API_UNIT (puerto $API_PORT)"
+    sim "instalar $ROOT/bin/respaldo"
     return
   fi
 
@@ -615,11 +719,6 @@ install_auth() {
   chown "$AUTH_USER:$AUTH_USER" "$ROOT/data"
   chmod 0750 "$ROOT/data"
 
-  local changed=0
-  if ! cmp -s "$KIT_DIR/auth/ftth-auth.py" "$AUTH_PY"; then
-    install -m 0644 "$KIT_DIR/auth/ftth-auth.py" "$AUTH_PY"
-    changed=1
-  fi
   cat > "$WORK/usuarios" <<WRAP
 #!/usr/bin/env bash
 # Administra los usuarios del login: listar | agregar NOMBRE | clave NOMBRE | quitar NOMBRE
@@ -628,31 +727,16 @@ exec runuser -u $AUTH_USER -- /usr/bin/python3 -I $AUTH_PY --db $AUTH_DB usuario
 WRAP
   cmp -s "$WORK/usuarios" "$ROOT/bin/usuarios" || install -m 0755 "$WORK/usuarios" "$ROOT/bin/usuarios"
 
-  # La base la crea el propio usuario del servicio, así queda con su dueño.
+  install_service auth "servicio de sesión (login) de la plataforma FTTH" "Sesión de la plataforma FTTH (login)" \
+    "$KIT_DIR/auth/ftth-auth.py" "$AUTH_PY" "$AUTH_PORT" "$AUTH_UNIT" auth_health \
+    "/usr/bin/python3 -I $AUTH_PY --db $AUTH_DB serve --host 127.0.0.1 --port $AUTH_PORT"
+  # La base de usuarios la crea el propio usuario del servicio, así queda con su dueño.
   usuarios listar >/dev/null
-
-  if [[ -d /run/systemd/system ]]; then
-    render_unit > "$WORK/unit"
-    if ! cmp -s "$WORK/unit" "$AUTH_UNIT"; then
-      install -m 0644 "$WORK/unit" "$AUTH_UNIT"
-      systemctl daemon-reload
-      changed=1
-    fi
-    systemctl enable "$APP-auth.service" >/dev/null 2>&1
-    if (( changed )) || ! systemctl is-active --quiet "$APP-auth.service"; then
-      systemctl restart "$APP-auth.service"
-    fi
-  elif ! auth_health; then
-    warn "Este sistema no tiene systemd: el servicio de sesión hay que iniciarlo a mano:"
-    warn "  runuser -u $AUTH_USER -- /usr/bin/python3 -I $AUTH_PY --db $AUTH_DB serve --port $AUTH_PORT &"
-  fi
-
-  for _ in $(seq 1 20); do
-    auth_health && break
-    sleep 0.5
-  done
-  auth_health || die "El servicio de sesión no responde en 127.0.0.1:$AUTH_PORT. Revisá: journalctl -u $APP-auth -n 30"
-  ok "Servicio de sesión andando en 127.0.0.1:$AUTH_PORT"
+  install_api_secret
+  install_service api "API de la red de la plataforma FTTH" "API de la red FTTH" \
+    "$KIT_DIR/api/ftth-api.py" "$API_PY" "$API_PORT" "$API_UNIT" api_health \
+    "/usr/bin/python3 -I $API_PY --db $API_DB serve --host 127.0.0.1 --port $API_PORT --secreto $API_SECRET"
+  install_backup_tool
 
   if [[ "$(usuarios listar)" == "No hay usuarios." ]]; then
     if [[ -t 0 && -t 1 ]]; then
@@ -673,7 +757,7 @@ install_auth
 
 # -------------------------------------------------------------------- 6. nginx
 
-step "6/7 Sitio en nginx"
+step "5/7 Sitio en nginx"
 
 TLS_ON=0
 if (( TLS_CAPABLE )) && [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" ]]; then TLS_ON=1; fi
@@ -737,9 +821,53 @@ app_block() {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
+    # API de la red: solo con sesión. nginx le pasa al servicio quién es el
+    # usuario (lo dice el servicio de sesión) y, sin sesión, responde 401 en
+    # JSON en vez de mandar a la página de entrada.
+    location /api/ {
+        auth_request /auth/check;
+        auth_request_set \$ftth_usuario \$upstream_http_x_usuario;
+        error_page 401 = @api_sin_sesion;
+        proxy_pass http://127.0.0.1:$API_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Usuario \$ftth_usuario;
+        # La clave que la API exige para saber que el pedido viene de nginx
+        # (archivo legible solo por root).
+        include $API_SECRET_INC;
+        proxy_read_timeout 60s;
+        client_max_body_size 1m;
+        expires -1;
+    }
+
+    location = /api/salud {
+        auth_request off;
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:$API_PORT;
+        proxy_set_header X-Usuario "";
+    }
+
+    location @api_sin_sesion {
+        default_type application/json;
+        return 401 '{"error":"sin sesión"}';
+    }
+
     location = /login.html {
         auth_request off;
         expires -1;
+    }
+
+    # Marca de esta configuración: instalar.sh la consulta (solo desde esta
+    # máquina) para saber cuándo nginx ya atiende con lo que acaba de escribir.
+    location = /.ftth-config {
+        auth_request off;
+        default_type text/plain;
+        if (\$remote_addr !~ "^(127\.0\.0\.1|::1)\$") {
+            return 404;
+        }
+        return 200 "__FTTH_CONFIG__\n";
     }
 
     # La tipografía de la interfaz también la usa la página de entrada.
@@ -816,9 +944,17 @@ acme_block() {
 EOF
 }
 
+# El sitio lleva un identificador que es un resumen de su propio texto: mismo
+# contenido, mismo identificador (la segunda ejecución no cambia nada).
 render_vhost() {
+  local raw
+  raw="$(render_vhost_text)"
+  printf '%s\n' "${raw//__FTTH_CONFIG__/$(printf '%s' "$raw" | sha256sum | cut -c1-12)}"
+}
+
+render_vhost_text() {
   cat <<EOF
-# $APP: mapa base de la plataforma FTTH.
+# $APP: plataforma FTTH (mapa, login y red).
 # Generado por instalar.sh (kit $KIT_VERSION). No editar a mano: se regenera en cada ejecución.
 EOF
   if (( TLS_ON )); then
@@ -867,6 +1003,12 @@ nginx_apply() {
   if nginx_running; then
     if [[ -d /run/systemd/system ]]; then systemctl reload nginx
     else nginx -s reload 2>"$WORK/nginx-reload.log" || { cat "$WORK/nginx-reload.log" >&2; return 1; }; fi
+    # La recarga es gradual: los procesos viejos siguen hasta cerrar sus
+    # conexiones. Se espera a que no quede ninguno para verificar lo nuevo.
+    for _ in $(seq 1 30); do
+      ps -o args= -C nginx 2>/dev/null | grep -q 'shutting down' || break
+      sleep 0.5
+    done
   elif (( INSTALLED_NGINX )); then
     if [[ -d /run/systemd/system ]]; then systemctl start nginx; else nginx; fi
   else
@@ -881,14 +1023,23 @@ nginx_serving() {
   (( TLS_ON == 0 )) || port_busy 443
 }
 
+if [[ -d /etc/nginx/sites-available && -d /etc/nginx/sites-enabled ]]; then
+  SITE_FILE="/etc/nginx/sites-available/$APP.conf"
+else
+  SITE_FILE="/etc/nginx/conf.d/$APP.conf"
+fi
+
+# La marca de la configuración escrita y la que nginx está sirviendo de verdad.
+marca_esperada() { sed -nE 's/^[[:space:]]*return 200 "([0-9a-f]{12})\\n";$/\1/p' "$SITE_FILE" 2>/dev/null | head -n1; }
+marca_servida() {
+  local scheme="http" port="$PORT" host="${DOMAIN:-localhost}"
+  if (( TLS_ON )); then scheme="https"; port=443; fi
+  curl -sS -k --max-time 5 --noproxy '*' --resolve "$host:$port:127.0.0.1" "$scheme://$host:$port/.ftth-config" 2>/dev/null || true
+}
+
 install_vhost() {
-  local avail enabled="" new backup="" had_enabled=0 had_avail=0
-  if [[ -d /etc/nginx/sites-available && -d /etc/nginx/sites-enabled ]]; then
-    avail="/etc/nginx/sites-available/$APP.conf"
-    enabled="/etc/nginx/sites-enabled/$APP.conf"
-  else
-    avail="/etc/nginx/conf.d/$APP.conf"
-  fi
+  local avail="$SITE_FILE" enabled="" new backup="" had_enabled=0 had_avail=0
+  [[ "$avail" == /etc/nginx/sites-available/* ]] && enabled="/etc/nginx/sites-enabled/$APP.conf"
   [[ -f "$avail" ]] && had_avail=1
   [[ -n "$enabled" && -L "$enabled" ]] && had_enabled=1
 
@@ -936,6 +1087,10 @@ install_vhost() {
       info "nginx no está atendiendo el puerto $PORT: se recarga."
       nginx_apply || die "nginx no pudo recargar. Revisá: journalctl -u nginx -n 30"
       ok "nginx recargado"
+    elif [[ "$(marca_servida)" != "$(marca_esperada)" ]]; then
+      info "nginx todavía atiende con una configuración anterior: se recarga."
+      nginx_apply || die "nginx no pudo recargar. Revisá: journalctl -u nginx -n 30"
+      ok "nginx recargado"
     fi
     return
   fi
@@ -968,6 +1123,11 @@ else
   install_vhost
 fi
 
+# ------------------------------------------------------------------ 6. visor
+
+step "6/7 Visor web"
+deploy_web
+
 # -------------------------------------------------------------- 6. verificación
 
 step "7/7 Verificación"
@@ -987,13 +1147,17 @@ verify_site() {
     if eval "$2"; then ok "$1"; else warn "FALLÓ: $1"; failures=$((failures + 1)); fi
   }
 
-  # La recarga de nginx no es instantánea: se espera hasta 15 s a que atienda el sitio nuevo.
-  local location=""
+  # La recarga de nginx no es instantánea (los procesos viejos atienden un rato
+  # más): se espera hasta 15 s a que responda la marca de la configuración nueva.
+  local location="" expected served=""
+  expected="$(marca_esperada)"
   for _ in $(seq 1 30); do
-    code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/" 2>/dev/null || true)"
-    [[ "$code" == 302 ]] && break
+    served="$(marca_servida)"
+    [[ -n "$expected" && "$served" == "$expected" ]] && break
     sleep 0.5
   done
+  [[ -n "$expected" && "$served" == "$expected" ]] || warn "nginx todavía no atiende con la configuración nueva (marca '$served', se esperaba '$expected')."
+  code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/" 2>/dev/null || true)"
   # shellcheck disable=SC2034  # se usa dentro de check (eval)
   location="$(curl "${opts[@]}" -o /dev/null -w '%{redirect_url}' "$base/" 2>/dev/null || true)"
   check "Sin sesión, la página manda a entrar (HTTP $code)" '[[ "$code" == 302 && "$location" == */login.html ]]'
@@ -1003,6 +1167,14 @@ verify_site() {
 
   code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/auth/health" || true)"
   check "El servicio de sesión responde a través de nginx" '[[ "$code" == 200 ]]'
+
+  code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/api/salud" || true)"
+  check "La API de la red responde a través de nginx" '[[ "$code" == 200 ]]'
+  code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/api/yo" || true)"
+  check "Sin sesión, la API responde 401 (HTTP $code)" '[[ "$code" == 401 ]]'
+  code="$(curl -sS --max-time 5 --noproxy '*' -H 'X-Usuario: verificacion' -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$API_PORT/api/yo" || true)"
+  check "La API no atiende a quien no sea nginx (HTTP $code)" '[[ "$code" == 403 ]]'
 
   # Recorrido completo con un usuario temporal: entrar, ver el mapa, salir.
   local probe="verificacion-$$" pw
@@ -1015,6 +1187,9 @@ verify_site() {
   code="$(curl "${opts[@]}" -b "$WORK/cookies" -o "$WORK/index.html" -w '%{http_code}' "$base/" || true)"
   check "Con sesión, la página responde" '[[ "$code" == 200 ]] && grep -q "id=\"map\"" "$WORK/index.html"'
   opts+=(-b "$WORK/cookies")
+
+  code="$(curl "${opts[@]}" -o "$WORK/yo.json" -w '%{http_code}' "$base/api/yo" || true)"
+  check "Con sesión, la API sabe quién es el usuario" '[[ "$code" == 200 ]] && grep -q "\"$probe\"" "$WORK/yo.json"'
 
   file="$(find "$ROOT/web/vendor/" -maxdepth 2 -name 'maplibre-gl.mjs' | head -n1)"
   type="$(curl "${opts[@]}" -o /dev/null -w '%{content_type}' "$base/${file#"$ROOT/web/"}" || true)"
@@ -1049,7 +1224,7 @@ verify_site() {
 }
 
 if (( SIMULATE )); then
-  sim "comprobar por HTTP el login, la página, los módulos, las tipografías y el mapa de calles"
+  sim "comprobar por HTTP el login, la API, la página, los módulos, las tipografías y el mapa de calles"
 elif (( SKIP_NGINX )); then
   info "Omitida (--sin-nginx)"
 else
