@@ -15,6 +15,7 @@ Usa la API instalada (/srv/ftth/api/ftth-api.py) y su configuración
 
 import importlib.util
 import os
+import re
 import statistics
 import sys
 import time
@@ -79,6 +80,37 @@ def main() -> int:
         print("Distancia de cada NAP a la zona con más NAPs: "
               + repartir([d(lugar[i], lugar[densa]) for i in con],
                          [(150, "< 150 m"), (500, "150–500 m"), (2000, "500 m–2 km"), (None, "> 2 km")]) + ".")
+
+    # Por OLT de Wispro: cuántas NAPs (y con qué prefijo de nombre) y cuántos contratos.
+    print("\nPor OLT de Wispro (la de cada NAP):")
+    prefijo = lambda n: (re.match(r"[A-Za-z]*", str(n.get("name") or "")).group(0).upper() or "(sin letras)")
+    olt_de = {i: (dw.olts.get(n.get("olt_id")) or {}).get("name") or "sin OLT" for i, n in naps.items()}
+    for olt in sorted(set(olt_de.values())):
+        de_olt = [i for i in naps if olt_de[i] == olt]
+        prefijos = Counter(prefijo(naps[i]) for i in de_olt)
+        contratos = sum(len(dw.por_nap.get(i, [])) for i in de_olt)
+        con_contratos = sum(1 for i in de_olt if dw.por_nap.get(i))
+        print(f"  {olt}: {len(de_olt)} NAPs (nombres que empiezan con "
+              + ", ".join(f"{k}: {v}" for k, v in prefijos.most_common(6))
+              + f"); con contratos: {con_contratos}; contratos: {contratos}.")
+    if con:
+        grupos = {}
+        for i in con:
+            grupos.setdefault((round(lugar[i][0], 5), round(lugar[i][1], 5)), []).append(i)
+        pares = [g for g in grupos.values() if len(g) > 1]
+        if pares:
+            combinaciones = Counter(" + ".join(sorted(olt_de[i] for i in g)) for g in pares)
+            print(f"NAPs en el mismo lugar: {len(pares)} lugares; OLTs de cada grupo: "
+                  + ", ".join(f"{k}: {v}" for k, v in combinaciones.most_common(5)) + ".")
+            usadas = Counter(sum(1 for i in g if dw.por_nap.get(i)) for g in pares)
+            palabra = {0: "ninguna", 1: "una", 2: "dos", 3: "tres"}
+            print("En cada uno de esos lugares, cuántas NAPs tienen contratos: "
+                  + ", ".join(f"{palabra.get(k, k)}: {v} lugares" for k, v in sorted(usadas.items())) + ".")
+            prefijos_par = Counter(" + ".join(sorted(prefijo(naps[i]) for i in g)) for g in pares)
+            print("Nombres de cada grupo: " + ", ".join(f"{k}: {v}" for k, v in prefijos_par.most_common(5)) + ".")
+            con_uso = Counter(prefijo(naps[i]) for g in pares for i in g if dw.por_nap.get(i))
+            print("De esos grupos, las NAPs con contratos empiezan con: "
+                  + (", ".join(f"{k}: {v}" for k, v in con_uso.most_common(5)) or "ninguna tiene") + ".")
 
     items = [dw.contrato(c) for c in dw.contratos if c.get("id")]
     ubicados = [x for x in items if x["ubicacion"]]
