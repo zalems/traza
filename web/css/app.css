@@ -1841,6 +1841,14 @@ button.integ-enlace:hover {
   overflow-wrap: anywhere;
 }
 
+/* Lo de una OLT que no se trae y ya está en el mapa: se puede quitar. */
+.importar-en-mapa {
+  margin: -2px 0 8px 38px;
+  color: var(--muted);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
 .importar-omitidos {
   margin: 6px 0 0;
   font-size: 13.5px;

@@ -327,12 +327,23 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
       },
       // Traer de Wispro todas las cajas y sus clientes: lo que falta (sin cambiar nada),
       // agregarlo de una vez y deshacerlo.
-      previaImportacion: (redId) => api(`api/integracion/importacion?red=${redId}`, { espera: 60000 }),
+      previaImportacion(redId, { olts = null, leer = true } = {}) {
+        const consulta = new URLSearchParams({ red: String(redId) });
+        if (olts) consulta.set('olts', olts.length ? olts.join(',') : '-'); // '-': ninguna
+        if (!leer) consulta.set('leer', '0'); // con la última lectura de Wispro
+        return api(`api/integracion/importacion?${consulta}`, { espera: 60000 });
+      },
       async importarRed(redId, opciones) {
         const res = await api('api/integracion/importacion', { method: 'POST', body: { red: redId, ...opciones }, espera: 90000 });
         if (otraRed(redId)) return null;
         red.aplicar(res);
         encuadrar(res.elementos.map((e) => e.geometry.coordinates));
+        return res;
+      },
+      async quitarOlts(redId, olts) {
+        const res = await api('api/integracion/importacion/quitar', { method: 'POST', body: { red: redId, olts }, espera: 60000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
         return res;
       },
       async deshacerImportacion(redId, version) {

@@ -43,9 +43,11 @@ Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
   POST   /api/integracion/nap/importar {elemento, contratos}: agrega al mapa los clientes que faltan
   POST   /api/integracion/vincular     {cliente, contrato}: confirma que un cliente es el de ese contrato
   POST   /api/integracion/desvincular  {cliente, contrato, deshacer?}: ese cliente no es el de ese contrato
-  GET    /api/integracion/importacion?red=N    qué cajas y clientes de Wispro faltan en el mapa (sin cambiar nada)
-  POST   /api/integracion/importacion  {red, cajas, clientes, igual?}: los agrega de una vez (una versión)
+  GET    /api/integracion/importacion?red=N[&olts=A,B][&leer=0]  qué cajas y clientes de Wispro faltan en el mapa
+         (sin cambiar nada), de qué OLTs de Wispro; leer=0: con la última lectura de Wispro
+  POST   /api/integracion/importacion  {red, cajas, clientes, igual?, olts?}: los agrega de una vez (una versión)
   POST   /api/integracion/importacion/deshacer {red, version}: quita lo que agregó esa importación
+  POST   /api/integracion/importacion/quitar {red, olts}: quita lo que se trajo de esas OLTs de Wispro
 
 Extremos de una unión, siempre dentro de un elemento:
   cCABLE:LADO:FIBRA   fibra de un cable; LADO a = el tramo hacia el comienzo del
@@ -83,6 +85,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
@@ -739,34 +742,62 @@ class Store:
                 "AND json_extract(detalle, '$.lote') = ?", (red_id, lote))]
             if not ids:
                 raise ApiError(HTTPStatus.NOT_FOUND, "No hay una importación con ese número en esta red.")
-            v = None
-            t = now_iso()
-            quitados, quedan = [], 0
-            for element_id in ids:
-                row = self.get_element(element_id)
-                if row is None:
-                    continue  # ya se borró
-                ocupado = (self._attached_cables(element_id)
-                           or self.conn().execute("SELECT 1 FROM equipos WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
-                                                  (element_id,)).fetchone()
-                           or self.conn().execute("SELECT 1 FROM fusiones WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
-                                                  (element_id,)).fetchone())
-                if row["version"] != lote or ocupado:
-                    quedan += 1
-                    continue
-                if v is None:
-                    v = self.next_version()
-                self.conn().execute(
-                    "UPDATE elementos SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
-                    (t, t, usuario, v, element_id))
-                self.log_change(red_id, usuario, "borrar", "elementos", element_id,
-                                {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row),
-                                 "origen": "deshacer importación", "lote": lote})
-                quitados.append({"id": element_id, "borrado": True, "modificado_por": usuario, "version": v})
+            out = self._quitar_importados(red_id, {i: lote for i in ids}, usuario, "deshacer importación")
             self.commit()
         except Exception:
             self.rollback()
             raise
+        return out
+
+    def quitar_importados(self, red_id: int, ids, usuario: str, origen: str) -> dict:
+        """Quita, de estos elementos, los que agregó una importación y siguen como quedaron
+        (lo dibujado a mano, lo que se tocó después o tiene cables, equipos o uniones, queda)."""
+        self.begin()
+        try:
+            lotes = {i: None for i in ids}
+            lista = list(lotes)
+            for k in range(0, len(lista), 500):
+                parte = lista[k:k + 500]
+                for r in self.conn().execute(
+                        "SELECT registro_id, json_extract(detalle, '$.lote') AS lote FROM historial WHERE red_id = ? "
+                        f"AND tabla = 'elementos' AND accion = 'crear' AND registro_id IN ({','.join('?' * len(parte))})",
+                        (red_id, *parte)):
+                    if r["lote"] is not None:
+                        lotes[r["registro_id"]] = r["lote"]
+            out = self._quitar_importados(red_id, lotes, usuario, origen)
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return out
+
+    def _quitar_importados(self, red_id: int, lotes: dict, usuario: str, origen: str) -> dict:
+        """Dentro de una transacción: quita los elementos de `lotes` ({id: número de la
+        importación que lo agregó, o None}) que siguen con la versión de su importación y
+        no tienen cables, equipos ni uniones. Todo lo quitado va en una versión."""
+        v, t = None, now_iso()
+        quitados, quedan = [], 0
+        for element_id, lote in lotes.items():
+            row = self.get_element(element_id)
+            if row is None or row["red_id"] != red_id:
+                continue  # ya se borró
+            ocupado = (self._attached_cables(element_id)
+                       or self.conn().execute("SELECT 1 FROM equipos WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
+                                              (element_id,)).fetchone()
+                       or self.conn().execute("SELECT 1 FROM fusiones WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
+                                              (element_id,)).fetchone())
+            if lote is None or row["version"] != lote or ocupado:
+                quedan += 1
+                continue
+            if v is None:
+                v = self.next_version()
+            self.conn().execute(
+                "UPDATE elementos SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                (t, t, usuario, v, element_id))
+            self.log_change(red_id, usuario, "borrar", "elementos", element_id,
+                            {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row),
+                             "origen": origen, "lote": lote})
+            quitados.append({"id": element_id, "borrado": True, "modificado_por": usuario, "version": v})
         return {"elementos": quitados, "version": v if v is not None else self.version(),
                 "quitados": len(quitados), "quedan": quedan}
 
@@ -3082,10 +3113,14 @@ class Integraciones:
                 out.append(int(clave))
         return out
 
-    def previa_importacion(self, store, red_id: int) -> dict:
-        """Qué cajas y clientes de Wispro se agregarían al mapa, sin cambiar nada."""
-        dw, nota = self._wispro_reciente(red_id)
-        plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id))
+    def previa_importacion(self, store, red_id: int, olts=None, fresco: bool = True) -> dict:
+        """Qué cajas y clientes de Wispro se agregarían al mapa, sin cambiar nada. Con
+        fresco=False (al elegir otras OLTs) alcanza con la última lectura de Wispro."""
+        if fresco:
+            dw, nota = self._wispro_reciente(red_id)
+        else:
+            (_, dw), nota = self._wispro_o_error(red_id), None
+        plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id), olts=olts)
         out = {k: v for k, v in plan.items() if not k.startswith("_")}
         out["wispro"] = {"leido": dw.cuando}
         out["errores"] = [nota] if nota else []
@@ -3094,14 +3129,15 @@ class Integraciones:
         out["misma_cuenta"] = [r["nombre"] for r in otras if r]
         return out
 
-    def importar_red(self, store, red_id: int, cajas: bool, clientes: bool, igual, usuario: str) -> dict:
+    def importar_red(self, store, red_id: int, cajas: bool, clientes: bool, igual, olts, usuario: str) -> dict:
         """Agrega al mapa las cajas y los clientes de Wispro que faltan, de una vez (una
-        versión: se deshace con deshacer_importacion). Las cajas que podrían estar ya
-        en el mapa (dudosas) van solo si están en `igual`."""
+        versión: se deshace con deshacer_importacion), de las OLTs de `olts` (None: las
+        que se eligen solas). Las cajas que podrían estar ya en el mapa (dudosas) van
+        solo si están en `igual`."""
         _, dw = self._wispro_o_error(red_id)
 
         def preparar():
-            plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id), igual)
+            plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id), igual, olts)
             nuevas = (plan["_cajas"] if cajas else []) + plan["_igual"]
             nuevos = nuevas + (plan["_clientes"] if clientes else [])
             if len(nuevos) > MAX_IMPORTACION:
@@ -3109,6 +3145,18 @@ class Integraciones:
             return nuevos, {"agregados": {"cajas": len(nuevas), "clientes": len(nuevos) - len(nuevas)}}
 
         return store.importar_elementos(red_id, preparar, usuario, origen="wispro", lote=True)
+
+    def quitar_olts(self, store, red_id: int, olts, usuario: str) -> dict:
+        """Quita del mapa las cajas y los clientes de estas OLTs de Wispro (por la NAP de cada
+        caja y la de cada contrato) que agregó una importación y siguen como quedaron."""
+        _, dw = self._wispro_o_error(red_id)
+        olts = set(olts)
+        naps = {i for i, n in dw.naps_por_id.items() if isinstance(i, str) and i and clave_olt(n) in olts}
+        ids = [r["id"] for r in store.naps_red(red_id) if (caja_de_wispro(dw, r)[0] or {}).get("id") in naps]
+        cruce = Cruce(dw, store.clientes_red(red_id))
+        ids += [cliente_id for cliente_id, (cid, _) in cruce.de_cliente.items()
+                if cid in cruce.items and cruce.items[cid]["nap"] in naps]
+        return store.quitar_importados(red_id, ids, usuario, "quitar lo de otra OLT")
 
 
 def cliente_de_contrato(item: dict, nap_nombre) -> dict:
@@ -3142,24 +3190,69 @@ def caja_de_nap(n: dict, nombre: str, u) -> dict:
             "lon": lon, "lat": lat, "datos": datos_field({"datos": datos}), "notas": ""}
 
 
-def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dict:
+SIN_OLT = "sin-olt"  # las NAPs de Wispro que no tienen OLT, como si fueran una
+
+
+def clave_olt(n: dict) -> str:
+    olt = n.get("olt_id")
+    return olt if isinstance(olt, str) and olt else SIN_OLT
+
+
+def grupos_olt(dw: DatosWispro, naps: list, en_mapa_por_nap: Counter) -> list:
+    """Las NAPs de Wispro por OLT: cuántas son, cuántas tienen contratos, cuántas están en el
+    mismo lugar que una NAP de otra OLT (gemelas) y cuántas cajas del mapa son de esa OLT."""
+    grupos, lugares = {}, {}
+    for n in naps:
+        k = clave_olt(n)
+        g = grupos.setdefault(k, {"id": k, "nombre": texto_corto((dw.olts.get(k) or {}).get("name"), 80)
+                                   or ("Sin OLT" if k == SIN_OLT else "OLT sin nombre"),
+                                   "cajas": 0, "con_contratos": 0, "contratos": 0, "gemelas": 0, "en_mapa": 0})
+        g["cajas"] += 1
+        contratos = len(dw.por_nap.get(n["id"], []))
+        g["con_contratos"] += 1 if contratos else 0
+        g["contratos"] += contratos
+        g["en_mapa"] += en_mapa_por_nap.get(n["id"], 0)
+        u = ubicacion(n.get("latitude"), n.get("longitude"))
+        if u:
+            lugares.setdefault((round(u[0], 5), round(u[1], 5)), []).append(k)  # el mismo lugar: a menos de 1 m
+    for ks in lugares.values():
+        for k in ks:
+            if any(o != k for o in ks):
+                grupos[k]["gemelas"] += 1
+    activa = lambda g: g["con_contratos"] > 0.05 * g["cajas"]
+    for g in grupos.values():
+        # Reemplazada: casi sin contratos y con la mayoría de sus NAPs en el mismo lugar que las de
+        # otra OLT que sí se usa (por ejemplo, las cajas de una OLT vieja cargadas de nuevo en la nueva).
+        g["reemplazada"] = (len(grupos) >= 2 and not activa(g) and g["gemelas"] * 2 >= g["cajas"]
+                            and any(o is not g and activa(o) for o in grupos.values()))
+    return sorted(grupos.values(), key=lambda g: (-g["contratos"], -g["cajas"], g["nombre"]))
+
+
+def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=(), olts=None) -> dict:
     """Qué cajas y qué clientes de Wispro faltan en el mapa, listos para agregar
     (_cajas, _clientes), y por qué no se agrega el resto. Usa el mismo cruce que la
-    ficha de la caja: no se agrega lo que ya está ni lo que podría estar. Una caja
-    del mapa sin vincular puede ser una (y solo una) de las NAPs que faltan: la más
-    cercana, a menos de DUDA_CAJA_M, queda como dudosa y se agrega solo si su id
-    está en `igual` (_igual)."""
-    en_mapa, sueltas = set(), []
+    ficha de la caja: no se agrega lo que ya está ni lo que podría estar. Se traen
+    las NAPs (y los contratos de las NAPs) de las OLTs de `olts`; sin elegir, de todas
+    salvo las que parecen reemplazadas por otra. Una caja del mapa sin vincular puede
+    ser una (y solo una) de las NAPs que faltan: la más cercana, a menos de
+    DUDA_CAJA_M, queda como dudosa y se agrega solo si su id está en `igual` (_igual)."""
+    en_mapa, sueltas, en_mapa_por_nap = set(), [], Counter()
     for r in naps_rows:
         nap, _ = caja_de_wispro(dw, r)
         if nap is not None:
             en_mapa.add(nap.get("id"))
+            en_mapa_por_nap[nap.get("id")] += 1
         else:
             sueltas.append(r)  # cajas del mapa sin NAP de Wispro: podrían ser una de las que faltan
     igual = set(igual)
     naps = [n for i, n in dw.naps_por_id.items() if isinstance(i, str) and i]  # una vez cada una
+    grupos = grupos_olt(dw, naps, en_mapa_por_nap)
+    elegidas = {g["id"] for g in grupos if not g["reemplazada"]} if olts is None else set(olts)
+    nombre_olt = {g["id"]: g["nombre"] for g in grupos}
     faltan, cajas_omitidas, cajas_ya = [], [], 0
     for n in naps:
+        if clave_olt(n) not in elegidas:
+            continue
         nombre = texto_corto(n.get("name"), MAX_NOMBRE) or "NAP"
         if n["id"] in en_mapa:
             cajas_ya += 1
@@ -3196,6 +3289,11 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
 
     cruce = Cruce(dw, clientes_rows)
     clientes, motivos, clientes_ya = [], {}, 0
+    clientes_por_olt = Counter()  # clientes del mapa de cada OLT (por la NAP de su contrato)
+    for cliente_id, (cid, _) in cruce.de_cliente.items():
+        n = dw.naps_por_id.get(cruce.items[cid]["nap"]) if cid in cruce.items else None
+        if n is not None:
+            clientes_por_olt[clave_olt(n)] += 1
 
     def omitir(motivo, item):
         numero = f" #{item['numero']}" if item["numero"] is not None else ""
@@ -3206,10 +3304,12 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
         en_traza = cruce.en_traza(cid)
         if n is None:
             omitir("no tiene caja en Wispro", item)
-        elif en_traza and any(not d.get("lejos_m") for d in en_traza.get("dudosos", [])):
-            omitir("podría ser un cliente que ya está en el mapa: se confirma desde su caja", item)
         elif en_traza and not en_traza.get("dudosos"):
             clientes_ya += 1
+        elif clave_olt(n) not in elegidas:
+            omitir(f"es de una caja de {nombre_olt.get(clave_olt(n), 'otra OLT')}, que no se trae", item)
+        elif en_traza and any(not d.get("lejos_m") for d in en_traza.get("dudosos", [])):
+            omitir("podría ser un cliente que ya está en el mapa: se confirma desde su caja", item)
         elif not item["ubicacion"]:
             omitir("no tiene ubicación en Wispro", item)
         else:
@@ -3218,7 +3318,11 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
                 omitir("su ubicación en Wispro está a más de 2 km de su caja", item)
             else:
                 clientes.append(cliente_de_contrato(item, n.get("name")))
+    for g in grupos:
+        g["elegida"] = g["id"] in elegidas
+        g["clientes_en_mapa"] = clientes_por_olt.get(g["id"], 0)
     return {
+        "olts": grupos,
         "cajas": {"total": len(naps), "nuevas": len(cajas), "ya": cajas_ya, "omitidas": cajas_omitidas,
                   "dudosas": dudosas},
         "clientes": {"total": len(cruce.items), "nuevos": len(clientes), "ya": clientes_ya,
@@ -3227,6 +3331,16 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
         "_igual": con_igual,
         "_clientes": clientes,
     }
+
+
+def olts_field(data: dict, opcional: bool = False):
+    """Las OLTs de Wispro elegidas: una lista de ids (None si es opcional y no vino)."""
+    value = data.get("olts")
+    if value is None and opcional:
+        return None
+    if not isinstance(value, list) or len(value) > 50 or not all(isinstance(o, str) and 0 < len(o) <= 100 for o in value):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "olts tiene que ser una lista de OLTs de Wispro.")
+    return value
 
 
 def contratos_field(data: dict) -> list:
@@ -3493,7 +3607,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/integracion" and method == "GET":
             return HTTPStatus.OK, integ.estado(self.red_param(q("red")))
         if path == "/api/integracion/importacion" and method == "GET":
-            return HTTPStatus.OK, integ.previa_importacion(self.store, self.red_param(q("red")))
+            olts = q("olts", None)  # sin olts: las que se eligen solas
+            olts = None if olts is None else [o for o in olts.split(",") if o]
+            if olts is not None and (len(olts) > 50 or not all(len(o) <= 100 for o in olts)):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "olts inválidas.")
+            return HTTPStatus.OK, integ.previa_importacion(self.store, self.red_param(q("red")), olts, q("leer") != "0")
         if path == "/api/integracion/importacion" and method == "POST":
             data = self.read_json()
             red_id = self.red_param(data.get("red"))
@@ -3505,7 +3623,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "igual tiene que ser una lista de NAPs de Wispro.")
             if not cajas and not clientes and not igual:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "Elegí cajas, clientes o las dos cosas.")
-            return HTTPStatus.OK, integ.importar_red(self.store, red_id, cajas, clientes, igual, user)
+            return HTTPStatus.OK, integ.importar_red(self.store, red_id, cajas, clientes, igual,
+                                                     olts_field(data, opcional=True), user)
+        if path == "/api/integracion/importacion/quitar" and method == "POST":
+            data = self.read_json()
+            red_id = self.red_param(data.get("red"))
+            return HTTPStatus.OK, integ.quitar_olts(self.store, red_id, olts_field(data), user)
         if path == "/api/integracion/importacion/deshacer" and method == "POST":
             data = self.read_json()
             red_id = self.red_param(data.get("red"))

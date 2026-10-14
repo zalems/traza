@@ -1406,10 +1406,27 @@ export function setupFicha({ root, red, acciones }) {
   function importarWispro({ redId, nombre }) {
     aperturasImportar += 1;
     const id = `importar-${redId}-${aperturasImportar}`; // otra apertura no pisa a esta
+    // Las OLTs de Wispro elegidas se recuerdan en este navegador (sin elegir: las que
+    // propone el servidor, todas menos las que parecen reemplazadas por otra).
+    const claveOlts = `ftth.importar.olts.${redId}`;
+    const oltsGuardadas = () => {
+      try {
+        const v = JSON.parse(localStorage.getItem(claveOlts) ?? 'null');
+        return Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : null;
+      } catch {
+        return null;
+      }
+    };
+    const guardarOlts = (lista) => {
+      try {
+        if (lista) localStorage.setItem(claveOlts, JSON.stringify(lista));
+        else localStorage.removeItem(claveOlts);
+      } catch { /* sin almacenamiento: se elige cada vez */ }
+    };
     const vista = {
       previa: null, error: null, resultado: null, deshecho: null, quitados: null,
-      agregando: false, deshaciendo: false, confirmar: false, foco: null,
-      cajas: true, clientes: true, igual: new Set(),
+      agregando: false, deshaciendo: false, recalculando: false, confirmar: false, confirmarOlt: null, foco: null,
+      cajas: true, clientes: true, igual: new Set(), olts: oltsGuardadas(),
     };
     const esta = () => !root.hidden && modo === 'importar' && root.dataset.id === id;
     const conPanel = () => Boolean(acciones.integracion.estado()?.panel);
@@ -1433,14 +1450,32 @@ export function setupFicha({ root, red, acciones }) {
       anunciar(texto);
     }
 
+    // Lo leído: las OLTs que quedaron elegidas y, de las dudosas marcadas, las que siguen.
+    function tomar(previa) {
+      vista.previa = previa;
+      vista.olts = (previa.olts ?? []).filter((g) => g.elegida).map((g) => g.id);
+      const dudosas = new Set(previa.cajas.dudosas.map((d) => d.id));
+      vista.igual = new Set([...vista.igual].filter((i) => dudosas.has(i)));
+    }
+
+    async function pedirPrevia(leerWispro) {
+      let previa = await acciones.integracion.previaImportacion(redId, { olts: vista.olts, leer: leerWispro });
+      // Lo guardado ya no corresponde a ninguna OLT de Wispro: se vuelve a lo que propone el servidor.
+      const conocidas = new Set((previa.olts ?? []).map((g) => g.id));
+      if (vista.olts?.length && !vista.olts.some((o) => conocidas.has(o))) {
+        vista.olts = null;
+        guardarOlts(null);
+        previa = await acciones.integracion.previaImportacion(redId, { leer: false });
+      }
+      return previa;
+    }
+
     function leer() {
-      Object.assign(vista, { previa: null, error: null, confirmar: false });
+      Object.assign(vista, { previa: null, error: null, confirmar: false, confirmarOlt: null });
       pintar();
-      acciones.integracion.previaImportacion(redId)
+      pedirPrevia(true)
         .then((previa) => {
-          vista.previa = previa;
-          const dudosas = new Set(previa.cajas.dudosas.map((d) => d.id));
-          vista.igual = new Set([...vista.igual].filter((i) => dudosas.has(i)));
+          tomar(previa);
           vista.foco = 'resumen';
         })
         .catch((err) => {
@@ -1450,24 +1485,58 @@ export function setupFicha({ root, red, acciones }) {
         .finally(() => { if (esta()) pintar(); });
     }
 
+    // Volver a calcular sin dejar de mostrar lo que hay (al elegir otras OLTs, al quitar).
+    function recalcular(foco) {
+      vista.recalculando = true;
+      ocupar(null, 'Calculando…');
+      pedirPrevia(false)
+        .then((previa) => {
+          tomar(previa);
+          vista.foco = foco;
+        })
+        .catch((err) => {
+          acciones.integracion.aviso(err.message);
+          vista.foco = foco;
+        })
+        .finally(() => {
+          vista.recalculando = false;
+          if (esta()) pintar();
+        });
+    }
+
+    function elegirOlt(oltId, si) {
+      const elegidas = new Set(vista.olts ?? []);
+      if (si) elegidas.add(oltId);
+      else elegidas.delete(oltId);
+      vista.olts = [...elegidas];
+      vista.quitados = null;
+      guardarOlts(vista.olts);
+      recalcular(`olt-${oltId}`);
+    }
+
     const textoAgregados = (res) => {
       const { cajas = 0, clientes = 0 } = res.agregados ?? {};
       return cajas || clientes
         ? `Se agregaron ${plural(cajas, 'caja', 'cajas')} y ${plural(clientes, 'cliente', 'clientes')}.`
         : 'No había nada nuevo para agregar.';
     };
-    const textoQuitados = (res) => `Se quitaron ${plural(res.quitados, 'elemento', 'elementos')}`
-      + (res.quedan ? `; ${plural(res.quedan, 'queda', 'quedan')} porque ya se ${res.quedan === 1 ? 'tocó o tiene' : 'tocaron o tienen'} cables o carta.` : '.');
+    // porque: por qué queda lo que no se quitó (en singular y en plural).
+    const POR_TOCADO = ['ya se tocó o tiene cables o carta', 'ya se tocaron o tienen cables o carta'];
+    const POR_OLT = ['se dibujó a mano, se tocó o tiene cables o carta', 'se dibujaron a mano, se tocaron o tienen cables o carta'];
+    const textoQuitados = (res, porque = POR_TOCADO) => `Se quitaron ${plural(res.quitados, 'elemento', 'elementos')}`
+      + (res.quedan ? `; ${plural(res.quedan, 'queda', 'quedan')} porque ${porque[res.quedan === 1 ? 0 : 1]}.` : '.');
 
     async function agregar(btn) {
       const p = vista.previa;
       vista.agregando = true;
+      vista.quitados = null;
       ocupar(btn, 'Agregando…');
       try {
         const res = await acciones.integracion.importarRed(redId, {
           cajas: vista.cajas && p.cajas.nuevas > 0,
           clientes: vista.clientes && p.clientes.nuevos > 0,
           igual: [...vista.igual],
+          olts: vista.olts ?? undefined,
         });
         if (res) {
           vista.resultado = res;
@@ -1508,8 +1577,24 @@ export function setupFicha({ root, red, acciones }) {
 
     // Deshacer la última importación (de otra vez): después se vuelve a leer qué falta.
     const deshacerUltima = (btn) => deshacer(btn, vista.previa.ultima.version, (res) => {
-      vista.quitados = res;
+      vista.quitados = { ...res, porque: POR_TOCADO };
     }).then(() => { if (esta()) leer(); });
+
+    // Quitar del mapa lo que se trajo de una OLT que no se usa.
+    async function quitarOlt(btn, g) {
+      vista.deshaciendo = true;
+      ocupar(btn, 'Quitando…');
+      try {
+        const res = await acciones.integracion.quitarOlts(redId, [g.id]);
+        if (res) vista.quitados = { ...res, porque: POR_OLT };
+      } catch (err) {
+        acciones.integracion.aviso(err.message);
+      } finally {
+        vista.deshaciendo = false;
+        vista.confirmarOlt = null;
+      }
+      if (esta()) recalcular('resumen');
+    }
 
     const hayAlgo = () => {
       const p = vista.previa;
@@ -1518,8 +1603,8 @@ export function setupFicha({ root, red, acciones }) {
     const actualizar = () => { if (agregarBtn) agregarBtn.disabled = !hayAlgo(); };
 
     // Casillas: cambiarlas no rehace la ficha (el foco y lo desplegado quedan donde están).
-    function casilla(texto, detalle, { marcada, deshabilitada, cambiar }) {
-      const input = h('input', { type: 'checkbox', checked: marcada, disabled: deshabilitada });
+    function casilla(texto, detalle, { marcada, deshabilitada, cambiar, foco = false }) {
+      const input = h('input', { type: 'checkbox', checked: marcada, disabled: deshabilitada, 'data-foco': foco });
       input.addEventListener('change', () => {
         cambiar(input.checked);
         actualizar();
@@ -1555,6 +1640,49 @@ export function setupFicha({ root, red, acciones }) {
           })))));
     }
 
+    // Las OLTs de Wispro: se traen las cajas (y los clientes de esas cajas) de las marcadas.
+    function bloqueOlts(olts, ocupado) {
+      if (olts.length < 2) return null;
+      return h('section.importar-bloque', { 'aria-label': 'OLTs de Wispro' },
+        h('h3', { text: 'OLTs de Wispro' }),
+        h('p.ficha-sub', { text: 'Se traen las cajas de las OLTs marcadas, con sus clientes.' }),
+        ...olts.map((g) => {
+          const contratos = g.con_contratos ? `${g.con_contratos} con contratos` : 'ninguna con contratos';
+          const detalle = `${plural(g.cajas, 'caja', 'cajas')}, ${contratos}.`
+            + (g.reemplazada ? ' Parece reemplazada por otra: sus cajas están en el mismo lugar que las de otra OLT.' : '');
+          const elegir = casilla(g.nombre, detalle, {
+            marcada: g.elegida, deshabilitada: ocupado, foco: marca(`olt-${g.id}`), cambiar: (si) => elegirOlt(g.id, si),
+          });
+          return [elegir, g.elegida ? null : enMapaDeOlt(g, ocupado)];
+        }));
+    }
+
+    // Lo que ya está en el mapa de una OLT que no se trae: se puede quitar (con confirmación).
+    function enMapaDeOlt(g, ocupado) {
+      const partes = [g.en_mapa ? plural(g.en_mapa, 'caja', 'cajas') : null,
+        g.clientes_en_mapa ? plural(g.clientes_en_mapa, 'cliente', 'clientes') : null].filter(Boolean);
+      if (!partes.length) return null;
+      if (vista.confirmarOlt === g.id) {
+        return h('div.ficha-confirmar', {},
+          h('p', { text: `Se quitan del mapa las cajas y los clientes de ${g.nombre} que trajo una importación y no se tocaron después. ¿Quitarlos?`,
+            tabindex: '-1', 'data-foco': marca('confirmar-olt') }),
+          botones(
+            boton('Sí, quitarlos', (ev) => quitarOlt(ev.currentTarget, g), { class: 'peligro', disabled: ocupado }),
+            boton('No', () => {
+              vista.confirmarOlt = null;
+              vista.foco = `quitar-${g.id}`;
+              pintar();
+            }, { disabled: ocupado }),
+          ));
+      }
+      return h('p.importar-en-mapa', {}, `En el mapa hay ${partes.join(' y ')} de esta OLT: `,
+        boton(g.clientes_en_mapa ? 'quitarlos' : 'quitarlas', () => {
+          vista.confirmarOlt = g.id;
+          vista.foco = 'confirmar-olt';
+          pintar();
+        }, { class: 'integ-enlace', disabled: ocupado, 'data-foco': marca(`quitar-${g.id}`) }));
+    }
+
     function bloqueUltima(ultima, ocupado) {
       if (!ultima) return null;
       const texto = `${formatFecha(ultima.fecha)}, por ${ultima.usuario ?? '—'}: ${plural(ultima.elementos, 'elemento sigue', 'elementos siguen')} en el mapa.`;
@@ -1582,7 +1710,7 @@ export function setupFicha({ root, red, acciones }) {
     function vistaPrevia() {
       const p = vista.previa;
       const { cajas, clientes } = p;
-      const ocupado = vista.agregando || vista.deshaciendo;
+      const ocupado = vista.agregando || vista.deshaciendo || vista.recalculando;
       const avisos = [...(p.errores ?? [])];
       const otras = p.misma_cuenta ?? [];
       if (otras.length) {
@@ -1611,9 +1739,10 @@ export function setupFicha({ root, red, acciones }) {
         { class: 'primario', disabled: ocupado || !hayAlgo(), 'data-foco': marca('agregar') });
       const resumen = `En Wispro: ${plural(cajas.total, 'caja', 'cajas')} y ${plural(clientes.total, 'contrato', 'contratos')}.`;
       return [
-        vista.quitados ? h('p.ficha-sub', { text: textoQuitados(vista.quitados), tabindex: '-1', 'data-foco': marca('resumen') }) : null,
+        vista.quitados ? h('p.ficha-sub', { text: textoQuitados(vista.quitados, vista.quitados.porque), tabindex: '-1', 'data-foco': marca('resumen') }) : null,
         h('p', { text: resumen, tabindex: '-1', 'data-foco': marca('resumen') && !vista.quitados }),
         avisos.length ? h('ul.integ-errores', {}, ...avisos.map((e) => h('li', { text: e }))) : null,
+        bloqueOlts(p.olts ?? [], ocupado),
         bloqueCajas,
         bloqueClientes,
         botones(agregarBtn, boton('Cancelar', () => acciones.cancelar(), { disabled: ocupado })),

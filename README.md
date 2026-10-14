@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.7.0
+# Plataforma FTTH · kit 0.7.1
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -119,14 +119,17 @@ se consultan recién cuando alguien las elige.
   los clientes de cada caja, vinculados a su contrato. Antes de agregar
   muestra cuántas cajas y clientes van a entrar y cuáles no, con el motivo
   (sin ubicación en Wispro, a más de 2 km de su caja, un cliente del mapa que
-  podría ser el mismo). Una caja de Wispro a menos de 150 m de una caja del
-  mapa sin vincular puede ser esa misma: queda aparte, con un toque para abrir
-  la del mapa y vincularla o, si es otra, para agregarla igual. Se puede
-  deshacer en el momento o más tarde (la última importación, desde la misma
-  pantalla y con confirmación), salvo lo que ya se haya tocado o tenga cables.
-  Se puede repetir cuando haya cajas o clientes nuevos en Wispro: solo agrega
-  lo que falta. Trae toda la cuenta de Wispro: si la misma cuenta está
-  conectada a otra red, lo avisa.
+  podría ser el mismo). Si Wispro tiene varias OLT, se elige de cuáles traer:
+  la que parece reemplazada por otra (casi sin contratos y con sus cajas en el
+  mismo lugar que las de otra OLT) viene desmarcada, y lo que ya se trajo de
+  una OLT que no se usa se quita del mapa con un toque. La NAP de Wispro más
+  cercana a una caja del mapa sin vincular (a menos de 150 m) puede ser esa
+  misma: queda aparte, con un toque para abrir la del mapa y vincularla o, si
+  es otra, para agregarla igual. Se puede deshacer en el momento o más tarde
+  (la última importación, desde la misma pantalla y con confirmación), salvo
+  lo que ya se haya tocado o tenga cables. Se puede repetir cuando haya cajas
+  o clientes nuevos en Wispro: solo agrega lo que falta. Trae toda la cuenta
+  de Wispro: si la misma cuenta está conectada a otra red, lo avisa.
 - **Ver, mover, editar, borrar.** Con "Ver", tocar algo abre su ficha. Desde
   la ficha: Editar, Mover (y tocar el lugar nuevo), Trazado en los cables
   (mover puntos, agregar con los puntos blancos intermedios, quitar), Borrar.
@@ -226,7 +229,11 @@ conectadas y puede pedir mediciones en vivo. Por eso una instalación con
 Wispro conectado no se comparte entre empresas: cada una, la suya.
 
 Para ver cómo responden Wispro y el panel, sin guardar nada y sin mostrar
-claves ni datos de los clientes: `python3 herramientas/muestras-olt-wispro.py`.
+claves ni datos de los clientes:
+`python3 herramientas/muestras-olt-wispro.py`. Para ver cómo están las
+ubicaciones de las NAPs y de los contratos en Wispro, por OLT (solo cuentas y
+distancias): `python3 herramientas/ubicaciones-wispro.py RED` (el número de la
+red).
 
 ### Publicarlo con nombre y HTTPS
 
@@ -281,7 +288,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.7.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.7.1-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -318,7 +325,8 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.7.0 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.7.1 a
+0.7.0 alcanza con `git checkout 6be07f1` e instalar (misma base). De 0.7.0 a
 0.6.1 alcanza con `git checkout 8353557` e instalar: misma estructura de base
 (lo que se trajo de Wispro queda como cualquier otro elemento). De 0.6.1 a
 0.6.0 alcanza con `git checkout 5ea5b6d` e instalar (solo cambia el visor). De
@@ -437,9 +445,10 @@ las integraciones contra un Wispro y un panel de la OLT falsos que responden
 como los reales (cajas, contratos y cómo se cruza cada uno con los clientes
 del mapa, ONTs por número de serie o por el número de contrato de su
 descripción, mediciones en vivo, fallas y plazos, agregar dos veces a la vez,
-traer toda la red de Wispro, deshacerlo y traerla dos veces a la vez, el
-comando `integraciones`). `node pruebas/fibras.test.mjs` prueba la lógica de
-fibras, colores, recorridos y potencias del visor, y
+traer toda la red de Wispro, deshacerlo y traerla dos veces a la vez, elegir
+sus OLT y quitar lo de la que no se usa, NAPs amontonadas, el comando
+`integraciones`). `node pruebas/fibras.test.mjs` prueba la lógica de fibras,
+colores, recorridos y potencias del visor, y
 `node pruebas/integracion.test.mjs` la medición virtual y la estabilidad (Node
 20.19 o más nuevo; el de Debian 13 sirve).
 
@@ -481,7 +490,10 @@ una revisión independiente: sus hallazgos quedaron corregidos (poder deshacer
 después de cerrar la pantalla, una caja dibujada a mano cerca de una de
 Wispro, una NAP que Wispro entrega dos veces, la misma cuenta en dos redes, el
 foco con el teclado). Con la red real, la vista previa dice qué va a agregar y
-qué no antes de cambiar nada.
+qué no antes de cambiar nada. La 0.7.1 salió de traerla en la red real: 126
+NAPs de Wispro estaban en pares (la misma caja en la OLT vieja y en la nueva)
+y una caja dibujada a mano apartaba todas las de alrededor; se probó con un
+Wispro falso que repite esos casos.
 
 No se pudo probar, y hay que mirarlo en el uso real:
 

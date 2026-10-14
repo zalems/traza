@@ -858,6 +858,56 @@ class IntegracionesTest(unittest.TestCase):
         plan = api.plan_importacion(dw, [fila(1, "Lejos", -58.1700, -26.1850)], [])
         self.assertEqual((plan["cajas"]["dudosas"], plan["cajas"]["nuevas"]), ([], 8))
 
+    def test_traer_sin_la_olt_reemplazada(self):
+        # Las cajas de una OLT vieja cargadas de nuevo en la nueva: la vieja (casi sin contratos y
+        # con sus NAPs en el mismo lugar que las de otra OLT) no se trae si no se elige.
+        gemelas = [dict(n, id=U(70 + k), name=f"V{n['name']}", olt_id=U(902)) for k, n in enumerate(NAPS[:2])]
+        olts = [{"id": U(900), "name": "OLT - CENTRAL"}, {"id": U(901), "name": "HUAWEI"}, {"id": U(902), "name": "VIEJA"}]
+        dw = api.DatosWispro(NAPS + gemelas, CONTRATOS, CLIENTES, olts)
+        plan = api.plan_importacion(dw, [], [])
+        grupos = {g["nombre"]: g for g in plan["olts"]}
+        self.assertEqual({k: (g["cajas"], g["con_contratos"], g["gemelas"], g["reemplazada"], g["elegida"])
+                          for k, g in grupos.items()},
+                         {"OLT - CENTRAL": (2, 2, 2, False, True), "HUAWEI": (1, 0, 0, False, True),
+                          "VIEJA": (2, 0, 2, True, False)})
+        self.assertEqual(sorted(c["nombre"] for c in plan["_cajas"]), ["P5C4", "P5C5", "P9C1"])
+        self.assertEqual(plan["cajas"]["total"], 5)
+        # Elegida a mano, sí; y sin la OLT de sus cajas, los clientes no se traen.
+        plan = api.plan_importacion(dw, [], [], olts=[U(902)])
+        self.assertEqual(sorted(c["nombre"] for c in plan["_cajas"]), ["VP5C4", "VP5C5"])
+        self.assertEqual(plan["_clientes"], [])
+        self.assertIn("es de una caja de OLT - CENTRAL, que no se trae",
+                      [o["motivo"] for o in plan["clientes"]["omitidos"]])
+
+    def test_quitar_lo_de_una_olt(self):
+        red = self.ok("POST", "/api/redes", {"nombre": "Quitar OLT"}, status=201)["red"]["id"]
+        self.configurar(red)
+        a_mano = self.ok("POST", "/api/elementos", {"red": red, "tipo": "nap", "nombre": "P9C1", "lon": -58.18,
+                                                    "lat": -26.19}, status=201)["elemento"]["id"]  # dibujada a mano
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}&olts={U(900)}")
+        self.assertEqual([(g["nombre"], g["elegida"]) for g in previa["olts"]], [("OLT - CENTRAL", True), ("HUAWEI", False)])
+        self.assertEqual(previa["cajas"]["nuevas"], 2)
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}&olts=-&leer=0")
+        self.assertEqual((previa["cajas"]["nuevas"], previa["clientes"]["nuevos"]), (0, 0))
+        res = self.ok("POST", "/api/integracion/importacion", {"red": red, "olts": [U(900), U(901)]})
+        self.assertEqual(res["agregados"], {"cajas": 2, "clientes": 5})
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}&olts={U(901)}")
+        g = {x["nombre"]: x for x in previa["olts"]}["OLT - CENTRAL"]
+        self.assertEqual((g["elegida"], g["en_mapa"], g["clientes_en_mapa"]), (False, 2, 5))
+        # Se toca un cliente: ese queda; lo demás de OLT - CENTRAL se quita. La caja dibujada a mano
+        # (de HUAWEI, encontrada por el nombre) no se toca.
+        cliente = next(e for e in res["elementos"] if e["properties"]["tipo"] == "cliente")
+        self.ok("PUT", f"/api/elementos/{cliente['id']}", {"notas": "visto", "version": cliente["properties"]["version"]})
+        q = self.ok("POST", "/api/integracion/importacion/quitar", {"red": red, "olts": [U(900)]})
+        self.assertEqual((q["quitados"], q["quedan"]), (6, 1))
+        vivos = {e["id"] for e in self.ok("GET", f"/api/red?red={red}")["elementos"]["features"]}
+        self.assertEqual(vivos, {a_mano, cliente["id"]})
+        q = self.ok("POST", "/api/integracion/importacion/quitar", {"red": red, "olts": [U(901)]})
+        self.assertEqual((q["quitados"], q["quedan"]), (0, 1))  # la de a mano queda
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion/quitar", {"red": red})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion/quitar", {"red": red, "olts": "x"})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion", {"red": red, "olts": [1]})[0], 400)
+
     def test_traer_con_la_misma_cuenta_en_otra_red(self):
         a = self.ok("POST", "/api/redes", {"nombre": "Cuenta A"}, status=201)["red"]["id"]
         b = self.ok("POST", "/api/redes", {"nombre": "Cuenta B"}, status=201)["red"]["id"]

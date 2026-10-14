@@ -1,6 +1,31 @@
 # Cambios
 
-## 0.7.0 · 14/10/2026
+## 0.7.1 · 14/10/2026
+
+Traer de Wispro, con lo que apareció en la red real.
+
+- Elegir qué OLT de Wispro traer: la vista previa muestra cada OLT con sus cajas
+  y cuántas tienen contratos, y trae las cajas (y los clientes de esas cajas) de
+  las marcadas. Sin elegir, deja afuera la OLT que parece reemplazada por otra:
+  casi sin contratos (5 % de sus cajas o menos) y con la mayoría de sus cajas en
+  el mismo lugar que las de otra OLT que sí se usa (las de una OLT vieja,
+  cargadas de nuevo en la nueva). La elección se recuerda en cada navegador.
+- Lo que ya se trajo de una OLT que no se elige se quita del mapa con un toque
+  (con confirmación): solo lo que agregó una importación y no se tocó después; lo
+  dibujado a mano queda.
+- Una caja del mapa sin vincular aparta una sola NAP de Wispro, la más cercana
+  (a menos de 150 m), emparejando de a una, en vez de todas las de alrededor: con
+  muchas NAPs juntas la lista se hacía interminable.
+- `herramientas/ubicaciones-wispro.py RED`: cómo están las ubicaciones de las
+  NAPs y de los contratos en Wispro, por OLT (solo cuentas y distancias, sin
+  nombres ni coordenadas).
+- API: `olts` en `GET /api/integracion/importacion?olts=A,B` y en el `POST`,
+  `leer=0` (con la última lectura de Wispro) y
+  `POST /api/integracion/importacion/quitar` `{red, olts}`; cada OLT trae
+  `cajas`, `con_contratos`, `gemelas`, `en_mapa`, `clientes_en_mapa`,
+  `reemplazada` y `elegida`.
+
+## 0.7.0 · 14/10/2026 · commit 6be07f1
 
 Traer la red de Wispro: todas las cajas y sus clientes al mapa, de una vez.
 
