@@ -48,14 +48,13 @@ export const CAMPOS = {
     { k: 'altura', l: 'Altura (m)', t: 'number', ph: '9', min: 0, max: 60 },
     { k: 'propietario', l: 'Propietario', t: 'text', ph: 'Distribuidora eléctrica, propio…' },
   ],
+  // Los splitters ya no van acá: se agregan en la carta de empalme.
   caja: [
     { k: 'modelo', l: 'Modelo', t: 'text', ph: 'Marca y modelo' },
-    { k: 'splitter', l: 'Splitter', t: 'select', o: ['ninguno', '1:2', '1:4', '1:8', '1:16', '1:32', '1:64'] },
     { k: 'capacidad', l: 'Capacidad (fusiones)', t: 'number', ph: '48', min: 0, max: 2000 },
   ],
   nap: [
     { k: 'puertos', l: 'Puertos', t: 'select', o: ['4', '8', '12', '16', '24', '32'] },
-    { k: 'splitter', l: 'Splitter', t: 'select', o: ['ninguno', '1:2', '1:4', '1:8', '1:16', '1:32'] },
     { k: 'conector', l: 'Conectores', t: 'select', o: ['SC/APC', 'SC/UPC', 'LC/APC', 'LC/UPC', 'otro'] },
     { k: 'modelo', l: 'Modelo', t: 'text', ph: 'Marca y modelo' },
   ],
@@ -69,7 +68,7 @@ export const CAMPOS = {
     { k: 'direccion', l: 'Dirección', t: 'text' },
     { k: 'ont', l: 'ONT (modelo y serie)', t: 'text', ph: 'HG8145V5 · 48575443…' },
     { k: 'potencia', l: 'Potencia en la ONT (dBm)', t: 'number', ph: '-21.5', teclado: 'text', min: -50, max: 10 },
-    { k: 'nap_puerto', l: 'NAP y puerto', t: 'text', ph: 'NAP-012, puerto 5' },
+    { k: 'nap_puerto', l: 'NAP y puerto (anotado)', t: 'text', ph: 'NAP-012, puerto 5' },
   ],
   reserva: [
     { k: 'metros', l: 'Metros de cable', t: 'number', ph: '30', min: 0, max: 5000 },
@@ -79,6 +78,12 @@ export const CAMPOS = {
     { k: 'modelo', l: 'Modelo', t: 'text', ph: 'ADSS, drop plano…' },
     { k: 'marca', l: 'Marca', t: 'text' },
   ],
+};
+
+// Campos que versiones anteriores guardaban y hoy no tienen formulario: se
+// muestran (y se conservan) con este nombre.
+export const CAMPOS_VIEJOS = {
+  splitter: 'Splitter (anotado)',
 };
 
 // Lectura de la potencia óptica que llega a la ONT (GPON clase B+: sensibilidad

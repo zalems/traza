@@ -7,6 +7,8 @@ import { ELEMENTOS, conArticulo, formatLargo } from './modelo.js';
 import { svgIcono } from './iconos.js';
 import { setupRed } from './red.js';
 import { setupFicha } from './ficha.js';
+import { setupCarta } from './carta.js';
+import { recorrido } from './fibras.js';
 
 const RED_KEY = 'ftth.red';
 const $ = (id) => document.getElementById(id);
@@ -170,6 +172,15 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
         elegido: null,
         cambiado: false,
       };
+      // Para editarlo hay que ver todos sus puntos (la ficha pudo haber corrido el mapa).
+      const vista = map.getBounds();
+      if (coords.some((c) => !vista.contains(c))) {
+        const lngs = coords.map((c) => c[0]);
+        const lats = coords.map((c) => c[1]);
+        map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], {
+          padding: { top: 80, bottom: 150, left: 90, right: 70 }, maxZoom: Math.max(map.getZoom(), 16), duration: 0,
+        });
+      }
       red.seleccionar('cable', feature.id);
       dibujarTrazado();
       pista();
@@ -224,9 +235,71 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
       ficha.redes({ lista: redes, actualId: redActual?.id ?? null });
       toast(`La red ahora se llama ${res.red.nombre}`);
     },
+
+    // --- carta de empalme y recorridos
+    abrirCarta(feature, ext = null) {
+      setModo('ver');
+      red.limpiarRecorrido();
+      ficha.cerrar();
+      red.seleccionar('elemento', feature.id);
+      carta.abrir(feature.id, { ext });
+    },
+    // Al cerrar la carta vuelve la ficha del elemento (o un aviso si ya no existe).
+    alCerrarCarta(id, aviso) {
+      if (aviso) {
+        notify(aviso);
+        return;
+      }
+      const feature = red.state.elementos.get(id);
+      if (!feature) return;
+      red.seleccionar('elemento', id);
+      ficha.verElemento(feature);
+    },
+    verCableDesdeCarta(cableId) {
+      carta.cerrar({ silencioso: true });
+      acciones.seleccionar('cable', cableId);
+    },
+    verRecorrido(elementoId, ext, { desdeCarta = false } = {}) {
+      const resultado = recorrido(red.state, elementoId, ext);
+      if (carta.abierta()) carta.cerrar({ silencioso: true });
+      setModo('ver');
+      red.seleccionar(null);
+      const elemento = red.state.elementos.get(elementoId);
+      ficha.verRecorrido({
+        resultado,
+        elementoId,
+        ext,
+        volver: desdeCarta && elemento ? () => acciones.abrirCarta(red.state.elementos.get(elementoId) ?? elemento, ext) : null,
+      });
+      red.resaltarRecorrido(resultado.lineas);
+      encuadrar(resultado.lineas.flat(), elemento?.geometry.coordinates);
+    },
+    limpiarRecorrido() {
+      red.limpiarRecorrido();
+    },
   };
 
   const ficha = setupFicha({ root: $('ficha'), red, acciones });
+  const carta = setupCarta({ root: $('carta'), red, acciones, toast });
+
+  // Muestra en el mapa un conjunto de puntos, sin que lo tape la ficha.
+  function encuadrar(puntos, respaldo) {
+    const lista = puntos.length ? puntos : (respaldo ? [respaldo] : []);
+    if (!lista.length) return;
+    const lngs = lista.map((p) => p[0]);
+    const lats = lista.map((p) => p[1]);
+    const panel = $('ficha').getBoundingClientRect();
+    const w = window.innerWidth;
+    const alto = window.innerHeight;
+    const padding = w < 900
+      ? { top: 80, bottom: Math.min(alto - 160, Math.max(40, alto - panel.top + 24)), left: 40, right: 40 }
+      : { top: 80, bottom: 70, left: 100, right: Math.min(w - 200, Math.max(40, w - panel.left + 40)) };
+    if (lista.length === 1) {
+      map.easeTo({ center: lista[0], zoom: Math.max(map.getZoom(), 17), padding, duration: 400 });
+      return;
+    }
+    map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding, maxZoom: 18, duration: 500 });
+  }
 
   // La ficha puede tapar lo que se tocó (en el teléfono sube desde abajo; en
   // pantallas grandes ocupa la derecha): el mapa se corre para que quede a la vista.
@@ -779,6 +852,8 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
   const escribiendo = (el) => el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 
   document.addEventListener('keydown', (event) => {
+    // Con la carta de empalme abierta, las teclas son de ella.
+    if (carta.abierta()) return;
     // Se mira dónde se apretó la tecla (el buscador, por ejemplo, se suelta
     // solo con Escape antes de que el aviso llegue acá).
     const foco = event.target instanceof Element ? event.target : document.activeElement;
@@ -847,6 +922,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
   async function elegirRed(id) {
     const elegida = redes.find((r) => r.id === id);
     if (!elegida) return;
+    carta.cerrar({ silencioso: true });
     setModo('ver');
     pintarRed(elegida);
     try {
@@ -919,5 +995,5 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
   pista();
   iniciar();
 
-  return { red, ficha, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed };
+  return { red, ficha, carta, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed };
 }

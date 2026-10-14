@@ -1,9 +1,11 @@
-# Plataforma FTTH · kit 0.3.0
+# Plataforma FTTH · kit 0.4.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
-mapa de fondo, login, y las herramientas para cargar la red (postes, cajas,
-NAP, botellas, nodos, clientes, reservas y cables) desde la computadora o
-desde el teléfono en la calle. Se instala en un servidor propio.
+mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
+NAP, botellas, nodos, clientes, reservas y cables) y las cartas de empalme
+(fibras con sus colores, fusiones, splitters y el recorrido de cada pelo),
+desde la computadora o desde el teléfono en la calle. Se instala en un
+servidor propio.
 
 El nombre `ftth` (carpeta `/srv/ftth`, sitio `ftth.conf`, servicios
 `ftth-auth` y `ftth-api`) es neutro a propósito: la instalación no queda atada
@@ -15,7 +17,7 @@ a ningún cliente, y cada cliente o despliegue es una "red" aparte.
 |---|---|---|
 | Visor | MapLibre GL JS 6.11.2, sin paso de compilación | De nadie: va todo en el kit |
 | Login | Usuario y contraseña propios; servicio chico en Python, sin dependencias | De nadie |
-| Red | API en Python (sin dependencias) y base SQLite con redes, elementos y cables | De nadie |
+| Red | API en Python (sin dependencias) y base SQLite con redes, elementos, cables y cartas de empalme | De nadie |
 | Calles | OpenStreetMap en mosaicos vectoriales (PMTiles), Argentina y países vecinos, 2,2 GB | De nadie una vez descargado |
 | Satélite | Esri World Imagery | De Esri, en línea |
 | IGN | Argenmap, la cartografía oficial | Del IGN, en línea |
@@ -34,14 +36,33 @@ se consultan recién cuando alguien las elige.
   empalme, cliente y reserva de cable. Se elige el tipo en la barra y se
   toca el mapa donde va; el nombre se sugiere solo (P-001, NAP-002…). Cada
   ficha tiene estado (proyectado, instalado, activo, de baja), los datos
-  propios del tipo (splitter y puertos de la NAP, material y altura del
-  poste, ONT y potencia del cliente…) y notas. La potencia se califica como
-  buena, justa o baja.
+  propios del tipo (puertos de la NAP, material y altura del poste, ONT y
+  potencia del cliente…) y notas. La potencia se califica como buena, justa
+  o baja.
 - **Cables.** Herramienta Cable: se toca punto por punto y se termina con
   Terminar (o doble clic). Los puntos que caen sobre un elemento quedan
   pegados a él: si después se mueve el poste, el cable lo sigue. Tipo
-  (troncal, distribución, bajada), fibras, tendido, reservas en metros; el
-  largo se calcula solo.
+  (troncal, distribución, bajada), fibras, fibras por tubo, código de
+  colores (TIA-598: azul, naranja, verde…; o ABNT, el de los cables
+  brasileños: verde, amarillo, blanco…), tendido, reservas en metros; el
+  largo se calcula solo. La ficha del cable muestra sus fibras por tubo, en
+  colores, y en qué cartas está unida cada una.
+- **Carta de empalme.** En botellas, cajas, NAP y nodos, el botón "Carta de
+  empalme" muestra los cables que llegan, con sus tubos y fibras en colores:
+  a la izquierda lo que viene del nodo y a la derecha lo que sale (se puede
+  cambiar). Se une tocando una fibra y después la otra; "Seguir en orden"
+  une el resto del tubo de una vez, y "Deshacer" vuelve atrás. En un cable
+  que pasa por el elemento (sangría), las fibras que no se tocan siguen de
+  largo; al unir una, queda cortada ahí. Splitters PLC (1x2 a 1x128, también
+  2xN) o desbalanceados (1/99 a 50/50), con salidas fusionadas o con
+  conector; en el nodo, la OLT con sus puertos PON. "Ver lista" la muestra
+  como tabla y "Copiar" la deja como texto para mandar por mensaje. Si un
+  cable termina cerca sin quedar pegado, la carta ofrece pegarlo.
+- **Recorrido de un pelo.** Desde una unión de la carta, una fibra de la
+  ficha del cable o la ficha del cliente: por dónde va el pelo, de la OLT al
+  cliente, con largo, fusiones, conectores y splitters, y resaltado en el
+  mapa. La ficha del cliente dice en qué NAP y puerto está conectado y de qué
+  PON viene.
 - **Ver, mover, editar, borrar.** Con "Ver", tocar algo abre su ficha. Desde
   la ficha: Editar, Mover (y tocar el lugar nuevo), Trazado en los cables
   (mover puntos, agregar con los puntos blancos intermedios, quitar), Borrar.
@@ -50,8 +71,8 @@ se consultan recién cuando alguien las elige.
   "Colocar acá" o "Agregar punto". Así el dedo no tapa lo que se está
   ubicando; tocar el mapa directamente también funciona. Con el botón de
   ubicación, la mira queda donde está uno parado.
-- **Buscar.** El buscador de arriba encuentra elementos y cables por nombre o
-  por número de abonado; si no hay nada en la red, busca el lugar.
+- **Buscar.** El buscador de arriba encuentra elementos y cables por nombre,
+  número de abonado o dirección; si no hay nada en la red, busca el lugar.
 - **Varios usuarios a la vez.** Todo se guarda en el servidor al momento; lo
   que cargan otros aparece solo a los pocos segundos. Si dos personas editan
   lo mismo a la vez, al segundo que guarda se le avisa y se le muestra la
@@ -164,7 +185,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.3.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.4.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -173,7 +194,7 @@ pasar por un usuario.
   auth/ftth-auth.py                      servicio de sesión (Python, sin dependencias)
   api/ftth-api.py                        API de la red (Python, sin dependencias)
   data/ftth.db                           usuarios y sesiones (SQLite)
-  data/red.db                            redes, elementos, cables e historial (SQLite)
+  data/red.db                            redes, elementos, cables, cartas de empalme e historial (SQLite)
   data/api.secreto                       clave entre nginx y la API
   bin/usuarios                           administración de usuarios
   bin/respaldo                           copia de seguridad de las bases
@@ -184,6 +205,8 @@ pasar por un usuario.
 /etc/nginx/ftth-api-secreto.inc        la clave para la API, que el sitio incluye (solo root)
 /etc/systemd/system/ftth-auth.service  servicio de sesión (usuario de sistema ftth)
 /etc/systemd/system/ftth-api.service   API de la red (usuario de sistema ftth)
+/etc/systemd/system/ftth-respaldo.*    copia de seguridad diaria (servicio y timer)
+/root/respaldos-ftth/                  las copias de seguridad
 /var/log/nginx/ftth.access.log, ftth.error.log
 journalctl -u ftth-auth / -u ftth-api  registro de los servicios (cada cambio en la red deja una línea)
 ```
@@ -192,15 +215,38 @@ journalctl -u ftth-auth / -u ftth-api  registro de los servicios (cada cambio en
 
 **Actualizar.** En la carpeta del repositorio, `git pull` y `./instalar.sh`
 con las mismas opciones de siempre. Si algo falla a mitad de camino, el visor
-anterior sigue en uso. `--volver` vuelve al visor anterior.
+anterior sigue en uso. `--volver` vuelve al visor anterior. Antes de cambiar
+la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/`:
+una API nueva puede actualizar la estructura de la base, y una API vieja no
+abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Copia de seguridad.** `sudo /srv/ftth/bin/respaldo` deja en
-`/root/respaldos-ftth/FECHA/` una copia coherente de los usuarios
-(`ftth.db`), la red (`red.db`) y los ajustes, sin detener nada (se le puede
-pasar otra carpeta). Conviene programarla y llevarse las copias fuera del
-servidor. Para restaurar: `systemctl stop ftth-api ftth-auth`, copiar los
-`.db` a `/srv/ftth/data/` (dueño `ftth`, borrando los `-wal` y `-shm` que
-haya), y `systemctl start ftth-auth ftth-api`.
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. Para
+volver todo (por ejemplo de 0.4.0 a 0.3.0, que usa una estructura de base
+anterior), se restaura la copia que el script hizo antes de actualizar y se
+instala la versión vieja; lo cargado después de esa copia se pierde:
+
+```bash
+systemctl stop ftth-api
+cp /root/respaldos-ftth/AAAAMMDD-HHMMSS-antes-de-0.4.0/red.db /srv/ftth/data/red.db
+rm -f /srv/ftth/data/red.db-wal /srv/ftth/data/red.db-shm
+chown ftth:ftth /srv/ftth/data/red.db
+git checkout v0.3.0
+./instalar.sh --dominio …      # las mismas opciones de siempre
+```
+
+Para volver a la última: `git checkout main && git pull && ./instalar.sh …`.
+Las copias con etiqueta (las de antes de actualizar) no se borran solas.
+
+**Copia de seguridad.** Se hace sola todos los días a las 03:30 (con hasta 20
+minutos de margen al azar) y quedan las últimas 30 en `/root/respaldos-ftth/`
+(otra cantidad: `FTTH_RESPALDOS=60 ./instalar.sh …`). A mano:
+`sudo /srv/ftth/bin/respaldo`. Cada copia es coherente aunque haya gente
+cargando: los usuarios (`ftth.db`), la red (`red.db`) y los ajustes. La
+réplica del contenedor a otro nodo no reemplaza estas copias (replica también
+lo que se borra), y conviene llevarlas además fuera del servidor. Para
+restaurar: `systemctl stop ftth-api ftth-auth`, copiar los `.db` a
+`/srv/ftth/data/` (dueño `ftth`, borrando los `-wal` y `-shm` que haya), y
+`systemctl start ftth-auth ftth-api`.
 
 **Actualizar las calles.** `./instalar.sh --actualizar-mapa` baja el build del
 día, lo verifica y recién entonces lo pone en uso. `--volver-mapa` vuelve al

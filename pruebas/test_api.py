@@ -240,6 +240,12 @@ class ApiTest(unittest.TestCase):
 
     def test_entradas_raras(self):
         red = self.nueva_red("Raras")
+        # Números con dos signos: 400, no 500.
+        self.assertEqual(self.pedir("GET", "/api/red?red=--1")[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/equipos", {"elemento": "--4", "tipo": "splitter"})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/fusiones/borrar", {"ids": ["--3"]})[0], 400)
+        self.assertEqual(self.pedir("DELETE", "/api/fusiones/1?version=--2")[0], 400)
+        self.assertEqual(self.ok("GET", "/api/salud", usuario=None)["esquema"], api.ESQUEMA)
         self.assertEqual(self.pedir("GET", f"/api/cambios?red={red}&desde={2 ** 70}")[0], 400)
         self.assertEqual(self.pedir("GET", f"/api/red?red={2 ** 70}")[0], 400)
         self.assertEqual(self.pedir("GET", "/api/elementos/%C2%B2")[0], 404)
@@ -271,6 +277,257 @@ class ApiTest(unittest.TestCase):
         api.Store(path)
         store = api.Store(path)
         self.assertEqual(store.conn().execute("PRAGMA user_version").fetchone()[0], api.ESQUEMA)
+        store.close()
+
+    def test_migracion_desde_030(self):
+        # Una base de 0.3.0 (esquema 1) con datos pasa al esquema 2 sin perder nada.
+        import sqlite3
+        path = os.path.join(self.tmp.name, "vieja.db")
+        c = sqlite3.connect(path, isolation_level=None)
+        for sentencia in api.MIGRACIONES[1].split(";\n"):
+            if sentencia.strip():
+                c.execute(sentencia)
+        c.execute("PRAGMA user_version = 1")
+        t = "2026-10-13T12:00:00Z"
+        c.execute("INSERT INTO redes (id, nombre, creado) VALUES (1, 'Vieja', ?)", (t,))
+        c.execute("INSERT INTO elementos (id, red_id, tipo, nombre, lon, lat, creado, modificado, version) "
+                  "VALUES (1, 1, 'botella', 'BOT-1', -58.17, -26.18, ?, ?, 1)", (t, t))
+        c.execute("INSERT INTO cables (id, red_id, tipo, nombre, fibras, coords, nodos, creado, modificado, version) "
+                  "VALUES (1, 1, 'troncal', 'T-1', 48, '[[-58.17,-26.18],[-58.16,-26.18]]', '[1,null]', ?, ?, 2)", (t, t))
+        c.close()
+        store = api.Store(path)
+        conn = store.conn()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        cable = api.Store.cable_feature(conn.execute("SELECT * FROM cables WHERE id = 1").fetchone())
+        self.assertEqual((cable["properties"]["por_tubo"], cable["properties"]["colores"]), (0, "tia598"))
+        elemento = api.Store.element_feature(conn.execute("SELECT * FROM elementos WHERE id = 1").fetchone())
+        self.assertEqual(elemento["properties"]["carta"], {})
+        red = store.network(1)
+        self.assertEqual((red["equipos"], red["fusiones"]), ([], []))
+        store.close()
+
+    # ------------------------------------------------- fibras y cartas de empalme
+
+    def test_estructura_de_fibras(self):
+        red = self.nueva_red("Fibras")
+        base = {"red": red, "coords": [[-58.17, -26.18], [-58.16, -26.18]]}
+        cable = self.ok("POST", "/api/cables", {**base, "fibras": 48}, status=201)["cable"]["properties"]
+        self.assertEqual((cable["por_tubo"], cable["colores"]), (0, "tia598"))
+        abnt = self.ok("POST", "/api/cables", {**base, "fibras": 36, "por_tubo": 6, "colores": "abnt"}, status=201)
+        self.assertEqual((abnt["cable"]["properties"]["por_tubo"], abnt["cable"]["properties"]["colores"]), (6, "abnt"))
+        for malo in ({"por_tubo": -1}, {"por_tubo": 49}, {"por_tubo": "seis"}, {"colores": "rgb"}):
+            with self.subTest(malo=malo):
+                self.assertEqual(self.pedir("POST", "/api/cables", {**base, **malo})[0], 400)
+
+    def armar(self, nombre):
+        """Red de prueba: NODO -> T (pasa por BOT) -> NAP; R sale de BOT; D baja de NAP a CLI."""
+        red = self.nueva_red(nombre)
+        nodo = self.elemento(red, "nodo", -58.170, -26.180, "NODO")
+        bot = self.elemento(red, "botella", -58.168, -26.180, "BOT")
+        nap = self.elemento(red, "nap", -58.166, -26.180, "NAP")
+        nap2 = self.elemento(red, "nap", -58.168, -26.178, "NAP-2")
+        cli = self.elemento(red, "cliente", -58.166, -26.179, "CLI")
+        poste = self.elemento(red, "poste", -58.167, -26.180, "P")
+
+        def cable(nombre, elementos, fibras):
+            coords = [e["geometry"]["coordinates"] for e in elementos]
+            return self.ok("POST", "/api/cables", {"red": red, "nombre": nombre, "fibras": fibras, "coords": coords,
+                                                   "nodos": [e["id"] for e in elementos]}, status=201)["cable"]
+        t = cable("T", [nodo, bot, poste, nap], 24)
+        r = cable("R", [bot, nap2], 12)
+        d = cable("D", [nap, cli], 1)
+        return {"red": red, "nodo": nodo, "bot": bot, "nap": nap, "nap2": nap2, "cli": cli, "poste": poste,
+                "t": t["id"], "r": r["id"], "d": d["id"], "cables": {"t": t, "r": r, "d": d}}
+
+    def unir(self, elemento, pares, status=201, **extra):
+        body = {"elemento": elemento["id"], "pares": [{"a": a, "b": b} for a, b in pares], **extra}
+        return self.ok("POST", "/api/fusiones", body, status=status)
+
+    def test_fusiones(self):
+        x = self.armar("Fusiones")
+        t, r, bot = x["t"], x["r"], x["bot"]
+        # T pasa por BOT (lados a y b); R empieza en BOT (solo lado b).
+        res = self.unir(bot, [(f"c{t}:a:5", f"c{r}:b:1")])
+        f1 = res["fusiones"][0]
+        self.assertEqual((f1["elemento"], f1["a"], f1["b"], f1["tipo"], f1["creado_por"]),
+                         (bot["id"], f"c{t}:a:5", f"c{r}:b:1", "fusion", "ana"))
+        # Ya usada: 409 con la unión que la ocupa.
+        code, data = self.pedir("POST", "/api/fusiones", {"elemento": bot["id"], "pares": [{"a": f"c{r}:b:1", "b": f"c{t}:b:5"}]},
+                                usuario="beto")
+        self.assertEqual(code, 409, data)
+        self.assertEqual(data["fusiones"][0]["id"], f1["id"])
+        malos = [
+            ((f"c{r}:a:2", f"c{t}:b:6"), 409),     # R no llega a BOT por el lado a
+            ((f"c{r}:b:13", f"c{t}:b:6"), 400),    # R tiene 12 fibras
+            ((f"c{t}:b:6", f"c{t}:b:6"), 400),     # consigo misma
+            ((f"c{t}:b:6", "c1:x:1"), 400),
+            ((f"c{t}:b:6", "c0:a:1"), 400),
+            ((f"c{t}:b:6", f"c{r}:b:0"), 400),
+            ((f"c{t}:b:6", f"c{r}:b:2\n"), 400),
+            ((f"c{t}:b:6", f"c{x['d']}:a:1"), 409),  # D no pasa por BOT
+            ((f"c{t}:b:6", "q999:e:1"), 409),       # equipo inexistente
+        ]
+        for (a, b), status in malos:
+            with self.subTest(a=a, b=b):
+                code, data = self.pedir("POST", "/api/fusiones", {"elemento": bot["id"], "pares": [{"a": a, "b": b}]})
+                self.assertEqual(code, status, data)
+        # Un mismo extremo en dos pares del mismo pedido.
+        code, _ = self.pedir("POST", "/api/fusiones", {"elemento": bot["id"], "pares": [
+            {"a": f"c{t}:a:7", "b": f"c{r}:b:7"}, {"a": f"c{t}:a:7", "b": f"c{r}:b:8"}]})
+        self.assertEqual(code, 400)
+        # En un poste no hay carta.
+        code, _ = self.pedir("POST", "/api/fusiones", {"elemento": x["poste"]["id"], "pares": [{"a": f"c{t}:a:1", "b": f"c{t}:b:1"}]})
+        self.assertEqual(code, 400)
+        # Varias juntas (seguir en orden) y la red las trae.
+        lote = self.unir(bot, [(f"c{t}:a:{n}", f"c{r}:b:{n - 4}") for n in range(6, 10)])
+        self.assertEqual(len(lote["fusiones"]), 4)
+        red = self.ok("GET", f"/api/red?red={x['red']}")
+        self.assertEqual(len(red["fusiones"]), 5)
+        cambios = self.ok("GET", f"/api/cambios?red={x['red']}&desde={res['version']}")
+        self.assertEqual(sorted(f["id"] for f in cambios["fusiones"]), sorted(f["id"] for f in lote["fusiones"]))
+        # Quitar una con su versión; otra vez da 404. Deshacer el lote.
+        self.ok("DELETE", f"/api/fusiones/{f1['id']}?version={f1['version']}")
+        self.assertEqual(self.pedir("DELETE", f"/api/fusiones/{f1['id']}")[0], 404)
+        borrar = self.ok("POST", "/api/fusiones/borrar", {"ids": [f["id"] for f in lote["fusiones"]] + [f1["id"]]})
+        self.assertEqual(len(borrar["fusiones"]), 4)
+        self.assertTrue(all(f["borrado"] and f["elemento"] == bot["id"] for f in borrar["fusiones"]))
+        self.assertEqual(self.ok("GET", f"/api/red?red={x['red']}")["fusiones"], [])
+        hist = self.ok("GET", f"/api/historial?red={x['red']}")["historial"]
+        self.assertEqual(hist[0]["tabla"], "fusiones")
+        self.assertEqual(hist[0]["accion"], "borrar")
+
+    def test_splitters(self):
+        x = self.armar("Splitters")
+        nap, bot, nodo = x["nap"], x["bot"], x["nodo"]
+
+        def equipo(elemento, status=201, **body):
+            return self.ok("POST", "/api/equipos", {"elemento": elemento["id"], **body}, status=status)
+
+        spl = equipo(nap, tipo="splitter", nombre="SPL-1", entradas=1, salidas=8,
+                     datos={"modo": "plc", "conectores": True})["equipos"][0]
+        self.assertEqual((spl["elemento"], spl["entradas"], spl["salidas"]), (nap["id"], 1, 8))
+        fbt = equipo(bot, tipo="splitter", nombre="FBT-1", entradas=1, salidas=2, datos={"modo": "fbt", "relacion": "10/90"})
+        self.assertEqual(fbt["equipos"][0]["datos"]["relacion"], "10/90")
+        olt = equipo(nodo, tipo="olt", nombre="OLT-1", salidas=16, datos={"potencia": 4.5})["equipos"][0]
+        self.assertEqual((olt["entradas"], olt["salidas"]), (0, 16))
+        malos = [
+            (nap, {"tipo": "splitter", "entradas": 1, "salidas": 3}),
+            (nap, {"tipo": "splitter", "entradas": 3, "salidas": 8}),
+            (nap, {"tipo": "splitter", "entradas": 1, "salidas": 2, "datos": {"modo": "fbt", "relacion": "10/80"}}),
+            (nap, {"tipo": "splitter", "entradas": 1, "salidas": 8, "datos": {"modo": "fbt", "relacion": "10/90"}}),
+            (nap, {"tipo": "splitter", "entradas": 1, "salidas": 8, "datos": {"modo": "plc", "relacion": "10/90"}}),
+            (nap, {"tipo": "splitter", "datos": {"conectores": "si"}}),
+            (bot, {"tipo": "olt", "salidas": 8}),
+            (nodo, {"tipo": "olt", "salidas": 0}),
+            (x["poste"], {"tipo": "splitter"}),
+            (nap, {"tipo": "router"}),
+        ]
+        for elemento, body in malos:
+            with self.subTest(body=body):
+                code, data = self.pedir("POST", "/api/equipos", {"elemento": elemento["id"], **body})
+                self.assertEqual(code, 400, data)
+        # Entrada del splitter con la fibra 3 del troncal (que termina en la NAP),
+        # salida 6 con conectores hacia la bajada (que empieza en la NAP).
+        t, d = x["t"], x["d"]
+        uniones = self.unir(nap, [(f"c{t}:a:3", f"q{spl['id']}:e:1"), (f"q{spl['id']}:s:6", f"c{d}:b:1")])["fusiones"]
+        self.assertEqual([u["tipo"] for u in uniones], ["conector", "conector"])
+        self.assertEqual(self.pedir("POST", "/api/fusiones", {"elemento": nap["id"], "pares": [
+            {"a": f"q{spl['id']}:s:1", "b": f"q{spl['id']}:e:1"}]})[0], 400)
+        # Achicar a 1x4 dejaría colgada la salida 6; a 1x16 se puede.
+        code, data = self.pedir("PUT", f"/api/equipos/{spl['id']}", {"salidas": 4, "version": spl["version"]})
+        self.assertEqual(code, 409, data)
+        grande = self.ok("PUT", f"/api/equipos/{spl['id']}", {"salidas": 16, "version": spl["version"]})["equipos"][0]
+        self.assertEqual(grande["salidas"], 16)
+        self.assertEqual(self.pedir("PUT", f"/api/equipos/{spl['id']}", {"tipo": "olt"})[0], 400)
+        code, data = self.pedir("PUT", f"/api/equipos/{spl['id']}", {"nombre": "x", "version": spl["version"]})
+        self.assertEqual(code, 409)
+        self.assertEqual(data["actual"]["salidas"], 16)
+        # Borrar el splitter se lleva sus uniones.
+        res = self.ok("DELETE", f"/api/equipos/{spl['id']}?version={grande['version']}")
+        self.assertEqual(sorted(f["id"] for f in res["fusiones"]), sorted(u["id"] for u in uniones))
+        red = self.ok("GET", f"/api/red?red={x['red']}")
+        self.assertEqual(sorted(e["id"] for e in red["equipos"]), sorted([fbt["equipos"][0]["id"], olt["id"]]))
+        self.assertEqual(red["fusiones"], [])
+
+    def test_fusiones_y_cambios_en_los_cables(self):
+        x = self.armar("Cambios de cable")
+        t, r, bot = x["t"], x["r"], x["bot"]
+        self.unir(bot, [(f"c{t}:b:20", f"c{r}:b:2")])
+        cable_t = x["cables"]["t"]
+        v = cable_t["properties"]["version"]
+        # Bajar a 12 fibras dejaría colgada la fibra 20.
+        code, data = self.pedir("PUT", f"/api/cables/{t}", {"fibras": 12, "version": v})
+        self.assertEqual(code, 409, data)
+        self.assertIn("BOT", data["error"])
+        self.ok("PUT", f"/api/cables/{t}", {"fibras": 24, "por_tubo": 6, "colores": "abnt", "version": v})
+        # Sacar a T de BOT con un trazado nuevo deja la unión sin cable: rechazado.
+        nodo, nap = x["nodo"], x["nap"]
+        actual = self.ok("GET", f"/api/red?red={x['red']}")["cables"]["features"]
+        v = next(c for c in actual if c["id"] == t)["properties"]["version"]
+        code, data = self.pedir("PUT", f"/api/cables/{t}", {
+            "coords": [nodo["geometry"]["coordinates"], nap["geometry"]["coordinates"]],
+            "nodos": [nodo["id"], nap["id"]], "version": v})
+        self.assertEqual(code, 409, data)
+        # Cortar T en BOT (que termine ahí) también saca el lado b, que tiene la unión.
+        code, _ = self.pedir("PUT", f"/api/cables/{t}", {
+            "coords": [nodo["geometry"]["coordinates"], bot["geometry"]["coordinates"]],
+            "nodos": [nodo["id"], bot["id"]], "version": v})
+        self.assertEqual(code, 409)
+        # Un trazado que sigue pasando por BOT se guarda.
+        self.ok("PUT", f"/api/cables/{t}", {
+            "coords": [nodo["geometry"]["coordinates"], [-58.169, -26.1805], bot["geometry"]["coordinates"],
+                       nap["geometry"]["coordinates"]],
+            "nodos": [nodo["id"], None, bot["id"], nap["id"]], "version": v})
+        # Pasar dos veces por la botella no se admite; por un poste, sí.
+        p = x["poste"]
+        coords = [nodo["geometry"]["coordinates"], bot["geometry"]["coordinates"], p["geometry"]["coordinates"],
+                  bot["geometry"]["coordinates"]]
+        code, data = self.pedir("POST", "/api/cables", {"red": x["red"], "coords": coords,
+                                                        "nodos": [nodo["id"], bot["id"], p["id"], bot["id"]]})
+        self.assertEqual(code, 400, data)
+        self.assertIn("dos veces", data["error"])
+        coords = [p["geometry"]["coordinates"], bot["geometry"]["coordinates"], p["geometry"]["coordinates"]]
+        self.ok("POST", "/api/cables", {"red": x["red"], "coords": coords, "nodos": [p["id"], bot["id"], p["id"]]},
+                status=201)
+        # Borrar el cable R se lleva sus uniones (y avisa en la respuesta y en los cambios).
+        actual = self.ok("GET", f"/api/red?red={x['red']}")
+        v_r = next(c for c in actual["cables"]["features"] if c["id"] == r)["properties"]["version"]
+        borrado = self.ok("DELETE", f"/api/cables/{r}?version={v_r}")
+        self.assertEqual(len(borrado["fusiones"]), 1)
+        cambios = self.ok("GET", f"/api/cambios?red={x['red']}&desde={actual['version']}")
+        self.assertEqual(cambios["fusiones"][0]["borrado"], True)
+
+    def test_carta_y_tipo_del_elemento(self):
+        x = self.armar("Carta")
+        t, r, bot, nodo = x["t"], x["r"], x["bot"], x["nodo"]
+        lados = {"lados": {f"c{t}:a": "i", f"c{t}:b": "d", f"c{r}:b": "i"}}
+        e = self.ok("PUT", f"/api/elementos/{bot['id']}", {"carta": lados})["elemento"]
+        self.assertEqual(e["properties"]["carta"], lados)
+        for malo in ({"lados": {"x": "i"}}, {"lados": {f"c{t}:a": "arriba"}}, {"lados": []}, "texto"):
+            with self.subTest(malo=malo):
+                self.assertEqual(self.pedir("PUT", f"/api/elementos/{bot['id']}", {"carta": malo})[0], 400)
+        hist = self.ok("GET", f"/api/historial?red={x['red']}&limite=1")["historial"]
+        self.assertEqual(hist[0]["accion"], "ordenar")
+        # Con uniones, la botella no puede pasar a poste; con OLT, el nodo no puede pasar a caja.
+        self.unir(bot, [(f"c{t}:a:1", f"c{r}:b:1")])
+        self.assertEqual(self.pedir("PUT", f"/api/elementos/{bot['id']}", {"tipo": "poste"})[0], 409)
+        self.ok("PUT", f"/api/elementos/{bot['id']}", {"tipo": "caja"})
+        self.ok("POST", "/api/equipos", {"elemento": nodo["id"], "tipo": "olt", "salidas": 8}, status=201)
+        self.assertEqual(self.pedir("PUT", f"/api/elementos/{nodo['id']}", {"tipo": "caja"})[0], 409)
+        # Un poste por el que un cable pasa dos veces no puede pasar a caja.
+        p = x["poste"]
+        coords = [p["geometry"]["coordinates"], bot["geometry"]["coordinates"], p["geometry"]["coordinates"]]
+        self.ok("POST", "/api/cables", {"red": x["red"], "coords": coords, "nodos": [p["id"], bot["id"], p["id"]]}, status=201)
+        code, data = self.pedir("PUT", f"/api/elementos/{p['id']}", {"tipo": "caja"})
+        self.assertEqual(code, 409, data)
+        self.assertIn("dos veces", data["error"])
+        # Borrar la botella se lleva su carta.
+        self.ok("POST", "/api/equipos", {"elemento": bot["id"], "tipo": "splitter", "salidas": 4}, status=201)
+        res = self.ok("DELETE", f"/api/elementos/{bot['id']}")
+        self.assertEqual((len(res["fusiones"]), len(res["equipos"])), (1, 1))
+        red = self.ok("GET", f"/api/red?red={x['red']}")
+        self.assertEqual(red["fusiones"], [])
+        self.assertEqual([e["tipo"] for e in red["equipos"]], ["olt"])
 
 
 if __name__ == "__main__":

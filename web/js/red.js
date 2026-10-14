@@ -4,7 +4,7 @@
 
 import { api } from './api.js';
 import { CABLES, ELEMENTOS, normalizar } from './modelo.js';
-import { idIcono, registrarIconos } from './iconos.js';
+import { registrarIconos } from './iconos.js';
 import { OVERLAY_ANCHOR } from './style.js';
 
 const POLL_MS = 10000;
@@ -51,6 +51,9 @@ export function setupRed({ map, maplibregl, usuario }) {
     version: 0,
     elementos: new Map(),
     cables: new Map(),
+    equipos: new Map(), // splitters y OLT, por id
+    fusiones: new Map(), // uniones de las cartas de empalme, por id
+    rev: 0, // sube con cada cambio aplicado (para rehacer cálculos)
     seleccion: null, // { clase: 'elemento' | 'cable', id }
   };
   const listeners = new Map();
@@ -74,6 +77,7 @@ export function setupRed({ map, maplibregl, usuario }) {
     map.addSource('red-cables', { type: 'geojson', data: collection([]), promoteId: 'id' });
     map.addSource('red-elementos', { type: 'geojson', data: collection([]), promoteId: 'id' });
     map.addSource('red-dibujo', { type: 'geojson', data: collection([]) });
+    map.addSource('red-recorrido', { type: 'geojson', data: collection([]) });
 
     const add = (layer) => map.addLayer(layer, OVERLAY_ANCHOR);
     const halo = { 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 };
@@ -128,6 +132,22 @@ export function setupRed({ map, maplibregl, usuario }) {
         'text-keep-upright': true,
       },
       paint: { 'text-color': '#16222c', ...halo },
+    });
+
+    // Recorrido de un pelo: por dónde va, encima de los cables y debajo de los elementos.
+    add({
+      id: 'red-recorrido-halo',
+      type: 'line',
+      source: 'red-recorrido',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 7, 18, 14], 'line-opacity': 0.9 },
+    });
+    add({
+      id: 'red-recorrido',
+      type: 'line',
+      source: 'red-recorrido',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': SIGNAL, 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 3.5, 18, 7] },
     });
 
     add({
@@ -273,19 +293,30 @@ export function setupRed({ map, maplibregl, usuario }) {
     map.setFilter('red-cables-sel', ['==', ['id'], sel?.clase === 'cable' ? sel.id : -1]);
   }
 
-  const tablaDe = (clase) => (clase === 'elemento' ? state.elementos : state.cables);
+  const TABLAS = { elemento: state.elementos, cable: state.cables, equipo: state.equipos, fusion: state.fusiones };
+  const tablaDe = (clase) => TABLAS[clase];
+  // Elementos y cables son GeoJSON (la versión va en properties); equipos y uniones, objetos simples.
+  const versionDe = (item) => item.properties?.version ?? item.version;
 
-  function upsert(clase, feature) {
+  // Bajas vistas (clase:id -> versión): un sondeo que salió antes de una baja y
+  // llega después no tiene que revivir lo borrado.
+  const bajas = new Map();
+
+  function upsert(clase, item) {
     const tabla = tablaDe(clase);
-    const actual = tabla.get(feature.id);
+    const actual = tabla.get(item.id);
+    const v = versionDe(item);
     // Lo que llega tarde (una respuesta más vieja que lo que ya se ve) no pisa.
-    if (actual && actual.properties.version >= feature.properties.version) return false;
-    tabla.set(feature.id, feature);
+    if (actual && versionDe(actual) >= v) return false;
+    if ((bajas.get(`${clase}:${item.id}`) ?? -1) >= v) return false;
+    tabla.set(item.id, item);
     return true;
   }
 
-  function quitar(clase, id) {
+  function quitar(clase, id, version) {
+    if (version !== undefined) bajas.set(`${clase}:${id}`, Math.max(version, bajas.get(`${clase}:${id}`) ?? -1));
     const habia = tablaDe(clase).delete(id);
+    if (habia) state.rev += 1;
     if (state.seleccion?.clase === clase && state.seleccion.id === id) {
       state.seleccion = null;
       aplicarSeleccion();
@@ -296,28 +327,48 @@ export function setupRed({ map, maplibregl, usuario }) {
 
   const esSeleccion = (clase, id) => state.seleccion?.clase === clase && state.seleccion.id === id;
 
+  // Si un cambio tiene que ver con lo elegido (para rehacer su ficha). De
+  // equipos y uniones, los de ese elemento o los de las fibras de ese cable; la
+  // ficha de un cliente depende de uniones de otros lugares (su NAP).
+  function tocaLaSeleccion(clase, item) {
+    const sel = state.seleccion;
+    if (!sel || !item) return false;
+    if (clase === 'elemento' || clase === 'cable') return !item.borrado && esSeleccion(clase, item.id);
+    if (sel.clase === 'elemento') {
+      return item.elemento === sel.id || state.elementos.get(sel.id)?.properties.tipo === 'cliente';
+    }
+    return clase === 'fusion' && [item.a, item.b].some((ext) => String(ext).startsWith(`c${sel.id}:`));
+  }
+
   // Aplica lo que devuelve el servidor: carga completa, cambios de otros o la
   // respuesta de una escritura propia. Devuelve cuántos cambios eran de otros.
   function aplicar(payload) {
     let ajenos = 0;
     let cambios = 0;
+    let enMapa = 0;
     let tocaSeleccion = false;
     const procesar = (clase, items) => {
       for (const item of items ?? []) {
-        const hubo = item.borrado ? quitar(clase, item.id) : upsert(clase, item);
+        const previo = tablaDe(clase).get(item.id);
+        const hubo = item.borrado ? quitar(clase, item.id, item.version) : upsert(clase, item);
         if (!hubo) continue;
         cambios += 1;
-        const autor = item.borrado ? item.modificado_por : item.properties?.modificado_por;
+        if (clase === 'elemento' || clase === 'cable') enMapa += 1;
+        const autor = item.borrado ? item.modificado_por : (item.properties?.modificado_por ?? item.modificado_por);
         if (autor && autor !== usuario) ajenos += 1;
-        if (!item.borrado && esSeleccion(clase, item.id)) tocaSeleccion = true;
+        if (tocaLaSeleccion(clase, item.borrado ? previo : item)) tocaSeleccion = true;
       }
     };
     procesar('elemento', payload.elementos?.features ?? payload.elementos);
     procesar('cable', payload.cables?.features ?? payload.cables);
     procesar('elemento', payload.elemento ? [payload.elemento] : []);
     procesar('cable', payload.cable ? [payload.cable] : []);
-    if (cambios) render();
+    procesar('equipo', payload.equipos);
+    procesar('fusion', payload.fusiones);
+    if (cambios) state.rev += 1;
+    if (enMapa) render();
     if (tocaSeleccion && state.seleccion) emit('seleccion', seleccionado());
+    if (cambios) emit('datos', { ajenos });
     return ajenos;
   }
 
@@ -329,8 +380,14 @@ export function setupRed({ map, maplibregl, usuario }) {
     state.version = 0;
     state.elementos.clear();
     state.cables.clear();
+    state.equipos.clear();
+    state.fusiones.clear();
+    bajas.clear();
+    state.rev += 1;
     state.seleccion = null;
     render();
+    limpiarRecorrido();
+    emit('datos', { ajenos: 0 });
     if (!redId) {
       emit('cargada', null);
       return;
@@ -365,6 +422,9 @@ export function setupRed({ map, maplibregl, usuario }) {
     if (state.red !== red) return;
     state.elementos.clear();
     state.cables.clear();
+    state.equipos.clear();
+    state.fusiones.clear();
+    state.rev += 1;
     state.version = datos.version;
     aplicar(datos);
     if (sel && tablaDe(sel.clase).has(sel.id)) seleccionar(sel.clase, sel.id);
@@ -379,7 +439,8 @@ export function setupRed({ map, maplibregl, usuario }) {
       if (state.red !== red || cambios.version <= state.version) return;
       state.version = cambios.version;
       // Cambios en otras redes mueven la versión pero no traen nada para esta.
-      if (!cambios.elementos.length && !cambios.cables.length) return;
+      const hay = ['elementos', 'cables', 'equipos', 'fusiones'].some((k) => cambios[k]?.length);
+      if (!hay) return;
       const ajenos = aplicar(cambios);
       if (ajenos) emit('cambios', ajenos);
     } catch (err) {
@@ -498,6 +559,18 @@ export function setupRed({ map, maplibregl, usuario }) {
     if (ready) map.getSource('red-dibujo').setData(collection(features));
   }
 
+  // Resalta en el mapa los tramos de un recorrido (listas de coordenadas).
+  function resaltarRecorrido(lineas) {
+    if (!ready) return;
+    const features = (lineas ?? []).filter((l) => l.length >= 2)
+      .map((coordinates) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }));
+    map.getSource('red-recorrido').setData(collection(features));
+  }
+
+  function limpiarRecorrido() {
+    if (ready) map.getSource('red-recorrido').setData(collection([]));
+  }
+
   const nombres = (clase, tipo) => {
     const out = [];
     for (const f of tablaDe(clase).values()) if (!tipo || f.properties.tipo === tipo) out.push(f.properties.nombre);
@@ -540,6 +613,8 @@ export function setupRed({ map, maplibregl, usuario }) {
     imanEn,
     manijaEn,
     dibujar,
+    resaltarRecorrido,
+    limpiarRecorrido,
     nombres,
     cablesPegados,
     buscar,

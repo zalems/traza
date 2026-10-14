@@ -119,6 +119,14 @@ if [[ -d /srv/ftth ]]; then
     # Lo último puede estar todavía en el archivo -wal: se cuentan los dos.
     row "  base de la red" "$(du -ch --apparent-size /srv/ftth/data/red.db* 2>/dev/null | tail -n1 | cut -f1) (respaldo: sudo /srv/ftth/bin/respaldo)"
   fi
+  if [[ -d /run/systemd/system ]] && have systemctl; then
+    row "  copia diaria" "ftth-respaldo.timer: $(systemctl is-active ftth-respaldo.timer 2>/dev/null || true)"
+  fi
+  if [[ $EUID -eq 0 && -d /root/respaldos-ftth ]]; then
+    ultima="$(find /root/respaldos-ftth -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -r | head -n1)"
+    n="$(find /root/respaldos-ftth -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+    row "  copias hechas" "$n${ultima:+ (la última: $ultima)}"
+  fi
   if [[ $EUID -eq 0 && -x /srv/ftth/bin/usuarios ]]; then
     n="$(/srv/ftth/bin/usuarios listar 2>/dev/null | grep -c . || true)"
     row "  usuarios del login" "$n"

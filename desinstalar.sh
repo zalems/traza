@@ -28,6 +28,16 @@ done
 [[ $EUID -eq 0 ]] || die "Hace falta root: ejecutá con sudo."
 [[ "$ROOT" == /* && "$ROOT" != "/" ]] || die "--raiz tiene que ser una ruta absoluta distinta de /."
 
+# Copia diaria (se quita la programación; las copias hechas quedan en /root/respaldos-ftth)
+if [[ -f "/etc/systemd/system/$APP-respaldo.timer" || -f "/etc/systemd/system/$APP-respaldo.service" ]]; then
+  if [[ -d /run/systemd/system ]]; then
+    systemctl disable --now "$APP-respaldo.timer" >/dev/null 2>&1 || true
+  fi
+  rm -f "/etc/systemd/system/$APP-respaldo.timer" "/etc/systemd/system/$APP-respaldo.service"
+  [[ -d /run/systemd/system ]] && systemctl daemon-reload
+  echo "   quitada la copia diaria (las copias hechas siguen en /root/respaldos-ftth)"
+fi
+
 # Servicios del kit: sesión (login) y API de la red
 for svc in "$APP-auth" "$APP-api"; do
   if [[ -f "/etc/systemd/system/$svc.service" ]]; then

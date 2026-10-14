@@ -579,6 +579,10 @@ API_PY="$ROOT/api/ftth-api.py"
 API_UNIT="/etc/systemd/system/$APP-api.service"
 API_SECRET="$ROOT/data/api.secreto"
 API_SECRET_INC="/etc/nginx/$APP-api-secreto.inc"
+BACKUP_SERVICE="/etc/systemd/system/$APP-respaldo.service"
+BACKUP_TIMER="/etc/systemd/system/$APP-respaldo.timer"
+BACKUP_KEEP="${FTTH_RESPALDOS:-30}"   # copias diarias que se conservan
+[[ "$BACKUP_KEEP" =~ ^[1-9][0-9]{0,3}$ ]] || die "FTTH_RESPALDOS tiene que ser un número de copias (1 a 9999)."
 
 # Responde el servicio que corresponde (no cualquier cosa que esté en ese puerto).
 auth_health() { curl -fsS --noproxy '*' --max-time 3 "http://127.0.0.1:$AUTH_PORT/auth/health" 2>/dev/null | grep -q '"ok": true'; }
@@ -635,6 +639,8 @@ install_service() {
   elif ! "$health"; then
     warn "Este sistema no tiene systemd: el servicio $APP-$name hay que iniciarlo a mano:"
     warn "  runuser -u $AUTH_USER -- $command &"
+  elif (( changed )); then
+    warn "Este sistema no tiene systemd y $APP-$name cambió: hay que reiniciarlo a mano para que tome la versión nueva."
   fi
   for _ in $(seq 1 20); do
     "$health" && break
@@ -668,7 +674,9 @@ install_backup_tool() {
   cat > "$WORK/respaldo" <<'TOOL'
 #!/usr/bin/env bash
 # Copia coherente de los usuarios, la red y los ajustes, con todo andando.
-#   respaldo [CARPETA]   (por defecto /root/respaldos-ftth)
+#   respaldo [--conservar N] [--etiqueta TEXTO] [CARPETA]   (por defecto /root/respaldos-ftth)
+#   --conservar N   después de copiar, deja solo las N copias más nuevas de la carpeta
+#   --etiqueta T    agrega T al nombre de la copia (por ejemplo, antes-de-0.4.0)
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "Ejecutar con sudo." >&2; exit 1; }
 TOOL
@@ -677,7 +685,23 @@ ROOT="$ROOT"
 SERVICE_USER="$AUTH_USER"
 TOOL
   cat >> "$WORK/respaldo" <<'TOOL'
-dest="${1:-/root/respaldos-ftth}/$(date +%Y%m%d-%H%M%S)"
+base="/root/respaldos-ftth"
+conservar=0
+etiqueta=""
+while (( $# )); do
+  case "$1" in
+    --conservar) conservar="${2:-}"; shift; shift || true ;;
+    --etiqueta) etiqueta="${2:-}"; shift; shift || true ;;
+    -h|--ayuda|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "Opción desconocida: $1" >&2; exit 2 ;;
+    *) base="${1%/}"; shift ;;
+  esac
+done
+[[ "$conservar" =~ ^[0-9]{1,4}$ ]] || { echo "--conservar espera un número de copias." >&2; exit 2; }
+conservar=$((10#$conservar))
+[[ -z "$etiqueta" || "$etiqueta" =~ ^[A-Za-z0-9._-]{1,40}$ ]] || { echo "--etiqueta admite letras, números, punto y guion." >&2; exit 2; }
+[[ -n "$base" ]] || { echo "Falta la carpeta de las copias." >&2; exit 2; }
+dest="$base/$(date +%Y%m%d-%H%M%S)${etiqueta:+-$etiqueta}"
 mkdir -p "$dest"
 chmod 0700 "$dest"
 # La copia la hace el usuario del servicio: si la hiciera root, SQLite podría
@@ -698,8 +722,71 @@ done
 cp -p "$ROOT/config/config.local.js" "$dest/" 2>/dev/null || true
 echo "Respaldo en $dest:"
 ls -l "$dest"
+# Las copias diarias se llaman AAAAMMDD-HHMMSS: por nombre, de la más nueva a la
+# más vieja. Las que llevan etiqueta (las de antes de actualizar) no se podan solas.
+if (( conservar > 0 )); then
+  borradas=0
+  while IFS= read -r vieja; do
+    rm -rf -- "${base:?}/$vieja"
+    borradas=$((borradas + 1))
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+             -regex '.*/[0-9]{8}-[0-9]{6}' -printf '%f\n' | sort -r | tail -n +$((conservar + 1)))
+  (( borradas == 0 )) || echo "Copias viejas borradas: $borradas (se conservan $conservar)"
+fi
 TOOL
   cmp -s "$WORK/respaldo" "$ROOT/bin/respaldo" || install -m 0755 "$WORK/respaldo" "$ROOT/bin/respaldo"
+}
+
+# Copia diaria (03:30, con un margen al azar) que conserva las últimas BACKUP_KEEP.
+install_backup_timer() {
+  if [[ ! -d /run/systemd/system ]]; then
+    warn "Este sistema no tiene systemd: la copia diaria hay que programarla aparte, por ejemplo en /etc/cron.d/$APP:"
+    warn "  30 3 * * * root $ROOT/bin/respaldo --conservar $BACKUP_KEEP >/dev/null"
+    return
+  fi
+  cat > "$WORK/respaldo.service" <<UNIT
+# $APP-respaldo: copia de seguridad de la plataforma FTTH. Generado por instalar.sh.
+[Unit]
+Description=Copia de seguridad de la plataforma FTTH (red, usuarios y ajustes)
+
+[Service]
+Type=oneshot
+ExecStart=$ROOT/bin/respaldo --conservar $BACKUP_KEEP
+Nice=10
+IOSchedulingClass=idle
+UNIT
+  cat > "$WORK/respaldo.timer" <<UNIT
+# $APP-respaldo: copia de seguridad diaria. Generado por instalar.sh.
+[Unit]
+Description=Copia de seguridad diaria de la plataforma FTTH
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  local changed=0
+  if ! cmp -s "$WORK/respaldo.service" "$BACKUP_SERVICE"; then install -m 0644 "$WORK/respaldo.service" "$BACKUP_SERVICE"; changed=1; fi
+  if ! cmp -s "$WORK/respaldo.timer" "$BACKUP_TIMER"; then install -m 0644 "$WORK/respaldo.timer" "$BACKUP_TIMER"; changed=1; fi
+  (( changed )) && systemctl daemon-reload
+  systemctl enable --now "$APP-respaldo.timer" >/dev/null 2>&1 || die "No se pudo activar la copia diaria. Revisá: systemctl status $APP-respaldo.timer"
+  ok "Copia diaria de la red y los usuarios a las 03:30 (quedan las últimas $BACKUP_KEEP en /root/respaldos-ftth)"
+}
+
+# Antes de cambiar la API (la nueva puede actualizar el esquema de la red), una
+# copia de la base: si algo sale mal, se vuelve a esa copia.
+backup_before_api() {
+  [[ -s "$API_DB" && -f "$API_PY" ]] || return 0
+  cmp -s "$KIT_DIR/api/ftth-api.py" "$API_PY" && return 0
+  local salida
+  if ! salida="$("$ROOT/bin/respaldo" --etiqueta "antes-de-$KIT_VERSION" 2>&1)"; then
+    printf '%s\n' "$salida" >&2
+    die "No se pudo copiar la red antes de actualizar la API: la API quedó como estaba."
+  fi
+  ok "Copia de la red antes de actualizar: $(printf '%s\n' "$salida" | sed -n 's/^Respaldo en \(.*\):$/\1/p')"
 }
 
 install_auth() {
@@ -707,8 +794,12 @@ install_auth() {
     id "$AUTH_USER" >/dev/null 2>&1 || sim "crear el usuario del sistema $AUTH_USER"
     sim "instalar $AUTH_PY y el servicio $AUTH_UNIT (puerto $AUTH_PORT)"
     [[ -s "$API_SECRET" ]] || sim "crear la clave entre nginx y la API ($API_SECRET)"
-    sim "instalar $API_PY y el servicio $API_UNIT (puerto $API_PORT)"
     sim "instalar $ROOT/bin/respaldo"
+    if [[ -s "$API_DB" ]] && ! cmp -s "$KIT_DIR/api/ftth-api.py" "$API_PY"; then
+      sim "copiar la red a /root/respaldos-ftth antes de cambiar la API"
+    fi
+    sim "instalar $API_PY y el servicio $API_UNIT (puerto $API_PORT)"
+    sim "programar la copia diaria ($BACKUP_TIMER, conserva $BACKUP_KEEP)"
     return
   fi
 
@@ -733,10 +824,12 @@ WRAP
   # La base de usuarios la crea el propio usuario del servicio, así queda con su dueño.
   usuarios listar >/dev/null
   install_api_secret
+  install_backup_tool
+  backup_before_api
   install_service api "API de la red de la plataforma FTTH" "API de la red FTTH" \
     "$KIT_DIR/api/ftth-api.py" "$API_PY" "$API_PORT" "$API_UNIT" api_health \
     "/usr/bin/python3 -I $API_PY --db $API_DB serve --host 127.0.0.1 --port $API_PORT --secreto $API_SECRET"
-  install_backup_tool
+  install_backup_timer
 
   if [[ "$(usuarios listar)" == "No hay usuarios." ]]; then
     if [[ -t 0 && -t 1 ]]; then
@@ -1168,8 +1261,12 @@ verify_site() {
   code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/auth/health" || true)"
   check "El servicio de sesión responde a través de nginx" '[[ "$code" == 200 ]]'
 
-  code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/api/salud" || true)"
+  code="$(curl "${opts[@]}" -o "$WORK/salud.json" -w '%{http_code}' "$base/api/salud" || true)"
   check "La API de la red responde a través de nginx" '[[ "$code" == 200 ]]'
+  local esquema
+  esquema="$(sed -n 's/^ESQUEMA = \([0-9][0-9]*\)$/\1/p' "$API_PY")"
+  check "La API que atiende es la de esta versión (base con esquema $esquema)" \
+    '[[ -n "$esquema" ]] && grep -q "\"esquema\": $esquema[,}]" "$WORK/salud.json"'
   code="$(curl "${opts[@]}" -o /dev/null -w '%{http_code}' "$base/api/yo" || true)"
   check "Sin sesión, la API responde 401 (HTTP $code)" '[[ "$code" == 401 ]]'
   code="$(curl -sS --max-time 5 --noproxy '*' -H 'X-Usuario: verificacion' -o /dev/null -w '%{http_code}' \
@@ -1211,8 +1308,14 @@ verify_site() {
     warn "No hay mapa de calles instalado: el visor va a arrancar con el mapa del IGN."
   fi
 
+  code="$(curl "${opts[@]}" -o "$WORK/redes.json" -w '%{http_code}' "$base/api/redes" || true)"
+  check "La API lee la base de la red" '[[ "$code" == 200 ]] && grep -q "\"redes\"" "$WORK/redes.json"'
+
   code="$(curl "${opts[@]}" -X POST -o /dev/null -w '%{http_code}' "$base/auth/logout" || true)"
   check "Salir cierra la sesión" '[[ "$code" == 200 ]]'
+  if [[ -d /run/systemd/system ]]; then
+    check "La copia diaria está programada" 'systemctl is-active --quiet "$APP-respaldo.timer"'
+  fi
   usuarios quitar "$probe" >/dev/null
   trap cleanup EXIT
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""API de la red FTTH: redes, elementos puntuales y cables.
+"""API de la red FTTH: redes, elementos, cables y cartas de empalme.
 
 Un solo archivo, sin dependencias fuera de la biblioteca estándar. Guarda todo
 en SQLite y atiende en 127.0.0.1 detrás de nginx, que solo deja pasar pedidos
@@ -12,15 +12,28 @@ otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx
   GET    /api/redes                    redes (una por cliente o despliegue)
   POST   /api/redes                    {nombre}
   PUT    /api/redes/ID                 {nombre}
-  GET    /api/red?red=ID               toda la red (GeoJSON) y la versión actual
+  GET    /api/red?red=ID               toda la red (GeoJSON, equipos y uniones) y la versión actual
   GET    /api/cambios?red=ID&desde=V   lo que cambió después de la versión V (incluye bajas)
   POST   /api/elementos                {red, tipo, nombre, estado, lon, lat, datos, notas}
-  PUT    /api/elementos/ID             los mismos campos, todos opcionales; mover = lon y lat
+  PUT    /api/elementos/ID             los mismos campos y carta, todos opcionales; mover = lon y lat
   DELETE /api/elementos/ID?version=V   baja lógica; los cables pegados quedan sueltos en ese punto
-  POST   /api/cables                   {red, nombre, tipo, fibras, estado, tendido, coords, nodos, datos, notas}
+  POST   /api/cables                   {red, nombre, tipo, fibras, por_tubo, colores, estado, tendido, coords, nodos, datos, notas}
   PUT    /api/cables/ID
-  DELETE /api/cables/ID?version=V
+  DELETE /api/cables/ID?version=V      también quita las uniones de sus fibras
+  POST   /api/equipos                  {elemento, tipo, nombre, entradas, salidas, datos, notas}: splitter u OLT
+  PUT    /api/equipos/ID
+  DELETE /api/equipos/ID?version=V     también quita las uniones de sus puertos
+  POST   /api/fusiones                 {elemento, pares: [{a, b}], tipo}: une fibras y puertos en un elemento
+  DELETE /api/fusiones/ID?version=V
+  POST   /api/fusiones/borrar          {ids}: quita varias uniones (deshacer)
   GET    /api/historial?red=ID&limite=N   últimos cambios (quién, qué, cuándo)
+
+Extremos de una unión, siempre dentro de un elemento:
+  cCABLE:LADO:FIBRA   fibra de un cable; LADO a = el tramo hacia el comienzo del
+                      cable, b = el tramo hacia el final (un cable que pasa por el
+                      elemento tiene los dos; uno que empieza o termina, uno solo)
+  qEQUIPO:e:N         entrada N de un splitter
+  qEQUIPO:s:N         salida N de un splitter o puerto PON N de una OLT
 
 PUT y DELETE aceptan la versión que el usuario tenía a la vista: si mientras
 tanto alguien cambió ese objeto, la respuesta es 409 con el estado actual.
@@ -35,6 +48,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -49,15 +63,34 @@ MAX_NOTAS = 2000
 MAX_DATOS = 8 * 1024
 MAX_VERTICES = 2000
 MAX_FIBRAS = 864
+MAX_POR_TUBO = 48
+MAX_PARES = 864
+MAX_LADOS = 400
 
 TIPOS_ELEMENTO = ("nodo", "poste", "caja", "nap", "botella", "cliente", "reserva")
 TIPOS_CABLE = ("troncal", "distribucion", "bajada")
 ESTADOS = ("proyectado", "instalado", "activo", "baja")
 TENDIDOS = ("aereo", "subterraneo", "fachada")
+# Código de colores de fibras y tubos: TIA-598 (azul, naranja, verde…) o ABNT,
+# el de los cables fabricados en Brasil (verde, amarillo, blanco…).
+COLORES = ("tia598", "abnt")
+
+# Dónde se arma una carta de empalme (uniones de fibras y equipos adentro).
+TIPOS_CON_CARTA = ("nodo", "caja", "nap", "botella")
+TIPOS_EQUIPO = ("splitter", "olt")
+MODOS_SPLITTER = ("plc", "fbt")
+SALIDAS_PLC = (2, 4, 8, 16, 32, 64, 128)
+MAX_PUERTOS_OLT = 256
+TIPOS_UNION = ("fusion", "conector")
+
+EXTREMO_CABLE = re.compile(r"c([1-9][0-9]{0,15}):([ab]):([1-9][0-9]{0,3})")
+EXTREMO_EQUIPO = re.compile(r"q([1-9][0-9]{0,15}):([es]):([1-9][0-9]{0,3})")
+LADO_CARTA = re.compile(r"c([1-9][0-9]{0,15}):([ab])")
+RELACION_FBT = re.compile(r"([1-9][0-9]?)/([1-9][0-9]?)")
 
 # Versión del esquema de la base (PRAGMA user_version). Cada cambio de
 # estructura suma un paso en MIGRACIONES.
-ESQUEMA = 1
+ESQUEMA = 2
 
 log = logging.getLogger("ftth-api")
 
@@ -148,6 +181,56 @@ CREATE TABLE IF NOT EXISTS historial (
 );
 CREATE INDEX IF NOT EXISTS historial_red ON historial(red_id, id);
 """,
+    # 0.4.0: estructura de fibras de los cables y cartas de empalme.
+    2: """
+-- Fibras por tubo (0 = automático: hasta 12 en un tubo, si no tubos de 12) y
+-- código de colores de fibras y tubos.
+ALTER TABLE cables ADD COLUMN por_tubo INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cables ADD COLUMN colores TEXT NOT NULL DEFAULT 'tia598';
+
+-- Cómo se dibuja la carta de empalme (de qué lado va cada cable).
+ALTER TABLE elementos ADD COLUMN carta TEXT NOT NULL DEFAULT '{}';
+
+-- Equipos dentro de un elemento: splitters y OLT.
+CREATE TABLE IF NOT EXISTS equipos (
+    id              INTEGER PRIMARY KEY,
+    red_id          INTEGER NOT NULL REFERENCES redes(id),
+    elemento_id     INTEGER NOT NULL REFERENCES elementos(id),
+    tipo            TEXT NOT NULL,
+    nombre          TEXT NOT NULL DEFAULT '',
+    entradas        INTEGER NOT NULL,
+    salidas         INTEGER NOT NULL,
+    datos           TEXT NOT NULL DEFAULT '{}',
+    notas           TEXT NOT NULL DEFAULT '',
+    creado          TEXT NOT NULL,
+    creado_por      TEXT,
+    modificado      TEXT NOT NULL,
+    modificado_por  TEXT,
+    version         INTEGER NOT NULL,
+    borrado         TEXT
+);
+CREATE INDEX IF NOT EXISTS equipos_red_version ON equipos(red_id, version);
+CREATE INDEX IF NOT EXISTS equipos_elemento ON equipos(elemento_id);
+
+-- Uniones (fusiones o conectores) entre dos extremos dentro de un elemento.
+CREATE TABLE IF NOT EXISTS fusiones (
+    id              INTEGER PRIMARY KEY,
+    red_id          INTEGER NOT NULL REFERENCES redes(id),
+    elemento_id     INTEGER NOT NULL REFERENCES elementos(id),
+    a               TEXT NOT NULL,
+    b               TEXT NOT NULL,
+    tipo            TEXT NOT NULL DEFAULT 'fusion',
+    notas           TEXT NOT NULL DEFAULT '',
+    creado          TEXT NOT NULL,
+    creado_por      TEXT,
+    modificado      TEXT NOT NULL,
+    modificado_por  TEXT,
+    version         INTEGER NOT NULL,
+    borrado         TEXT
+);
+CREATE INDEX IF NOT EXISTS fusiones_red_version ON fusiones(red_id, version);
+CREATE INDEX IF NOT EXISTS fusiones_elemento ON fusiones(elemento_id);
+""",
 }
 
 
@@ -163,6 +246,32 @@ def haversine_m(a, b) -> float:
 
 def line_length_m(coords) -> float:
     return sum(haversine_m(coords[i], coords[i + 1]) for i in range(len(coords) - 1))
+
+
+def lados_en(nodos: list, elemento_id: int) -> set:
+    """Lados del cable que hay en un elemento: 'a' (el tramo hacia el comienzo) si
+    el cable no empieza ahí, 'b' (hacia el final) si no termina ahí. Si pasa más
+    de una vez, cuentan la primera entrada y la última salida."""
+    pos = [i for i, n in enumerate(nodos) if n == elemento_id]
+    if not pos:
+        return set()
+    out = set()
+    if pos[0] > 0:
+        out.add("a")
+    if pos[-1] < len(nodos) - 1:
+        out.add("b")
+    return out
+
+
+def parse_extremo(value):
+    """'c12:a:5' -> ('c', 12, 'a', 5); 'q3:s:2' -> ('q', 3, 's', 2)."""
+    if isinstance(value, str):
+        for kind, pattern in (("c", EXTREMO_CABLE), ("q", EXTREMO_EQUIPO)):
+            m = pattern.fullmatch(value)
+            if m and int(m[1]) <= MAX_ENTERO:
+                return kind, int(m[1]), m[2], int(m[3])
+    shown = value[:40] if isinstance(value, str) else type(value).__name__
+    raise ApiError(HTTPStatus.BAD_REQUEST, f"Extremo inválido: {shown}.")
 
 
 class Store:
@@ -301,6 +410,7 @@ class Store:
                 "nombre": row["nombre"],
                 "estado": row["estado"],
                 "datos": json.loads(row["datos"] or "{}"),
+                "carta": json.loads(row["carta"] or "{}"),
                 "notas": row["notas"],
                 "creado": row["creado"],
                 "creado_por": row["creado_por"],
@@ -321,6 +431,8 @@ class Store:
                 "tipo": row["tipo"],
                 "nombre": row["nombre"],
                 "fibras": row["fibras"],
+                "por_tubo": row["por_tubo"],
+                "colores": row["colores"],
                 "estado": row["estado"],
                 "tendido": row["tendido"],
                 "largo_m": round(row["largo_m"], 1),
@@ -336,27 +448,66 @@ class Store:
         }
 
     @staticmethod
+    def equipo_json(row) -> dict:
+        return {
+            "id": row["id"],
+            "elemento": row["elemento_id"],
+            "tipo": row["tipo"],
+            "nombre": row["nombre"],
+            "entradas": row["entradas"],
+            "salidas": row["salidas"],
+            "datos": json.loads(row["datos"] or "{}"),
+            "notas": row["notas"],
+            "creado": row["creado"],
+            "creado_por": row["creado_por"],
+            "modificado": row["modificado"],
+            "modificado_por": row["modificado_por"],
+            "version": row["version"],
+        }
+
+    @staticmethod
+    def fusion_json(row) -> dict:
+        return {
+            "id": row["id"],
+            "elemento": row["elemento_id"],
+            "a": row["a"],
+            "b": row["b"],
+            "tipo": row["tipo"],
+            "notas": row["notas"],
+            "creado": row["creado"],
+            "creado_por": row["creado_por"],
+            "modificado": row["modificado"],
+            "modificado_por": row["modificado_por"],
+            "version": row["version"],
+        }
+
+    @staticmethod
     def tombstone(row) -> dict:
-        return {"id": row["id"], "borrado": True, "modificado_por": row["modificado_por"], "version": row["version"]}
+        out = {"id": row["id"], "borrado": True, "modificado_por": row["modificado_por"], "version": row["version"]}
+        if "elemento_id" in row.keys():
+            out["elemento"] = row["elemento_id"]
+        return out
 
     def network(self, red_id: int) -> dict:
         c = self.conn()
-        # Lectura consistente: elementos, cables y versión de un mismo momento.
+        # Lectura consistente: todo de un mismo momento.
         c.execute("BEGIN")
         try:
             version = self.version()
-            elements = c.execute(
-                "SELECT * FROM elementos WHERE red_id = ? AND borrado IS NULL ORDER BY id", (red_id,)
-            ).fetchall()
-            cables = c.execute(
-                "SELECT * FROM cables WHERE red_id = ? AND borrado IS NULL ORDER BY id", (red_id,)
-            ).fetchall()
+            rows = {
+                tabla: c.execute(
+                    f"SELECT * FROM {tabla} WHERE red_id = ? AND borrado IS NULL ORDER BY id", (red_id,)
+                ).fetchall()
+                for tabla in ("elementos", "cables", "equipos", "fusiones")
+            }
         finally:
             c.execute("COMMIT")
         return {
             "version": version,
-            "elementos": {"type": "FeatureCollection", "features": [self.element_feature(r) for r in elements]},
-            "cables": {"type": "FeatureCollection", "features": [self.cable_feature(r) for r in cables]},
+            "elementos": {"type": "FeatureCollection", "features": [self.element_feature(r) for r in rows["elementos"]]},
+            "cables": {"type": "FeatureCollection", "features": [self.cable_feature(r) for r in rows["cables"]]},
+            "equipos": [self.equipo_json(r) for r in rows["equipos"]],
+            "fusiones": [self.fusion_json(r) for r in rows["fusiones"]],
         }
 
     def changes(self, red_id: int, since: int) -> dict:
@@ -364,19 +515,24 @@ class Store:
         c.execute("BEGIN")
         try:
             version = self.version()
-            elements = c.execute(
-                "SELECT * FROM elementos WHERE red_id = ? AND version > ? ORDER BY version", (red_id, since)
-            ).fetchall()
-            cables = c.execute(
-                "SELECT * FROM cables WHERE red_id = ? AND version > ? ORDER BY version", (red_id, since)
-            ).fetchall()
+            rows = {
+                tabla: c.execute(
+                    f"SELECT * FROM {tabla} WHERE red_id = ? AND version > ? ORDER BY version, id", (red_id, since)
+                ).fetchall()
+                for tabla in ("elementos", "cables", "equipos", "fusiones")
+            }
         finally:
             c.execute("COMMIT")
-        return {
-            "version": version,
-            "elementos": [self.tombstone(r) if r["borrado"] else self.element_feature(r) for r in elements],
-            "cables": [self.tombstone(r) if r["borrado"] else self.cable_feature(r) for r in cables],
+        vivo = {
+            "elementos": self.element_feature,
+            "cables": self.cable_feature,
+            "equipos": self.equipo_json,
+            "fusiones": self.fusion_json,
         }
+        out = {"version": version}
+        for tabla, fn in vivo.items():
+            out[tabla] = [self.tombstone(r) if r["borrado"] else fn(r) for r in rows[tabla]]
+        return out
 
     def history(self, red_id: int, limit: int):
         rows = self.conn().execute(
@@ -402,6 +558,38 @@ class Store:
                 {"actual": feature_fn(row)},
             )
 
+    # --- uniones: utilidades
+    def _live_fusions(self, where: str, params) -> list:
+        return self.conn().execute(f"SELECT * FROM fusiones WHERE borrado IS NULL AND {where} ORDER BY id", params).fetchall()
+
+    def _cable_fusions(self, cable_id: int) -> list:
+        """Uniones vivas que usan alguna fibra de un cable (en cualquier elemento)."""
+        patron = f"c{cable_id}:%"
+        return self._live_fusions("(a LIKE ? OR b LIKE ?)", (patron, patron))
+
+    def _drop_fusions(self, rows, version, t, usuario) -> list:
+        """Baja lógica de uniones; devuelve las lápidas para el visor."""
+        out = []
+        for r in rows:
+            self.conn().execute(
+                "UPDATE fusiones SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                (t, t, usuario, version, r["id"]),
+            )
+            out.append({"id": r["id"], "borrado": True, "elemento": r["elemento_id"], "modificado_por": usuario,
+                        "version": version})
+        return out
+
+    def _names(self, element_ids) -> str:
+        ids = sorted(set(element_ids))
+        if not ids:
+            return ""
+        marks = ",".join("?" * len(ids))
+        rows = self.conn().execute(f"SELECT id, nombre, tipo FROM elementos WHERE id IN ({marks})", ids).fetchall()
+        nombres = [r["nombre"] or r["tipo"] for r in rows]
+        if len(nombres) <= 1:
+            return "".join(nombres)
+        return ", ".join(nombres[:-1]) + " y " + nombres[-1]
+
     # --- elementos
     def get_element(self, element_id: int):
         return self.conn().execute("SELECT * FROM elementos WHERE id = ? AND borrado IS NULL", (element_id,)).fetchone()
@@ -412,12 +600,12 @@ class Store:
         try:
             v = self.next_version()
             cur = self.conn().execute(
-                "INSERT INTO elementos (red_id, tipo, nombre, estado, lon, lat, datos, notas, creado, creado_por, "
-                "modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO elementos (red_id, tipo, nombre, estado, lon, lat, datos, carta, notas, creado, creado_por, "
+                "modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     red_id, fields["tipo"], fields.get("nombre", ""), fields.get("estado", "instalado"),
                     fields["lon"], fields["lat"], json.dumps(fields.get("datos", {}), ensure_ascii=False),
-                    fields.get("notas", ""), t, usuario, t, usuario, v,
+                    json.dumps(fields.get("carta", {})), fields.get("notas", ""), t, usuario, t, usuario, v,
                 ),
             )
             element_id = cur.lastrowid
@@ -430,6 +618,28 @@ class Store:
             raise
         return out
 
+    def _check_new_type(self, row, tipo: str):
+        """Un elemento con carta de empalme no puede pasar a ser de un tipo que no la tiene."""
+        if tipo == row["tipo"]:
+            return
+        equipos = self.conn().execute(
+            "SELECT tipo FROM equipos WHERE elemento_id = ? AND borrado IS NULL", (row["id"],)
+        ).fetchall()
+        uniones = self._live_fusions("elemento_id = ?", (row["id"],))
+        nombre = row["nombre"] or row["tipo"]
+        if tipo not in TIPOS_CON_CARTA and (equipos or uniones):
+            raise ApiError(HTTPStatus.CONFLICT,
+                           f"{nombre} tiene armada su carta de empalme ({len(uniones)} uniones, {len(equipos)} equipos): "
+                           "quitalas antes de cambiarle el tipo.")
+        if tipo != "nodo" and any(e["tipo"] == "olt" for e in equipos):
+            raise ApiError(HTTPStatus.CONFLICT, f"{nombre} tiene una OLT, que solo va en un nodo: quitala antes de cambiarle el tipo.")
+        if tipo in TIPOS_CON_CARTA and row["tipo"] not in TIPOS_CON_CARTA:
+            for cable in self._attached_cables(row["id"]):
+                if json.loads(cable["nodos"]).count(row["id"]) > 1:
+                    raise ApiError(HTTPStatus.CONFLICT,
+                                   f"El cable {cable['nombre'] or cable['id']} pasa dos veces por {nombre}: así no puede tener "
+                                   "carta de empalme. Corregí ese cable antes de cambiarle el tipo.")
+
     def update_element(self, element_id: int, fields: dict, expected, usuario: str) -> dict:
         self.begin()
         try:
@@ -437,6 +647,8 @@ class Store:
             if row is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
             self.check_version(row, expected, self.element_feature)
+            if "tipo" in fields:
+                self._check_new_type(row, fields["tipo"])
             v = self.next_version()
             t = now_iso()
             merged = {
@@ -446,17 +658,20 @@ class Store:
                 "lon": fields.get("lon", row["lon"]),
                 "lat": fields.get("lat", row["lat"]),
                 "datos": json.dumps(fields["datos"], ensure_ascii=False) if "datos" in fields else row["datos"],
+                "carta": json.dumps(fields["carta"]) if "carta" in fields else row["carta"],
                 "notas": fields.get("notas", row["notas"]),
             }
             self.conn().execute(
-                "UPDATE elementos SET tipo = ?, nombre = ?, estado = ?, lon = ?, lat = ?, datos = ?, notas = ?, "
+                "UPDATE elementos SET tipo = ?, nombre = ?, estado = ?, lon = ?, lat = ?, datos = ?, carta = ?, notas = ?, "
                 "modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
                 (merged["tipo"], merged["nombre"], merged["estado"], merged["lon"], merged["lat"], merged["datos"],
-                 merged["notas"], t, usuario, v, element_id),
+                 merged["carta"], merged["notas"], t, usuario, v, element_id),
             )
             moved = (merged["lon"], merged["lat"]) != (row["lon"], row["lat"])
             cables = self._follow_element(element_id, [merged["lon"], merged["lat"]], v, t, usuario) if moved else []
-            self.log_change(row["red_id"], usuario, "mover" if moved else "editar", "elementos", element_id,
+            solo_carta = set(fields) == {"carta"}
+            self.log_change(row["red_id"], usuario,
+                            "mover" if moved else ("ordenar" if solo_carta else "editar"), "elementos", element_id,
                             {"tipo": merged["tipo"], "nombre": merged["nombre"], "antes": self.element_feature(row)})
             out = {"elemento": self.element_feature(self.get_element(element_id)), "cables": cables, "version": v}
             self.commit()
@@ -479,14 +694,31 @@ class Store:
                 (t, t, usuario, v, element_id),
             )
             cables = self._detach_element(element_id, v, t, usuario)
-            self.log_change(row["red_id"], usuario, "borrar", "elementos", element_id,
-                            {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row)})
+            # Con el elemento se va su carta de empalme: uniones y equipos.
+            uniones = self._live_fusions("elemento_id = ?", (element_id,))
+            fusiones = self._drop_fusions(uniones, v, t, usuario)
+            equipos_rows = self.conn().execute(
+                "SELECT * FROM equipos WHERE elemento_id = ? AND borrado IS NULL ORDER BY id", (element_id,)
+            ).fetchall()
+            equipos = []
+            for e in equipos_rows:
+                self.conn().execute(
+                    "UPDATE equipos SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                    (t, t, usuario, v, e["id"]),
+                )
+                equipos.append({"id": e["id"], "borrado": True, "elemento": element_id, "modificado_por": usuario,
+                                "version": v})
+            detalle = {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row)}
+            if uniones or equipos_rows:
+                detalle["carta"] = {"fusiones": [self.fusion_json(r) for r in uniones],
+                                    "equipos": [self.equipo_json(r) for r in equipos_rows]}
+            self.log_change(row["red_id"], usuario, "borrar", "elementos", element_id, detalle)
             self.commit()
         except Exception:
             self.rollback()
             raise
         return {"ok": True, "elementos": [{"id": element_id, "borrado": True, "modificado_por": usuario, "version": v}],
-                "cables": cables, "version": v}
+                "cables": cables, "fusiones": fusiones, "equipos": equipos, "version": v}
 
     def _attached_cables(self, element_id: int):
         return self.conn().execute(
@@ -536,7 +768,7 @@ class Store:
             return coords
         marks = ",".join("?" * len(ids))
         rows = self.conn().execute(
-            f"SELECT id, lon, lat FROM elementos WHERE red_id = ? AND borrado IS NULL AND id IN ({marks})",
+            f"SELECT id, lon, lat, tipo, nombre FROM elementos WHERE red_id = ? AND borrado IS NULL AND id IN ({marks})",
             (red_id, *ids),
         ).fetchall()
         where = {r["id"]: [r["lon"], r["lat"]] for r in rows}
@@ -545,6 +777,13 @@ class Store:
             raise ApiError(HTTPStatus.CONFLICT,
                            "El cable pasa por un elemento que ya no existe (lo borró otro usuario).",
                            {"faltan": missing})
+        # En la carta de empalme cada cable tiene un lado de entrada y uno de
+        # salida por elemento: no puede pasar dos veces por la misma caja.
+        for r in rows:
+            if r["tipo"] in TIPOS_CON_CARTA and nodos.count(r["id"]) > 1:
+                raise ApiError(HTTPStatus.BAD_REQUEST,
+                               f"El cable pasa dos veces por {r['nombre'] or r['tipo']}. Si va y vuelve, "
+                               "dibujalo como dos cables que empiezan o terminan ahí.")
         anchored = [where[n] if n is not None else coords[i] for i, n in enumerate(nodos)]
         if all(p == anchored[0] for p in anchored):
             raise ApiError(HTTPStatus.BAD_REQUEST, "Los puntos del cable quedan todos en el mismo lugar.")
@@ -563,10 +802,12 @@ class Store:
             coords = self._anchor(red_id, fields["coords"], fields["nodos"])
             v = self.next_version()
             cur = self.conn().execute(
-                "INSERT INTO cables (red_id, tipo, nombre, fibras, estado, tendido, coords, nodos, largo_m, datos, notas, "
-                "creado, creado_por, modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cables (red_id, tipo, nombre, fibras, por_tubo, colores, estado, tendido, coords, nodos, "
+                "largo_m, datos, notas, creado, creado_por, modificado, modificado_por, version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     red_id, fields.get("tipo", "distribucion"), fields.get("nombre", ""), fields.get("fibras", 12),
+                    fields.get("por_tubo", 0), fields.get("colores", "tia598"),
                     fields.get("estado", "instalado"), fields.get("tendido", "aereo"), json.dumps(coords),
                     json.dumps(fields["nodos"]), line_length_m(coords),
                     json.dumps(fields.get("datos", {}), ensure_ascii=False), fields.get("notas", ""),
@@ -584,6 +825,30 @@ class Store:
             raise
         return out
 
+    def _check_cable_fusions(self, cable_id: int, fibras: int, nodos):
+        """Un cambio de fibras o de trazado no puede dejar uniones colgando de una
+        fibra o de un lado del cable que ya no existe."""
+        sin_fibra, sin_lado = [], []
+        for f in self._cable_fusions(cable_id):
+            for ext in (f["a"], f["b"]):
+                kind, ident, lado, n = parse_extremo(ext)
+                if kind != "c" or ident != cable_id:
+                    continue
+                if n > fibras:
+                    sin_fibra.append(f)
+                elif nodos is not None and lado not in lados_en(nodos, f["elemento_id"]):
+                    sin_lado.append(f)
+        if sin_fibra:
+            raise ApiError(HTTPStatus.CONFLICT,
+                           f"Hay uniones en fibras que dejarían de existir (en {self._names(f['elemento_id'] for f in sin_fibra)}): "
+                           "quitalas en la carta de empalme antes de bajar la cantidad de fibras.",
+                           {"fusiones": [f["id"] for f in sin_fibra]})
+        if sin_lado:
+            raise ApiError(HTTPStatus.CONFLICT,
+                           f"El cable tiene uniones en {self._names(f['elemento_id'] for f in sin_lado)} que con este "
+                           "trazado quedarían sin cable: quitalas en la carta de empalme antes de sacarlo de ahí.",
+                           {"fusiones": [f["id"] for f in sin_lado]})
+
     def update_cable(self, cable_id: int, fields: dict, expected, usuario: str) -> dict:
         self.begin()
         try:
@@ -591,19 +856,25 @@ class Store:
             if row is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, "Ese cable ya no existe: lo borró otro usuario.")
             self.check_version(row, expected, self.cable_feature)
-            v = self.next_version()
-            t = now_iso()
             if "coords" in fields:
                 nodos = fields["nodos"]
                 coords = self._anchor(row["red_id"], fields["coords"], nodos)
-                self._save_anchors(cable_id, nodos)
             else:
                 coords, nodos = json.loads(row["coords"]), json.loads(row["nodos"])
+            fibras = fields.get("fibras", row["fibras"])
+            if fibras < row["fibras"] or "coords" in fields:
+                self._check_cable_fusions(cable_id, fibras, nodos if "coords" in fields else None)
+            if "coords" in fields:
+                self._save_anchors(cable_id, nodos)
+            v = self.next_version()
+            t = now_iso()
             self.conn().execute(
-                "UPDATE cables SET tipo = ?, nombre = ?, fibras = ?, estado = ?, tendido = ?, coords = ?, nodos = ?, "
-                "largo_m = ?, datos = ?, notas = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                "UPDATE cables SET tipo = ?, nombre = ?, fibras = ?, por_tubo = ?, colores = ?, estado = ?, tendido = ?, "
+                "coords = ?, nodos = ?, largo_m = ?, datos = ?, notas = ?, modificado = ?, modificado_por = ?, version = ? "
+                "WHERE id = ?",
                 (
-                    fields.get("tipo", row["tipo"]), fields.get("nombre", row["nombre"]), fields.get("fibras", row["fibras"]),
+                    fields.get("tipo", row["tipo"]), fields.get("nombre", row["nombre"]), fibras,
+                    fields.get("por_tubo", row["por_tubo"]), fields.get("colores", row["colores"]),
                     fields.get("estado", row["estado"]), fields.get("tendido", row["tendido"]), json.dumps(coords),
                     json.dumps(nodos), line_length_m(coords),
                     json.dumps(fields["datos"], ensure_ascii=False) if "datos" in fields else row["datos"],
@@ -634,14 +905,277 @@ class Store:
                 (t, t, usuario, v, cable_id),
             )
             self.conn().execute("DELETE FROM anclajes WHERE cable_id = ?", (cable_id,))
-            self.log_change(row["red_id"], usuario, "borrar", "cables", cable_id,
-                            {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.cable_feature(row)})
+            uniones = self._cable_fusions(cable_id)
+            fusiones = self._drop_fusions(uniones, v, t, usuario)
+            detalle = {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.cable_feature(row)}
+            if uniones:
+                detalle["fusiones"] = [self.fusion_json(r) for r in uniones]
+            self.log_change(row["red_id"], usuario, "borrar", "cables", cable_id, detalle)
             self.commit()
         except Exception:
             self.rollback()
             raise
         return {"ok": True, "cables": [{"id": cable_id, "borrado": True, "modificado_por": usuario, "version": v}],
-                "version": v}
+                "fusiones": fusiones, "version": v}
+
+    # --- equipos (splitters y OLT)
+    def get_equipo(self, equipo_id: int):
+        return self.conn().execute("SELECT * FROM equipos WHERE id = ? AND borrado IS NULL", (equipo_id,)).fetchone()
+
+    @staticmethod
+    def _check_equipo(elemento, eq: dict):
+        """Combinaciones válidas de tipo, puertos y datos, y dónde puede ir cada equipo."""
+        nombre = elemento["nombre"] or elemento["tipo"]
+        if elemento["tipo"] not in TIPOS_CON_CARTA:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{nombre} no lleva equipos: solo nodos, cajas, NAP y botellas.")
+        datos = eq["datos"]
+        if eq["tipo"] == "olt":
+            if elemento["tipo"] != "nodo":
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Una OLT va en un nodo.")
+            if eq["entradas"] != 0 or not 1 <= eq["salidas"] <= MAX_PUERTOS_OLT:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"Una OLT tiene de 1 a {MAX_PUERTOS_OLT} puertos PON.")
+            potencia = datos.get("potencia")
+            if potencia is not None and (isinstance(potencia, (bool, str)) or not -10 <= potencia <= 15):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "La potencia de la OLT va de -10 a 15 dBm.")
+            return
+        modo = datos.get("modo", "plc")
+        if modo not in MODOS_SPLITTER:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "El splitter es PLC (balanceado) o FBT (desbalanceado).")
+        if modo == "plc":
+            if eq["entradas"] not in (1, 2) or eq["salidas"] not in SALIDAS_PLC:
+                raise ApiError(HTTPStatus.BAD_REQUEST,
+                               "Un splitter PLC tiene 1 o 2 entradas y 2, 4, 8, 16, 32, 64 o 128 salidas.")
+            if "relacion" in datos:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "La relación de potencias es solo para splitters desbalanceados.")
+        else:
+            m = RELACION_FBT.fullmatch(str(datos.get("relacion", "")))
+            if eq["entradas"] != 1 or eq["salidas"] != 2 or not m or int(m[1]) + int(m[2]) != 100:
+                raise ApiError(HTTPStatus.BAD_REQUEST,
+                               "Un splitter desbalanceado tiene 1 entrada, 2 salidas y una relación como 10/90.")
+        if "conectores" in datos and not isinstance(datos["conectores"], bool):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "conectores tiene que ser sí o no.")
+
+    def add_equipo(self, element_id: int, fields: dict, usuario: str) -> dict:
+        t = now_iso()
+        self.begin()
+        try:
+            elemento = self.get_element(element_id)
+            if elemento is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
+            eq = {
+                "tipo": fields["tipo"],
+                "nombre": fields.get("nombre", ""),
+                "entradas": fields.get("entradas", 0 if fields["tipo"] == "olt" else 1),
+                "salidas": fields.get("salidas", 16 if fields["tipo"] == "olt" else 8),
+                "datos": fields.get("datos", {}),
+                "notas": fields.get("notas", ""),
+            }
+            self._check_equipo(elemento, eq)
+            v = self.next_version()
+            cur = self.conn().execute(
+                "INSERT INTO equipos (red_id, elemento_id, tipo, nombre, entradas, salidas, datos, notas, creado, creado_por, "
+                "modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (elemento["red_id"], element_id, eq["tipo"], eq["nombre"], eq["entradas"], eq["salidas"],
+                 json.dumps(eq["datos"], ensure_ascii=False), eq["notas"], t, usuario, t, usuario, v),
+            )
+            equipo_id = cur.lastrowid
+            self.log_change(elemento["red_id"], usuario, "crear", "equipos", equipo_id,
+                            {"tipo": eq["tipo"], "nombre": eq["nombre"], "elemento": element_id})
+            out = {"equipos": [self.equipo_json(self.get_equipo(equipo_id))], "version": v}
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return out
+
+    def update_equipo(self, equipo_id: int, fields: dict, expected, usuario: str) -> dict:
+        self.begin()
+        try:
+            row = self.get_equipo(equipo_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese equipo ya no existe: lo borró otro usuario.")
+            self.check_version(row, expected, self.equipo_json)
+            if "tipo" in fields and fields["tipo"] != row["tipo"]:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "El tipo de equipo no se cambia: borralo y agregá otro.")
+            elemento = self.get_element(row["elemento_id"])
+            eq = {
+                "tipo": row["tipo"],
+                "nombre": fields.get("nombre", row["nombre"]),
+                "entradas": fields.get("entradas", row["entradas"]),
+                "salidas": fields.get("salidas", row["salidas"]),
+                "datos": fields["datos"] if "datos" in fields else json.loads(row["datos"] or "{}"),
+                "notas": fields.get("notas", row["notas"]),
+            }
+            self._check_equipo(elemento, eq)
+            # Achicar un equipo no puede dejar uniones en puertos que ya no existen.
+            colgadas = []
+            for f in self._live_fusions("elemento_id = ? AND (a LIKE ? OR b LIKE ?)",
+                                        (row["elemento_id"], f"q{equipo_id}:%", f"q{equipo_id}:%")):
+                for ext in (f["a"], f["b"]):
+                    kind, ident, lado, n = parse_extremo(ext)
+                    if kind == "q" and ident == equipo_id and n > (eq["entradas"] if lado == "e" else eq["salidas"]):
+                        colgadas.append(f["id"])
+            if colgadas:
+                raise ApiError(HTTPStatus.CONFLICT,
+                               "Hay uniones en puertos que dejarían de existir: quitalas antes de achicar el equipo.",
+                               {"fusiones": colgadas})
+            v = self.next_version()
+            t = now_iso()
+            self.conn().execute(
+                "UPDATE equipos SET nombre = ?, entradas = ?, salidas = ?, datos = ?, notas = ?, modificado = ?, "
+                "modificado_por = ?, version = ? WHERE id = ?",
+                (eq["nombre"], eq["entradas"], eq["salidas"], json.dumps(eq["datos"], ensure_ascii=False), eq["notas"],
+                 t, usuario, v, equipo_id),
+            )
+            self.log_change(row["red_id"], usuario, "editar", "equipos", equipo_id,
+                            {"tipo": row["tipo"], "nombre": eq["nombre"], "antes": self.equipo_json(row)})
+            out = {"equipos": [self.equipo_json(self.get_equipo(equipo_id))], "version": v}
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return out
+
+    def delete_equipo(self, equipo_id: int, expected, usuario: str) -> dict:
+        self.begin()
+        try:
+            row = self.get_equipo(equipo_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese equipo ya no existe: lo borró otro usuario.")
+            self.check_version(row, expected, self.equipo_json)
+            v = self.next_version()
+            t = now_iso()
+            self.conn().execute(
+                "UPDATE equipos SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                (t, t, usuario, v, equipo_id),
+            )
+            uniones = self._live_fusions("elemento_id = ? AND (a LIKE ? OR b LIKE ?)",
+                                         (row["elemento_id"], f"q{equipo_id}:%", f"q{equipo_id}:%"))
+            fusiones = self._drop_fusions(uniones, v, t, usuario)
+            self.log_change(row["red_id"], usuario, "borrar", "equipos", equipo_id,
+                            {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.equipo_json(row),
+                             "fusiones": [self.fusion_json(r) for r in uniones]})
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"ok": True,
+                "equipos": [{"id": equipo_id, "borrado": True, "elemento": row["elemento_id"], "modificado_por": usuario,
+                             "version": v}],
+                "fusiones": fusiones, "version": v}
+
+    # --- uniones
+    def get_fusion(self, fusion_id: int):
+        return self.conn().execute("SELECT * FROM fusiones WHERE id = ? AND borrado IS NULL", (fusion_id,)).fetchone()
+
+    def _check_extremo(self, elemento, parsed, cables: dict, equipos: dict):
+        """El extremo existe en este elemento: un lado de un cable que llega acá
+        (y una fibra que el cable tiene) o un puerto de un equipo de acá."""
+        kind, ident, lado, n = parsed
+        if kind == "c":
+            if ident not in cables:
+                row = self.get_cable(ident)
+                if row is None or row["red_id"] != elemento["red_id"]:
+                    raise ApiError(HTTPStatus.CONFLICT, "Uno de los cables ya no existe (lo borró otro usuario).",
+                                   {"recargar": True})
+                cables[ident] = (row, lados_en(json.loads(row["nodos"]), elemento["id"]))
+            row, lados = cables[ident]
+            if lado not in lados:
+                raise ApiError(HTTPStatus.CONFLICT,
+                               f"El cable {row['nombre'] or ident} ya no llega a {elemento['nombre'] or 'este elemento'} así "
+                               "(alguien cambió su trazado). Se cargó la carta actual.",
+                               {"recargar": True})
+            if n > row["fibras"]:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"El cable {row['nombre'] or ident} tiene {row['fibras']} fibras.")
+            return row
+        if ident not in equipos:
+            row = self.get_equipo(ident)
+            if row is None or row["elemento_id"] != elemento["id"]:
+                raise ApiError(HTTPStatus.CONFLICT, "Uno de los equipos ya no existe (lo borró otro usuario).",
+                               {"recargar": True})
+            equipos[ident] = row
+        row = equipos[ident]
+        limite = row["entradas"] if lado == "e" else row["salidas"]
+        if n > limite:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{row['nombre'] or 'El equipo'} no tiene ese puerto.")
+        return row
+
+    def add_fusiones(self, element_id: int, pares: list, tipo, usuario: str) -> dict:
+        t = now_iso()
+        self.begin()
+        try:
+            elemento = self.get_element(element_id)
+            if elemento is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
+            if elemento["tipo"] not in TIPOS_CON_CARTA:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Solo los nodos, las cajas, las NAP y las botellas tienen carta de empalme.")
+            cables, equipos, vistos, filas = {}, {}, set(), []
+            for a, b in pares:
+                pa, pb = parse_extremo(a), parse_extremo(b)
+                if a == b:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "Un extremo no se puede unir consigo mismo.")
+                if pa[0] == "q" and pb[0] == "q" and pa[1] == pb[1]:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "No se pueden unir dos puertos del mismo equipo.")
+                for ext in (a, b):
+                    if ext in vistos:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "Un mismo extremo aparece en dos uniones.")
+                    vistos.add(ext)
+                ra = self._check_extremo(elemento, pa, cables, equipos)
+                rb = self._check_extremo(elemento, pb, cables, equipos)
+                con_conector = any(
+                    p[0] == "q" and json.loads(r["datos"] or "{}").get("conectores") for p, r in ((pa, ra), (pb, rb))
+                )
+                filas.append((a, b, tipo or ("conector" if con_conector else "fusion")))
+            ocupadas = [f for f in self._live_fusions("elemento_id = ?", (element_id,))
+                        if f["a"] in vistos or f["b"] in vistos]
+            if ocupadas:
+                quien = ocupadas[0]["creado_por"] or "otro usuario"
+                raise ApiError(HTTPStatus.CONFLICT,
+                               f"Una de esas fibras o puertos ya está unida (la unió {quien}). Se cargó la carta actual.",
+                               {"fusiones": [self.fusion_json(f) for f in ocupadas]})
+            v = self.next_version()
+            ids = []
+            for a, b, tipo_union in filas:
+                cur = self.conn().execute(
+                    "INSERT INTO fusiones (red_id, elemento_id, a, b, tipo, notas, creado, creado_por, modificado, "
+                    "modificado_por, version) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)",
+                    (elemento["red_id"], element_id, a, b, tipo_union, t, usuario, t, usuario, v),
+                )
+                ids.append(cur.lastrowid)
+                self.log_change(elemento["red_id"], usuario, "crear", "fusiones", cur.lastrowid,
+                                {"elemento": element_id, "a": a, "b": b, "tipo": tipo_union})
+            marks = ",".join("?" * len(ids))
+            rows = self.conn().execute(f"SELECT * FROM fusiones WHERE id IN ({marks}) ORDER BY id", ids).fetchall()
+            out = {"fusiones": [self.fusion_json(r) for r in rows], "version": v}
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return out
+
+    def delete_fusiones(self, ids: list, expected, usuario: str) -> dict:
+        """Quita uniones. Con una sola y su versión, controla que nadie la haya
+        cambiado; las que ya no existen se saltean (deshacer varias)."""
+        self.begin()
+        try:
+            rows = [r for r in (self.get_fusion(i) for i in ids) if r is not None]
+            if not rows and len(ids) == 1:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Esa unión ya no existe: la quitó otro usuario.")
+            if expected is not None and len(rows) == 1:
+                self.check_version(rows[0], expected, self.fusion_json)
+            fusiones, v = [], None
+            if rows:
+                v = self.next_version()
+                t = now_iso()
+                fusiones = self._drop_fusions(rows, v, t, usuario)
+                for r in rows:
+                    self.log_change(r["red_id"], usuario, "borrar", "fusiones", r["id"],
+                                    {"elemento": r["elemento_id"], "a": r["a"], "b": r["b"], "tipo": r["tipo"]})
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"ok": True, "fusiones": fusiones, "version": v if v is not None else self.version()}
 
 
 # ------------------------------------------------------------------ validación
@@ -674,15 +1208,29 @@ def choice_field(data: dict, key: str, choices, required=False):
 MAX_ENTERO = 2 ** 53  # lo que cabe sin pérdida en SQLite y en JavaScript
 
 
+ENTERO = re.compile(r"-?[0-9]{1,19}")
+
+
 def int_value(value, name: str):
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{name} tiene que ser un número entero.")
-    if isinstance(value, str) and not (value.isascii() and value.lstrip("-").isdigit() and len(value) <= 20):
+    if isinstance(value, str) and not ENTERO.fullmatch(value):
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{name} tiene que ser un número entero.")
     number = int(value)
     if abs(number) > MAX_ENTERO:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{name} está fuera de rango.")
     return number
+
+
+def int_field(data: dict, key: str, low: int, high: int, required=False):
+    if key not in data:
+        if required:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"Falta {key}.")
+        return None
+    value = int_value(data[key], key)
+    if not low <= value <= high:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} tiene que estar entre {low} y {high}.")
+    return value
 
 
 def check_text(value: str, name: str) -> str:
@@ -736,6 +1284,27 @@ def datos_field(data: dict):
     return clean
 
 
+def carta_field(data: dict):
+    """Disposición de la carta de empalme: de qué lado (i, d) se dibuja cada
+    cable. Es solo presentación; lo que no se entiende se descarta."""
+    if "carta" not in data:
+        return None
+    value = data["carta"]
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "carta tiene que ser un objeto.")
+    lados = value.get("lados", {})
+    if not isinstance(lados, dict) or len(lados) > MAX_LADOS:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "carta.lados inválido.")
+    clean = {}
+    for key, side in lados.items():
+        if not isinstance(key, str) or not LADO_CARTA.fullmatch(key) or side not in ("i", "d"):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "carta.lados inválido.")
+        clean[key] = side
+    return {"lados": clean} if clean else {}
+
+
 def version_field(value):
     """Versión que el usuario tenía a la vista (opcional)."""
     if value is None or value == "":
@@ -762,12 +1331,15 @@ def element_fields(data: dict, creating: bool) -> dict:
     datos = datos_field(data)
     if datos is not None:
         out["datos"] = datos
+    carta = carta_field(data)
+    if carta is not None:
+        out["carta"] = carta
     return out
 
 
 def cable_fields(data: dict, creating: bool) -> dict:
     out = {}
-    for key, choices in (("tipo", TIPOS_CABLE), ("estado", ESTADOS), ("tendido", TENDIDOS)):
+    for key, choices in (("tipo", TIPOS_CABLE), ("estado", ESTADOS), ("tendido", TENDIDOS), ("colores", COLORES)):
         value = choice_field(data, key, choices)
         if value is not None:
             out[key] = value
@@ -775,11 +1347,12 @@ def cable_fields(data: dict, creating: bool) -> dict:
         value = text_field(data, key, limit)
         if value is not None:
             out[key] = value
-    if "fibras" in data:
-        fibras = int_value(data["fibras"], "fibras")
-        if not 1 <= fibras <= MAX_FIBRAS:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"fibras tiene que estar entre 1 y {MAX_FIBRAS}.")
+    fibras = int_field(data, "fibras", 1, MAX_FIBRAS)
+    if fibras is not None:
         out["fibras"] = fibras
+    por_tubo = int_field(data, "por_tubo", 0, MAX_POR_TUBO)
+    if por_tubo is not None:
+        out["por_tubo"] = por_tubo
     if creating or "coords" in data or "nodos" in data:
         coords = data.get("coords")
         if not isinstance(coords, list) or len(coords) < 2:
@@ -796,15 +1369,72 @@ def cable_fields(data: dict, creating: bool) -> dict:
             nodos = [None] * len(clean)
         if not isinstance(nodos, list) or len(nodos) != len(clean):
             raise ApiError(HTTPStatus.BAD_REQUEST, "nodos tiene que tener un valor por punto.")
+        nodos = list(nodos)
         for node in nodos:
             if node is not None and not (isinstance(node, int) and not isinstance(node, bool) and 0 < node <= MAX_ENTERO):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "nodos inválidos.")
+        # Dos puntos seguidos sobre el mismo elemento son el mismo punto.
+        i = 1
+        while i < len(nodos):
+            if nodos[i] is not None and nodos[i] == nodos[i - 1]:
+                del nodos[i], clean[i]
+            else:
+                i += 1
+        if len(clean) < 2:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Los dos puntos del cable están sobre el mismo elemento.")
         if all(clean[i] == clean[0] for i in range(len(clean))):
             raise ApiError(HTTPStatus.BAD_REQUEST, "Los puntos del cable están todos en el mismo lugar.")
         out["coords"], out["nodos"] = clean, nodos
     datos = datos_field(data)
     if datos is not None:
         out["datos"] = datos
+    return out
+
+
+def equipo_fields(data: dict, creating: bool) -> dict:
+    out = {}
+    tipo = choice_field(data, "tipo", TIPOS_EQUIPO, required=creating)
+    if tipo is not None:
+        out["tipo"] = tipo
+    for key, limit in (("nombre", MAX_NOMBRE), ("notas", MAX_NOTAS)):
+        value = text_field(data, key, limit)
+        if value is not None:
+            out[key] = value
+    for key, high in (("entradas", 2), ("salidas", MAX_PUERTOS_OLT)):
+        value = int_field(data, key, 0, high)
+        if value is not None:
+            out[key] = value
+    datos = datos_field(data)
+    if datos is not None:
+        out["datos"] = datos
+    return out
+
+
+def pares_field(data: dict) -> list:
+    pares = data.get("pares")
+    if not isinstance(pares, list) or not pares:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Faltan los pares a unir.")
+    if len(pares) > MAX_PARES:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"Demasiadas uniones juntas (máximo {MAX_PARES}).")
+    out = []
+    for par in pares:
+        if not isinstance(par, dict) or not isinstance(par.get("a"), str) or not isinstance(par.get("b"), str):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Cada par es {a, b}.")
+        out.append((par["a"], par["b"]))
+    return out
+
+
+def ids_field(data: dict) -> list:
+    ids = data.get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > MAX_PARES:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Faltan las uniones a quitar.")
+    out = []
+    for value in ids:
+        number = int_value(value, "ids")
+        if number <= 0:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "ids inválidos.")
+        if number not in out:
+            out.append(number)
     return out
 
 
@@ -874,6 +1504,16 @@ class Handler(BaseHTTPRequestHandler):
         return red_id
 
     @staticmethod
+    def element_param(value) -> int:
+        try:
+            element_id = int_value(value, "elemento")
+        except ApiError:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar el elemento.")
+        if element_id <= 0:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar el elemento.")
+        return element_id
+
+    @staticmethod
     def route_id(path: str, prefix: str):
         """'/api/elementos/12' -> 12 para prefix '/api/elementos/'; None si no corresponde."""
         if not path.startswith(prefix):
@@ -887,7 +1527,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         try:
             if path == "/api/salud" and method == "GET":
-                self.send_json(HTTPStatus.OK, {"ok": True})
+                self.send_json(HTTPStatus.OK, {"ok": True, "esquema": ESQUEMA})
                 return
             if self.secreto and not hmac.compare_digest(
                     (self.headers.get("X-Ftth-Secreto") or "").encode(), self.secreto.encode()):
@@ -977,6 +1617,30 @@ class Handler(BaseHTTPRequestHandler):
                     cable_id, cable_fields(data, creating=False), version_field(data.get("version")), user)
             if method == "DELETE":
                 return HTTPStatus.OK, store.delete_cable(cable_id, version_field(q("version")), user)
+
+        if path == "/api/equipos" and method == "POST":
+            data = self.read_json()
+            return HTTPStatus.CREATED, store.add_equipo(
+                self.element_param(data.get("elemento")), equipo_fields(data, creating=True), user)
+        equipo_id = self.route_id(path, "/api/equipos/")
+        if equipo_id is not None:
+            if method == "PUT":
+                data = self.read_json()
+                return HTTPStatus.OK, store.update_equipo(
+                    equipo_id, equipo_fields(data, creating=False), version_field(data.get("version")), user)
+            if method == "DELETE":
+                return HTTPStatus.OK, store.delete_equipo(equipo_id, version_field(q("version")), user)
+
+        if path == "/api/fusiones" and method == "POST":
+            data = self.read_json()
+            tipo = choice_field(data, "tipo", TIPOS_UNION)
+            return HTTPStatus.CREATED, store.add_fusiones(
+                self.element_param(data.get("elemento")), pares_field(data), tipo, user)
+        if path == "/api/fusiones/borrar" and method == "POST":
+            return HTTPStatus.OK, store.delete_fusiones(ids_field(self.read_json()), None, user)
+        fusion_id = self.route_id(path, "/api/fusiones/")
+        if fusion_id is not None and method == "DELETE":
+            return HTTPStatus.OK, store.delete_fusiones([fusion_id], version_field(q("version")), user)
 
         raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
 

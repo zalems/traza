@@ -1168,7 +1168,7 @@ button.enlace:hover {
 
 .toast {
   position: fixed;
-  z-index: 6;
+  z-index: 8;
   left: 50%;
   bottom: calc(var(--edge) + var(--tap) + 20px + var(--safe-bottom));
   transition: bottom 0.15s;
@@ -1244,4 +1244,915 @@ button.enlace:hover {
     bottom: calc(var(--edge) + var(--tap) + 12px + var(--safe-bottom));
   }
 
+}
+
+/* ---------------------------------------------------- fibras en la ficha */
+
+/* Punto de color de una fibra o de un tubo. Lo único de color en la carta son
+   las fibras: el resto sigue siendo tinta sobre papel. */
+.punto {
+  display: inline-block;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+  background: var(--c, var(--paper));
+}
+
+/* del 13 en adelante: el mismo color con una marca (dos, del 25 en adelante) */
+.punto-marca {
+  background: linear-gradient(90deg, var(--c) 0 36%, var(--m, #1c1c1c) 36% 64%, var(--c) 64%);
+}
+
+.punto-marcas {
+  background: linear-gradient(90deg, var(--c) 0 22%, var(--m, #1c1c1c) 22% 40%, var(--c) 40% 60%,
+    var(--m, #1c1c1c) 60% 78%, var(--c) 78%);
+}
+
+.tubo-color,
+.tubo-muestra {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--muted);
+  border-radius: 4px;
+  background: var(--c);
+}
+
+.ficha-tubos {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: -4px 0 0;
+}
+
+.tubo-muestras {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.ficha-fibras {
+  margin: 0 0 12px;
+}
+
+.fibras-tubo {
+  display: grid;
+  gap: 2px;
+  padding: 4px 0;
+  border-top: 1px solid var(--paper-dim);
+}
+
+.fibras-tubo-nombre {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.fibras-puntos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.fibra-chip {
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  width: 25px;
+  padding: 3px 0 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.fibra-chip .punto {
+  width: 14px;
+  height: 14px;
+}
+
+.fibra-chip.usada {
+  color: var(--ink);
+}
+
+/* con uniones: anillo de tinta alrededor del color */
+.fibra-chip.usada .punto,
+.fibra.unida .punto,
+.puerto.unida .punto {
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ink);
+}
+
+.fibra-chip:hover {
+  background: var(--paper-dim);
+}
+
+.fibra-chip[aria-pressed='true'] {
+  background: var(--paper-dim);
+  box-shadow: inset 0 0 0 2px var(--signal);
+}
+
+.fibras-detalle {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-inner);
+  background: var(--paper-dim);
+}
+
+.fibras-detalle p {
+  margin: 0 0 4px;
+}
+
+.fibras-detalle ul {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 13.5px;
+}
+
+.ficha-conexion {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-inner);
+  background: var(--paper-dim);
+}
+
+.ficha-conexion p {
+  margin: 0 0 6px;
+}
+
+/* ------------------------------------------------- recorrido de un pelo */
+
+.recorrido {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 0 0 0 22px;
+  list-style: none;
+}
+
+.recorrido::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  bottom: 12px;
+  left: 7px;
+  width: 2px;
+  background: var(--line);
+}
+
+.rec-paso {
+  position: relative;
+  padding: 3px 0 9px;
+}
+
+.rec-paso::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: -20px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+.rec-paso strong {
+  display: block;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.rec-paso small {
+  display: block;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.rec-tramo::before {
+  left: -17px;
+  width: 6px;
+  height: 18px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--signal);
+}
+
+.rec-inicio strong {
+  color: var(--signal);
+}
+
+.rec-inicio::before {
+  border-color: var(--signal);
+  background: var(--signal);
+}
+
+.rec-fin::before {
+  background: var(--ink);
+}
+
+/* ------------------------------------------------- carta de empalme */
+
+.carta {
+  position: fixed;
+  z-index: 7;
+  inset: 0;
+  display: grid;
+  padding: calc(var(--edge) + var(--safe-top)) calc(var(--edge) + var(--safe-right))
+    calc(var(--edge) + var(--safe-bottom)) calc(var(--edge) + var(--safe-left));
+  background: rgb(16 24 30 / 0.42);
+}
+
+.carta-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(1180px, 100%);
+  min-height: 0;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.carta-cab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 8px 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.carta-titulo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 10px;
+  min-width: 0;
+}
+
+.carta-titulo small {
+  width: 100%;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.carta-titulo strong {
+  font-size: 20px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.carta-resumen {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  text-wrap: pretty;
+}
+
+.carta-herr {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.carta-herr button,
+.carta-cercanos button,
+.carta-vacia button {
+  min-height: 36px;
+  padding: 4px 12px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.carta-herr button:hover,
+.carta-cercanos button:hover {
+  background: var(--paper-dim);
+}
+
+.carta-herr button[aria-pressed='true'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.carta-cuerpo {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px 28px;
+  overscroll-behavior: contain;
+}
+
+.carta-cuerpo:focus {
+  outline: none;
+}
+
+/* Tres columnas: lo que llega (izquierda), los equipos y lo que sale (derecha).
+   Las uniones son líneas dibujadas por debajo. */
+.carta-diagrama {
+  position: relative;
+  display: grid;
+  /* los cables a los costados (hasta 360 px); el medio, para las líneas y los equipos */
+  grid-template-columns: minmax(0, 360px) minmax(52px, 1fr) minmax(0, 360px);
+  align-items: start;
+  gap: 0 6px;
+}
+
+.carta-diagrama.con-equipos {
+  grid-template-columns: minmax(0, 340px) minmax(96px, 1fr) minmax(0, 340px);
+}
+
+.carta-lineas {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.carta-lineas path {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.linea-fondo {
+  stroke: var(--ink);
+  stroke-width: 5.2;
+  opacity: 0.5;
+}
+
+.linea-fondo.marcada {
+  stroke: var(--signal);
+  stroke-width: 9;
+  opacity: 0.85;
+}
+
+.linea-union {
+  stroke: var(--c, var(--ink));
+  stroke-width: 2.8;
+}
+
+.linea-union.sin-color {
+  stroke: var(--paper);
+}
+
+.linea-union.conector {
+  stroke-dasharray: 8 3;
+}
+
+/* lo que pasa sin cortar va en gris: el color de cada fibra ya está en sus
+   puntos, y una línea blanca no se vería sobre el papel */
+.linea-paso {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 1 4;
+  opacity: 0.8;
+}
+
+.linea-banda {
+  stroke: var(--line);
+  stroke-width: 10;
+  opacity: 0.6;
+}
+
+.carta-col {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.carta-medio {
+  justify-items: center;
+  padding-top: 34px;
+}
+
+.punta {
+  min-width: 0;
+  padding-top: 2px;
+  border-top: 4px solid var(--tipo);
+}
+
+.punta-cab {
+  display: grid;
+  width: 100%;
+  padding: 6px 4px 8px;
+  border: 0;
+  border-radius: var(--radius-inner);
+  background: transparent;
+  text-align: left;
+  line-height: 1.25;
+}
+
+.punta-cab:hover,
+.punta.marcada .punta-cab {
+  background: var(--paper-dim);
+}
+
+.punta-cab strong {
+  font-size: 15.5px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.punta-cab span {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.punta-cab small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.carta-col[data-col='d'] .punta-cab {
+  justify-items: end;
+  text-align: right;
+}
+
+.tubo + .tubo {
+  margin-top: 4px;
+}
+
+.tubo-cab {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--paper-dim);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.tubo-cab small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.tubo.plegado .tubo-cab {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+/* ancla de las líneas de un tubo plegado: el borde que mira al centro */
+.ancla {
+  position: absolute;
+  top: 50%;
+  right: -2px;
+  width: 1px;
+  height: 1px;
+}
+
+.carta-col[data-col='d'] .ancla {
+  right: auto;
+  left: -2px;
+}
+
+.fibras {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fibra,
+.puerto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.fibra:hover,
+.puerto:hover {
+  background: var(--paper-dim);
+}
+
+.fibra .num {
+  min-width: 1.7em;
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.fibra .color-nombre {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* a la derecha, el punto (donde llegan las líneas) va primero */
+.carta-col[data-col='d'] .fibra .punto {
+  order: -1;
+}
+
+.fibra.paso .num {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.fibra.cortada .punto {
+  border-style: dashed;
+  border-color: var(--ink);
+}
+
+.fibra.elegida,
+.puerto.elegida {
+  background: var(--paper-dim);
+  box-shadow: inset 0 0 0 2px var(--signal);
+}
+
+.fibra.elegida .punto,
+.puerto.elegida .punto {
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 4px var(--signal);
+}
+
+.equipo {
+  width: min(100%, 190px);
+  min-width: 0;
+  border: 1.5px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.equipo + .equipo {
+  margin-top: 6px;
+}
+
+.equipo.marcada {
+  box-shadow: 0 0 0 3px var(--signal);
+}
+
+.equipo-cab {
+  display: grid;
+  width: 100%;
+  padding: 6px 6px 5px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.equipo-cab:hover {
+  background: var(--paper-dim);
+}
+
+.equipo-cab strong {
+  font-size: 14px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.equipo-cab small {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.equipo-puertos {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px;
+  padding: 6px 0;
+}
+
+.equipo-entradas {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.equipo-salidas {
+  display: grid;
+  justify-items: end;
+  gap: 1px;
+  min-width: 0;
+}
+
+.puerto {
+  width: auto;
+  min-height: 27px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* los puntos de los puertos quedan sobre el borde del equipo */
+.equipo-entradas .puerto {
+  margin-left: -9px;
+}
+
+.equipo-salidas .puerto {
+  max-width: 100%;
+  margin-right: -9px;
+}
+
+.equipo-salidas .puerto .punto {
+  order: 2;
+}
+
+.puerto .punto {
+  width: 13px;
+  height: 13px;
+  border-color: var(--ink);
+}
+
+.puerto small {
+  display: none;
+}
+
+.carta-aviso {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 4px solid var(--signal);
+  border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  background: var(--paper-dim);
+}
+
+.carta-vacia {
+  max-width: 46ch;
+  margin: 28px auto;
+  color: var(--muted);
+  text-align: center;
+}
+
+.carta-vacia strong {
+  color: var(--ink);
+}
+
+.carta-cercanos {
+  margin-top: 20px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-inner);
+}
+
+.carta-cercanos p {
+  margin: 0 0 6px;
+  font-weight: 650;
+}
+
+.carta-cercanos ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.carta-cercanos li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.carta-cuerpo h3 {
+  margin: 16px 0 6px;
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.carta-cuerpo h3:first-child {
+  margin-top: 0;
+}
+
+.carta-lista {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.carta-nota {
+  margin: 0;
+  color: var(--muted);
+}
+
+.carta-tabla {
+  overflow-x: auto;
+}
+
+.carta-tabla table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.carta-tabla th,
+.carta-tabla td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--paper-dim);
+  text-align: left;
+  vertical-align: top;
+}
+
+.carta-tabla th {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+/* la barra de abajo: qué está elegido y qué se puede hacer (invertida, como el cartel del modo) */
+.carta-pie {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 16px calc(10px + var(--safe-bottom));
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.carta-pie-texto {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.carta-pie-texto p,
+.carta-pie > p {
+  margin: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.carta-pie-texto small {
+  display: block;
+  margin-top: 2px;
+  opacity: 0.82;
+  overflow-wrap: anywhere;
+}
+
+.carta-pie-botones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.carta-pie button {
+  min-height: 38px;
+  padding: 4px 12px;
+  border: 1px solid var(--paper);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--paper);
+  font-weight: 650;
+}
+
+.carta-pie button.primario {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.carta-pie button.peligro {
+  border-color: var(--signal);
+  background: var(--signal);
+  color: #fff;
+}
+
+.carta-pie button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.carta-form {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  max-height: min(56vh, 460px);
+  overflow-y: auto;
+}
+
+.carta-form-titulo {
+  margin: 0;
+}
+
+.carta-form-campos {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px 12px;
+}
+
+.carta-pie .campo > span {
+  color: var(--paper);
+  opacity: 0.85;
+}
+
+.check-campo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--tap);
+  font-weight: 600;
+}
+
+.check-campo input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--signal);
+}
+
+.carta-texto {
+  width: 100%;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-inner);
+  font: 13px/1.35 var(--font);
+}
+
+@media (min-width: 900px) {
+  .carta-cab {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .carta-herr {
+    grid-column: 2;
+    grid-row: 1;
+    padding-top: 0;
+  }
+
+  .carta-resumen {
+    grid-row: 2;
+  }
+
+  /* con lugar, cada salida dice a qué cliente llega */
+  .puerto small {
+    display: inline;
+    max-width: 9em;
+    overflow: hidden;
+    color: var(--muted);
+    font-weight: 600;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (max-width: 899px) {
+  /* en el teléfono la carta ocupa toda la pantalla */
+  .carta {
+    padding: 0;
+    background: var(--paper);
+  }
+
+  .carta-panel {
+    width: 100%;
+    padding-top: var(--safe-top);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .carta-cuerpo {
+    padding: 12px 10px 24px;
+  }
+
+  .carta-herr button {
+    min-height: 38px;
+    padding: 4px 10px;
+  }
+
+  .fibra .color-nombre {
+    font-size: 12px;
+  }
 }

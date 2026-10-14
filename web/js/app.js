@@ -87,6 +87,9 @@ let toastTimer;
 function ubicarToast() {
   const box = $('toast');
   let tope = window.innerHeight;
+  // Con la carta de empalme abierta, el aviso va encima de su barra de abajo.
+  const pieCarta = document.querySelector('#carta:not([hidden]) .carta-pie');
+  if (pieCarta) tope = pieCarta.getBoundingClientRect().top;
   for (const id of ['modo', 'ficha', 'bases']) {
     const el = $(id);
     if (!el || el.hidden) continue;

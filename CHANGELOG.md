@@ -1,5 +1,40 @@
 # Cambios
 
+## 0.4.0 · 14/10/2026
+
+Cartas de empalme.
+
+- Fibras de cada cable: fibras por tubo (automático: hasta 12 en un tubo, si
+  no tubos de 12) y código de colores TIA-598 o ABNT (tubo piloto verde,
+  direccional amarillo, el resto blancos). Del 13 en adelante, los colores
+  con marca. La ficha del cable muestra las fibras por tubo y dónde está
+  unida cada una; el formulario adelanta cómo quedan los tubos.
+- Carta de empalme en botellas, cajas, NAP y nodos: cables a los costados
+  (lo que viene del nodo a la izquierda), tubos plegables, fibras en
+  colores, uniones dibujadas como líneas. Unir tocando dos extremos, "Seguir
+  en orden" con el resto del tubo (o del splitter, o de la OLT), deshacer,
+  quitar. Cables que pasan (sangrías): las fibras sin tocar siguen de largo y
+  se dibujan de lado a lado; al unir una, queda cortada en ese elemento.
+- Splitters PLC (1x2 a 1x128 y 2xN) y desbalanceados (1/99 a 50/50), con
+  salidas fusionadas o con conector (en la NAP vienen con conector). OLT con
+  puertos PON y potencia de salida en los nodos.
+- Recorrido de un pelo, de la OLT al cliente: tramos con largo, fusiones,
+  conectores y splitters, y el camino resaltado en el mapa. La ficha del
+  cliente dice en qué NAP y puerto está y de qué PON viene.
+- Vista en lista y copia como texto de la carta; los cables que terminan
+  cerca sin pegar se pueden pegar desde la carta; de qué lado va cada cable
+  se guarda para todos.
+- El servidor cuida la carta: no deja bajar las fibras de un cable ni
+  cambiarle el trazado si eso deja uniones colgando, ni que un cable pase dos
+  veces por la misma caja; al borrar un cable, un splitter o un elemento se
+  van también sus uniones (avisado antes). Esquema 2 de la base, con
+  migración automática desde 0.3.0.
+- Copia de seguridad diaria (timer de systemd, conserva 30) y copia de la red
+  antes de cambiar la API en cada actualización. `bin/respaldo` admite
+  `--conservar N` y `--etiqueta TEXTO`.
+- Los datos que la versión anterior guardaba en campos que ya no están en el
+  formulario (el splitter anotado de cajas y NAP) se conservan y se muestran.
+
 ## 0.3.0 · 14/10/2026
 
 Herramientas para cargar la red.
