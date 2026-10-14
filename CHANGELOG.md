@@ -1,6 +1,42 @@
 # Cambios
 
-## 0.6.1 · 14/10/2026
+## 0.7.0 · 14/10/2026
+
+Traer la red de Wispro: todas las cajas y sus clientes al mapa, de una vez.
+
+- Panel de redes: "Traer cajas y clientes de Wispro" (si la red está
+  conectada). Primero muestra, sin cambiar nada, cuántas cajas y clientes
+  faltan en el mapa y cuáles no se agregan, con el motivo: sin ubicación en
+  Wispro, cliente a más de 2 km de su caja, un cliente del mapa que podría ser
+  el mismo (se confirma desde la caja), contrato sin caja en Wispro. Se puede
+  elegir cajas, clientes o las dos cosas.
+- Las cajas van en la ubicación de Wispro, con su nombre, sus puertos y ya
+  vinculadas; los clientes, en su ubicación de Wispro y vinculados a su
+  contrato (los mismos datos que "Agregar al mapa" en una caja). Todo en una
+  sola versión; el mapa se acomoda para mostrar lo agregado.
+- Una NAP de Wispro a menos de 150 m de una caja del mapa sin vincular puede
+  ser esa misma caja: no se agrega sola. Se muestra aparte, con un toque para
+  abrir la caja del mapa (y vincularla desde su ficha) y una casilla para
+  agregarla igual si es otra.
+- "Deshacer" quita lo que agregó esa vez, salvo lo que ya se tocó o tiene
+  cables, equipos o uniones. La última importación de la red se puede
+  deshacer también más tarde, desde la misma pantalla (con confirmación). Si
+  se cierra la pantalla mientras agrega, al terminar avisa qué se agregó y
+  cómo deshacerlo.
+- Repetirlo agrega solo lo nuevo: no duplica cajas ni clientes (se decide
+  dentro de la misma transacción, como al agregar desde una caja), aunque
+  Wispro entregue una NAP dos veces.
+- Se trae toda la cuenta de Wispro: si la misma cuenta está conectada a otra
+  red, lo avisa.
+- Las casillas no rehacen la pantalla (el foco y lo desplegado quedan donde
+  estaban); el foco va a lo leído, al resultado y a cada pregunta.
+- API: `GET /api/integracion/importacion?red=N` (qué falta, las dudosas, la
+  última importación), `POST /api/integracion/importacion`
+  `{red, cajas, clientes, igual?}` y `POST /api/integracion/importacion/deshacer`
+  `{red, version}`. Lo que se agrega queda en el historial con el número de la
+  importación.
+
+## 0.6.1 · 14/10/2026 · commit 8353557
 
 Lecturas de la OLT con huecos: el visor no afirma más de lo que tiene.
 

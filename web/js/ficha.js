@@ -1372,6 +1372,13 @@ export function setupFicha({ root, red, acciones }) {
       });
     }
 
+    // Si la red está conectada con Wispro, se pueden traer sus cajas y sus clientes.
+    const traer = actualRed && acciones.integracion.estado()?.wispro
+      ? h('div.importar-acceso', {},
+        h('p.ficha-sub', { text: `${actualRed.nombre} está conectada con Wispro: se pueden traer al mapa sus cajas y sus clientes.` }),
+        botones(boton('Traer cajas y clientes de Wispro', () => acciones.traerDeWispro())))
+      : null;
+
     abrir('redes', [
       h('p.ficha-sub', { text: lista.length
         ? 'Cada red (un cliente, una localidad, un despliegue) tiene sus propios elementos y cables. Elegí con cuál trabajar.'
@@ -1383,9 +1390,268 @@ export function setupFicha({ root, red, acciones }) {
           if (!renombrar.hidden) renombrar.elements.nombre.focus();
         }, { class: 'enlace' })) : null,
       renombrar,
+      traer,
       crear,
     ], { titulo: 'Redes', onCerrar: () => (lista.length ? acciones.cancelar() : null) });
     if (!lista.length) input.focus({ preventScroll: true });
+  }
+
+  // --------------------------------------------------- traer de Wispro
+
+  let aperturasImportar = 0;
+
+  // Todas las cajas de Wispro y sus clientes al mapa: primero qué se agregaría (sin
+  // cambiar nada), después todo de una vez, y se puede deshacer (también más tarde:
+  // la última importación se ofrece al volver a esta pantalla).
+  function importarWispro({ redId, nombre }) {
+    aperturasImportar += 1;
+    const id = `importar-${redId}-${aperturasImportar}`; // otra apertura no pisa a esta
+    const vista = {
+      previa: null, error: null, resultado: null, deshecho: null, quitados: null,
+      agregando: false, deshaciendo: false, confirmar: false, foco: null,
+      cajas: true, clientes: true, igual: new Set(),
+    };
+    const esta = () => !root.hidden && modo === 'importar' && root.dataset.id === id;
+    const conPanel = () => Boolean(acciones.integracion.estado()?.panel);
+    const marca = (clave) => vista.foco === clave; // el elemento que recibe el foco al pintar
+    let agregarBtn = null;
+
+    function pintar() {
+      abrir('importar', contenido(), { titulo: 'Traer de Wispro', chip: nombre, id });
+      const destino = vista.foco ? root.querySelector('[data-foco]') : null;
+      if (destino) {
+        destino.focus({ preventScroll: true });
+        (destino.closest('.ficha-confirmar') ?? destino).scrollIntoView({ block: 'nearest' }); // con sus botones
+      }
+      vista.foco = null;
+    }
+
+    // Mientras se espera al servidor, nada se puede tocar dos veces (sin rehacer la ficha).
+    function ocupar(btn, texto) {
+      for (const el of root.querySelectorAll('.ficha-cuerpo input, .ficha-cuerpo button')) el.disabled = true;
+      if (btn) btn.textContent = texto;
+      anunciar(texto);
+    }
+
+    function leer() {
+      Object.assign(vista, { previa: null, error: null, confirmar: false });
+      pintar();
+      acciones.integracion.previaImportacion(redId)
+        .then((previa) => {
+          vista.previa = previa;
+          const dudosas = new Set(previa.cajas.dudosas.map((d) => d.id));
+          vista.igual = new Set([...vista.igual].filter((i) => dudosas.has(i)));
+          vista.foco = 'resumen';
+        })
+        .catch((err) => {
+          vista.error = err.message;
+          vista.foco = 'error';
+        })
+        .finally(() => { if (esta()) pintar(); });
+    }
+
+    const textoAgregados = (res) => {
+      const { cajas = 0, clientes = 0 } = res.agregados ?? {};
+      return cajas || clientes
+        ? `Se agregaron ${plural(cajas, 'caja', 'cajas')} y ${plural(clientes, 'cliente', 'clientes')}.`
+        : 'No había nada nuevo para agregar.';
+    };
+    const textoQuitados = (res) => `Se quitaron ${plural(res.quitados, 'elemento', 'elementos')}`
+      + (res.quedan ? `; ${plural(res.quedan, 'queda', 'quedan')} porque ya se ${res.quedan === 1 ? 'tocó o tiene' : 'tocaron o tienen'} cables o carta.` : '.');
+
+    async function agregar(btn) {
+      const p = vista.previa;
+      vista.agregando = true;
+      ocupar(btn, 'Agregando…');
+      try {
+        const res = await acciones.integracion.importarRed(redId, {
+          cajas: vista.cajas && p.cajas.nuevas > 0,
+          clientes: vista.clientes && p.clientes.nuevos > 0,
+          igual: [...vista.igual],
+        });
+        if (res) {
+          vista.resultado = res;
+          vista.foco = 'resultado';
+          // Si se cerró esta pantalla mientras tanto, igual se avisa (y cómo deshacerlo).
+          if (!esta()) {
+            acciones.integracion.aviso(`${textoAgregados(res)}${res.elementos.length
+              ? ' Para deshacerlo: tocá el nombre de la red y «Traer cajas y clientes de Wispro».' : ''}`);
+          }
+        }
+      } catch (err) {
+        acciones.integracion.aviso(err.message);
+        vista.foco = 'agregar';
+      } finally {
+        vista.agregando = false;
+        if (esta()) pintar();
+      }
+    }
+
+    async function deshacer(btn, version, despues) {
+      vista.deshaciendo = true;
+      ocupar(btn, 'Quitando…');
+      try {
+        const res = await acciones.integracion.deshacerImportacion(redId, version);
+        if (res) despues(res);
+      } catch (err) {
+        acciones.integracion.aviso(err.message);
+      } finally {
+        vista.deshaciendo = false;
+      }
+    }
+
+    // Deshacer lo que se acaba de agregar.
+    const deshacerRecien = (btn) => deshacer(btn, vista.resultado.version, (res) => {
+      vista.deshecho = res;
+      vista.foco = 'deshecho';
+    }).then(() => { if (esta()) pintar(); });
+
+    // Deshacer la última importación (de otra vez): después se vuelve a leer qué falta.
+    const deshacerUltima = (btn) => deshacer(btn, vista.previa.ultima.version, (res) => {
+      vista.quitados = res;
+    }).then(() => { if (esta()) leer(); });
+
+    const hayAlgo = () => {
+      const p = vista.previa;
+      return (vista.cajas && p.cajas.nuevas > 0) || (vista.clientes && p.clientes.nuevos > 0) || vista.igual.size > 0;
+    };
+    const actualizar = () => { if (agregarBtn) agregarBtn.disabled = !hayAlgo(); };
+
+    // Casillas: cambiarlas no rehace la ficha (el foco y lo desplegado quedan donde están).
+    function casilla(texto, detalle, { marcada, deshabilitada, cambiar }) {
+      const input = h('input', { type: 'checkbox', checked: marcada, disabled: deshabilitada });
+      input.addEventListener('change', () => {
+        cambiar(input.checked);
+        actualizar();
+      });
+      return h('label.opcion', {}, input, h('span', {}, h('strong', { text: texto }), h('small', { text: detalle })));
+    }
+
+    // Lo que no se agrega, plegado: el motivo y algunos nombres.
+    const plegado = (resumen, lineas) => h('details.importar-omitidos', {}, h('summary', { text: resumen }),
+      h('ul', {}, ...lineas.map((t) => h('li', { text: t }))));
+    const mayuscula = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
+    // NAPs de Wispro cerca de una caja del mapa sin vincular: pueden ser la misma.
+    function bloqueDudosas(dudosas, ocupado) {
+      if (!dudosas.length) return null;
+      const grupos = new Map();
+      for (const d of dudosas) {
+        if (!grupos.has(d.caja.id)) grupos.set(d.caja.id, { caja: d.caja, naps: [] });
+        grupos.get(d.caja.id).naps.push(d);
+      }
+      const una = dudosas.length === 1;
+      return h('div.importar-dudosas', {},
+        h('p.ficha-sub', { text: una
+          ? 'Esta caja de Wispro está cerca de una caja del mapa que no está vinculada, y puede ser la misma: si lo es, abrí la del mapa y vinculala desde su ficha; si es otra, marcala para agregarla.'
+          : 'Estas cajas de Wispro están cerca de una caja del mapa que no está vinculada, y pueden ser la misma: si lo son, abrí la del mapa y vinculala desde su ficha; si son otras, marcalas para agregarlas.' }),
+        ...[...grupos.values()].map(({ caja, naps }) => h('div.importar-dudosa', {},
+          h('p', {}, `${caja.nombre}, en el mapa: `,
+            boton(`abrir ${caja.nombre}`, () => acciones.seleccionar('elemento', caja.id), { class: 'integ-enlace', disabled: ocupado })),
+          ...naps.map((d) => casilla(`Agregar ${d.nombre}`, `De Wispro, a ${d.distancia_m} m de ${caja.nombre}`, {
+            marcada: vista.igual.has(d.id),
+            deshabilitada: ocupado,
+            cambiar: (si) => { if (si) vista.igual.add(d.id); else vista.igual.delete(d.id); },
+          })))));
+    }
+
+    function bloqueUltima(ultima, ocupado) {
+      if (!ultima) return null;
+      const texto = `${formatFecha(ultima.fecha)}, por ${ultima.usuario ?? '—'}: ${plural(ultima.elementos, 'elemento sigue', 'elementos siguen')} en el mapa.`;
+      return h('section.importar-bloque', { 'aria-label': 'Última importación' },
+        h('h3', { text: 'Última importación' }),
+        h('p.ficha-sub', { text: texto }),
+        vista.confirmar
+          ? h('div.ficha-confirmar', {},
+            h('p', { text: 'Se quitan las cajas y los clientes de esa importación que no se tocaron después ni tienen cables, equipos o uniones. ¿Quitarlos?', tabindex: '-1', 'data-foco': marca('confirmar') }),
+            botones(
+              boton('Sí, quitarlos', (ev) => deshacerUltima(ev.currentTarget), { class: 'peligro', disabled: ocupado }),
+              boton('No', () => {
+                vista.confirmar = false;
+                vista.foco = 'ultima';
+                pintar();
+              }, { disabled: ocupado }),
+            ))
+          : botones(boton('Deshacer esa importación…', () => {
+            vista.confirmar = true;
+            vista.foco = 'confirmar';
+            pintar();
+          }, { disabled: ocupado, 'data-foco': marca('ultima') })));
+    }
+
+    function vistaPrevia() {
+      const p = vista.previa;
+      const { cajas, clientes } = p;
+      const ocupado = vista.agregando || vista.deshaciendo;
+      const avisos = [...(p.errores ?? [])];
+      const otras = p.misma_cuenta ?? [];
+      if (otras.length) {
+        const nombres = otras.length > 3 ? `${otras.slice(0, 3).join(', ')} y ${otras.length - 3} más` : otras.join(', ');
+        avisos.push(`Esta cuenta de Wispro también está conectada a ${nombres}: se traen todas sus cajas y contratos, también los de ${otras.length === 1 ? 'esa red' : 'esas redes'}.`);
+      }
+      const bloqueCajas = h('section.importar-bloque', { 'aria-label': 'Cajas' },
+        h('h3', { text: 'Cajas' }),
+        casilla(cajas.nuevas ? `Agregar ${plural(cajas.nuevas, 'caja', 'cajas')}` : 'No hay cajas nuevas',
+          `Donde las tiene Wispro, con su nombre y ya vinculadas: muestran sus clientes${conPanel() ? ' y potencias' : ''}.`,
+          { marcada: vista.cajas && cajas.nuevas > 0, deshabilitada: cajas.nuevas === 0 || ocupado, cambiar: (si) => { vista.cajas = si; } }),
+        cajas.ya ? h('p.ficha-sub', { text: `${plural(cajas.ya, 'ya está', 'ya están')} en el mapa.` }) : null,
+        bloqueDudosas(cajas.dudosas ?? [], ocupado),
+        cajas.omitidas.length
+          ? plegado(`${plural(cajas.omitidas.length, 'no se agrega', 'no se agregan')}`, cajas.omitidas.map((x) => `${x.nombre}: ${x.motivo}`))
+          : null);
+      const bloqueClientes = h('section.importar-bloque', { 'aria-label': 'Clientes' },
+        h('h3', { text: 'Clientes' }),
+        casilla(clientes.nuevos ? `Agregar ${plural(clientes.nuevos, 'cliente', 'clientes')}` : 'No hay clientes nuevos',
+          'Cada uno en su ubicación de Wispro, vinculado a su contrato.',
+          { marcada: vista.clientes && clientes.nuevos > 0, deshabilitada: clientes.nuevos === 0 || ocupado, cambiar: (si) => { vista.clientes = si; } }),
+        clientes.ya ? h('p.ficha-sub', { text: `${plural(clientes.ya, 'ya está', 'ya están')} en el mapa.` }) : null,
+        ...clientes.omitidos.map((o) => plegado(`${mayuscula(o.motivo)} (${o.cantidad})`,
+          [...o.ejemplos, ...(o.cantidad > o.ejemplos.length ? [`y ${o.cantidad - o.ejemplos.length} más`] : [])])));
+      agregarBtn = boton(vista.agregando ? 'Agregando…' : 'Agregar al mapa', (ev) => agregar(ev.currentTarget),
+        { class: 'primario', disabled: ocupado || !hayAlgo(), 'data-foco': marca('agregar') });
+      const resumen = `En Wispro: ${plural(cajas.total, 'caja', 'cajas')} y ${plural(clientes.total, 'contrato', 'contratos')}.`;
+      return [
+        vista.quitados ? h('p.ficha-sub', { text: textoQuitados(vista.quitados), tabindex: '-1', 'data-foco': marca('resumen') }) : null,
+        h('p', { text: resumen, tabindex: '-1', 'data-foco': marca('resumen') && !vista.quitados }),
+        avisos.length ? h('ul.integ-errores', {}, ...avisos.map((e) => h('li', { text: e }))) : null,
+        bloqueCajas,
+        bloqueClientes,
+        botones(agregarBtn, boton('Cancelar', () => acciones.cancelar(), { disabled: ocupado })),
+        h('p.ficha-nota', { text: `Wispro leído ${I.haceCuanto(p.wispro?.leido)}. Se agrega todo junto y después se puede deshacer. `
+          + 'Lo que no se agrega se puede corregir en Wispro y volver a traer, o cargar a mano.' }),
+        bloqueUltima(p.ultima, ocupado),
+      ];
+    }
+
+    function vistaResultado() {
+      const r = vista.resultado;
+      const d = vista.deshecho;
+      const nota = r.elementos.length && !d
+        ? `Las cajas ya muestran sus clientes${conPanel() ? ' y potencias' : ''}. Si algo no quedó bien, «Deshacer» quita lo agregado (salvo lo que ya se haya tocado); también se puede más tarde, desde esta misma pantalla.`
+        : null;
+      return [
+        h('p', { text: textoAgregados(r), tabindex: '-1', 'data-foco': marca('resultado') }),
+        d ? h('p.ficha-sub', { text: textoQuitados(d), tabindex: '-1', 'data-foco': marca('deshecho') }) : null,
+        nota ? h('p.ficha-sub', { text: nota }) : null,
+        botones(
+          boton('Listo', () => acciones.cancelar(), { class: 'primario', disabled: vista.deshaciendo }),
+          r.elementos.length && !d ? boton('Deshacer', (ev) => deshacerRecien(ev.currentTarget), { disabled: vista.deshaciendo }) : null,
+        ),
+      ];
+    }
+
+    function contenido() {
+      agregarBtn = null;
+      if (vista.resultado) return vistaResultado();
+      if (vista.previa) return vistaPrevia();
+      if (vista.error) {
+        return [h('p.integ-error', { text: vista.error, tabindex: '-1', 'data-foco': marca('error') }),
+          botones(boton('Reintentar', leer, { class: 'primario' }), boton('Cancelar', () => acciones.cancelar()))];
+      }
+      return [h('p.ficha-sub', { text: 'Leyendo Wispro: qué cajas y qué clientes faltan en el mapa…' })];
+    }
+
+    leer();
   }
 
   // ---------------------------------------------------------- utilidades
@@ -1414,5 +1680,6 @@ export function setupFicha({ root, red, acciones }) {
     verCable,
     verRecorrido,
     redes,
+    importarWispro,
   };
 }

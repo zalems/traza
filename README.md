@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.6.1
+# Plataforma FTTH · kit 0.7.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -113,6 +113,20 @@ se consultan recién cuando alguien las elige.
   anotarle el número de contrato o la ONT, y si sus datos son los de un
   contrato que en el mapa es otro cliente, lo dice (puede estar dibujado dos
   veces).
+- **Traer la red de Wispro.** En el panel de redes (tocando el nombre de la
+  red), "Traer cajas y clientes de Wispro" agrega de una vez todas las cajas
+  de Wispro en la ubicación que tienen ahí, con su nombre y ya vinculadas, y
+  los clientes de cada caja, vinculados a su contrato. Antes de agregar
+  muestra cuántas cajas y clientes van a entrar y cuáles no, con el motivo
+  (sin ubicación en Wispro, a más de 2 km de su caja, un cliente del mapa que
+  podría ser el mismo). Una caja de Wispro a menos de 150 m de una caja del
+  mapa sin vincular puede ser esa misma: queda aparte, con un toque para abrir
+  la del mapa y vincularla o, si es otra, para agregarla igual. Se puede
+  deshacer en el momento o más tarde (la última importación, desde la misma
+  pantalla y con confirmación), salvo lo que ya se haya tocado o tenga cables.
+  Se puede repetir cuando haya cajas o clientes nuevos en Wispro: solo agrega
+  lo que falta. Trae toda la cuenta de Wispro: si la misma cuenta está
+  conectada a otra red, lo avisa.
 - **Ver, mover, editar, borrar.** Con "Ver", tocar algo abre su ficha. Desde
   la ficha: Editar, Mover (y tocar el lugar nuevo), Trazado en los cables
   (mover puntos, agregar con los puntos blancos intermedios, quitar), Borrar.
@@ -267,7 +281,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.6.1-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.7.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -304,7 +318,9 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.6.1 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.7.0 a
+0.6.1 alcanza con `git checkout 8353557` e instalar: misma estructura de base
+(lo que se trajo de Wispro queda como cualquier otro elemento). De 0.6.1 a
 0.6.0 alcanza con `git checkout 5ea5b6d` e instalar (solo cambia el visor). De
 0.6.0 a 0.5.0 alcanza con `git checkout 59f7e0f` e instalar: misma estructura
 de base; la conexión con Wispro queda guardada sin usarse y los clientes
@@ -414,17 +430,18 @@ instalación normal sirve de referencia.
 
 ## Pruebas
 
-`python3 -m unittest discover -s pruebas` prueba la API (validaciones,
-cables pegados que siguen a los elementos, conflictos entre dos usuarios,
-historial, clave de nginx, cartas de empalme y su disposición) con una base
-temporal, y las integraciones contra un Wispro y un panel de la OLT falsos
-que responden como los reales (cajas, contratos y cómo se cruza cada uno con
-los clientes del mapa, ONTs por número de serie o por el número de contrato
-de su descripción, mediciones en vivo, fallas y plazos, agregar dos veces a
-la vez, el comando `integraciones`). `node pruebas/fibras.test.mjs` prueba
-la lógica de fibras, colores, recorridos y potencias del visor, y
-`node pruebas/integracion.test.mjs` la medición virtual y la estabilidad
-(Node 20.19 o más nuevo; el de Debian 13 sirve).
+`python3 -m unittest discover -s pruebas` prueba la API (validaciones, cables
+pegados que siguen a los elementos, conflictos entre dos usuarios, historial,
+clave de nginx, cartas de empalme y su disposición) con una base temporal, y
+las integraciones contra un Wispro y un panel de la OLT falsos que responden
+como los reales (cajas, contratos y cómo se cruza cada uno con los clientes
+del mapa, ONTs por número de serie o por el número de contrato de su
+descripción, mediciones en vivo, fallas y plazos, agregar dos veces a la vez,
+traer toda la red de Wispro, deshacerlo y traerla dos veces a la vez, el
+comando `integraciones`). `node pruebas/fibras.test.mjs` prueba la lógica de
+fibras, colores, recorridos y potencias del visor, y
+`node pruebas/integracion.test.mjs` la medición virtual y la estabilidad (Node
+20.19 o más nuevo; el de Debian 13 sirve).
 
 ## Qué se probó y qué no
 
@@ -452,13 +469,19 @@ que atiende la API nueva, y la copia diaria del timer de systemd.
 La integración con Wispro y el panel de la OLT (0.6.0) se escribió con las
 respuestas reales de los dos (leídas el 14/10/2026 con
 `herramientas/muestras-olt-wispro.py`) y se probó contra versiones falsas que
-responden igual, en las pruebas de la API y en Chromium (escritorio,
-teléfono, modo oscuro), y tuvo dos revisiones independientes: sus hallazgos
-quedaron corregidos (entre otros, que agregar dos veces no duplique clientes,
-que un contrato no quede con dos clientes, que no se mezcle la OLT de otra
-empresa y que una ficha no tarde más que el minuto que espera nginx). Contra
-el Wispro y el panel reales se prueba con `integraciones probar` después de
-instalar.
+responden igual, en las pruebas de la API y en Chromium (escritorio, teléfono,
+modo oscuro), y tuvo dos revisiones independientes: sus hallazgos quedaron
+corregidos (entre otros, que agregar dos veces no duplique clientes, que un
+contrato no quede con dos clientes, que no se mezcle la OLT de otra empresa y
+que una ficha no tarde más que el minuto que espera nginx). Contra el Wispro y
+el panel reales se prueba con `integraciones probar` después de instalar.
+Traer la red de Wispro (0.7.0) se probó igual, contra el Wispro falso, en las
+pruebas de la API y en Chromium (escritorio, teléfono, modo oscuro), y tuvo
+una revisión independiente: sus hallazgos quedaron corregidos (poder deshacer
+después de cerrar la pantalla, una caja dibujada a mano cerca de una de
+Wispro, una NAP que Wispro entrega dos veces, la misma cuenta en dos redes, el
+foco con el teclado). Con la red real, la vista previa dice qué va a agregar y
+qué no antes de cambiar nada.
 
 No se pudo probar, y hay que mirarlo en el uso real:
 

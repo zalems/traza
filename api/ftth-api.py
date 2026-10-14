@@ -43,6 +43,9 @@ Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
   POST   /api/integracion/nap/importar {elemento, contratos}: agrega al mapa los clientes que faltan
   POST   /api/integracion/vincular     {cliente, contrato}: confirma que un cliente es el de ese contrato
   POST   /api/integracion/desvincular  {cliente, contrato, deshacer?}: ese cliente no es el de ese contrato
+  GET    /api/integracion/importacion?red=N    qué cajas y clientes de Wispro faltan en el mapa (sin cambiar nada)
+  POST   /api/integracion/importacion  {red, cajas, clientes, igual?}: los agrega de una vez (una versión)
+  POST   /api/integracion/importacion/deshacer {red, version}: quita lo que agregó esa importación
 
 Extremos de una unión, siempre dentro de un elemento:
   cCABLE:LADO:FIBRA   fibra de un cable; LADO a = el tramo hacia el comienzo del
@@ -667,7 +670,8 @@ class Store:
             raise
         return out
 
-    def _insertar(self, red_id: int, fields: dict, usuario: str, t: str, version: int, origen: str = None) -> int:
+    def _insertar(self, red_id: int, fields: dict, usuario: str, t: str, version: int, origen: str = None,
+                  lote: int = None) -> int:
         cur = self.conn().execute(
             "INSERT INTO elementos (red_id, tipo, nombre, estado, lon, lat, datos, carta, notas, creado, creado_por, "
             "modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)",
@@ -678,20 +682,23 @@ class Store:
         detalle = {"tipo": fields["tipo"], "nombre": fields.get("nombre", "")}
         if origen:
             detalle["origen"] = origen
+        if lote:
+            detalle["lote"] = lote  # para deshacer una importación entera
         self.log_change(red_id, usuario, "crear", "elementos", cur.lastrowid, detalle)
         return cur.lastrowid
 
-    def importar_clientes(self, red_id: int, preparar, usuario: str, origen: str = None) -> dict:
-        """Agrega los clientes que calcula preparar(clientes de la red), leídos dentro
-        de la misma transacción: dos pedidos a la vez no agregan dos veces lo mismo.
-        preparar devuelve (nuevos, omitidos); todos van con una sola versión."""
+    def importar_elementos(self, red_id: int, preparar, usuario: str, origen: str = None, lote: bool = False) -> dict:
+        """Agrega los elementos que calcula preparar(), que lee la base dentro de la misma
+        transacción: dos pedidos a la vez no agregan dos veces lo mismo. preparar
+        devuelve (nuevos, extra); todos van con una sola versión. Con lote=True, esa
+        versión queda en el historial como número de la importación (para deshacerla)."""
         t = now_iso()
         self.begin()
         try:
-            nuevos, omitidos = preparar(self.clientes_red(red_id))
+            nuevos, extra = preparar()
             if nuevos:
                 v = self.next_version()
-                ids = [self._insertar(red_id, f, usuario, t, v, origen) for f in nuevos]
+                ids = [self._insertar(red_id, f, usuario, t, v, origen, lote=v if lote else None) for f in nuevos]
                 out = {"elementos": [self.element_feature(self.get_element(i)) for i in ids], "version": v}
             else:
                 out = {"elementos": [], "version": self.version()}
@@ -699,8 +706,69 @@ class Store:
         except Exception:
             self.rollback()
             raise
-        out["omitidos"] = omitidos
+        out.update(extra)
         return out
+
+    def importar_clientes(self, red_id: int, preparar, usuario: str, origen: str = None) -> dict:
+        """Agrega los clientes que calcula preparar(clientes de la red); devuelve (nuevos, omitidos)."""
+        def todo():
+            nuevos, omitidos = preparar(self.clientes_red(red_id))
+            return nuevos, {"omitidos": omitidos}
+        return self.importar_elementos(red_id, todo, usuario, origen)
+
+    def ultima_importacion(self, red_id: int):
+        """La última importación de la red de la que queda algo en el mapa:
+        {"version", "fecha", "usuario", "elementos"} o None."""
+        row = self.conn().execute(
+            "SELECT json_extract(h.detalle, '$.lote') AS lote, MIN(h.fecha) AS fecha, MIN(h.usuario) AS usuario, "
+            "COUNT(*) AS elementos FROM historial h JOIN elementos e ON e.id = h.registro_id AND e.borrado IS NULL "
+            "WHERE h.red_id = ? AND h.tabla = 'elementos' AND h.accion = 'crear' "
+            "AND json_extract(h.detalle, '$.lote') IS NOT NULL GROUP BY lote ORDER BY lote DESC LIMIT 1",
+            (red_id,)).fetchone()
+        if row is None:
+            return None
+        return {"version": row["lote"], "fecha": row["fecha"], "usuario": row["usuario"], "elementos": row["elementos"]}
+
+    def deshacer_importacion(self, red_id: int, lote: int, usuario: str) -> dict:
+        """Quita lo que agregó una importación (la de la versión `lote`), salvo lo que se
+        tocó después o lo que ya tiene cables, equipos o uniones."""
+        self.begin()
+        try:
+            ids = [r["registro_id"] for r in self.conn().execute(
+                "SELECT registro_id FROM historial WHERE red_id = ? AND tabla = 'elementos' AND accion = 'crear' "
+                "AND json_extract(detalle, '$.lote') = ?", (red_id, lote))]
+            if not ids:
+                raise ApiError(HTTPStatus.NOT_FOUND, "No hay una importación con ese número en esta red.")
+            v = None
+            t = now_iso()
+            quitados, quedan = [], 0
+            for element_id in ids:
+                row = self.get_element(element_id)
+                if row is None:
+                    continue  # ya se borró
+                ocupado = (self._attached_cables(element_id)
+                           or self.conn().execute("SELECT 1 FROM equipos WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
+                                                  (element_id,)).fetchone()
+                           or self.conn().execute("SELECT 1 FROM fusiones WHERE elemento_id = ? AND borrado IS NULL LIMIT 1",
+                                                  (element_id,)).fetchone())
+                if row["version"] != lote or ocupado:
+                    quedan += 1
+                    continue
+                if v is None:
+                    v = self.next_version()
+                self.conn().execute(
+                    "UPDATE elementos SET borrado = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+                    (t, t, usuario, v, element_id))
+                self.log_change(red_id, usuario, "borrar", "elementos", element_id,
+                                {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row),
+                                 "origen": "deshacer importación", "lote": lote})
+                quitados.append({"id": element_id, "borrado": True, "modificado_por": usuario, "version": v})
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"elementos": quitados, "version": v if v is not None else self.version(),
+                "quitados": len(quitados), "quedan": quedan}
 
     def vincular_cliente(self, element_id: int, item: dict, usuario: str, vigentes=()) -> dict:
         """Anota en un cliente su contrato de Wispro (y lo que le falte: abonado, ONT,
@@ -783,6 +851,13 @@ class Store:
         out = {"elemento": self.element_feature(self.get_element(row["id"])), "version": v}
         self.commit()
         return out
+
+    def naps_red(self, red_id: int):
+        """Las cajas NAP de una red, para saber cuáles de Wispro ya están en el mapa."""
+        return self.conn().execute(
+            "SELECT id, nombre, lon, lat, datos FROM elementos WHERE red_id = ? AND tipo = 'nap' AND borrado IS NULL",
+            (red_id,),
+        ).fetchall()
 
     def clientes_red(self, red_id: int):
         """Los clientes de una red, para cruzarlos con los contratos de Wispro."""
@@ -1803,6 +1878,8 @@ CERCA_M = 300  # un cliente de traza y un contrato con el mismo nombre, a lo sum
 NUMERO_CERCA_M = 2000  # un cliente con el número de un contrato o de abonado, a lo sumo a esta distancia
 CANDIDATAS_M = 1500  # NAPs de Wispro que se ofrecen para vincular una caja, hasta esta distancia
 LEJOS_CAJA_M = 2000  # un contrato ubicado más lejos que esto de su caja no se agrega al mapa
+DUDA_CAJA_M = 150  # una NAP de Wispro a menos de esto de una caja del mapa sin vincular podría ser esa caja
+MAX_IMPORTACION = 5000  # elementos que se agregan de una vez al traer una red de Wispro
 ESTADOS_WISPRO = {"enabled": "activo", "alerted": "activo", "degraded": "activo", "disabled": "instalado"}
 
 # Las lecturas de Wispro y del panel corren en estos hilos: un pedido del visor las
@@ -2972,6 +3049,67 @@ class Integraciones:
         c = dw.por_id.get(contrato_id) if dw is not None else None
         return store.desvincular_cliente(row["id"], contrato_id, dw.contrato(c) if c else None, usuario)
 
+    # --- traer toda la red de Wispro (cajas y clientes)
+    def _wispro_reciente(self, red_id: int):
+        """Wispro leído recién (para mostrar qué se va a agregar), con plazo; si tarda o
+        falla, la lectura anterior y una nota. Devuelve (DatosWispro, nota)."""
+        if self.wispro(red_id) is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Esta red no está conectada con Wispro.")
+        tarea = _HILOS.submit(self.datos_wispro, red_id, True)
+        try:
+            dw, falla = tarea.result(timeout=PLAZO_DATOS)
+        except FuturesTimeout:
+            anterior = self._ultimo(("wispro", red_id))
+            if anterior is None:
+                raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "Wispro está tardando en responder: probá de nuevo en un momento.")
+            return anterior, f"Wispro está tardando en responder: se usa lo leído {hace_texto(anterior.cuando)}."
+        except IntegracionError as err:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"No se pudo leer Wispro: {err}.")
+        return dw, (f"Wispro: {falla}; se usa lo leído {hace_texto(dw.cuando)}." if falla else None)
+
+    def misma_cuenta(self, red_id: int) -> list:
+        """Las otras redes conectadas con la misma cuenta de Wispro (el mismo token)."""
+        w = self.wispro(red_id)
+        redes = self.config().get("redes")
+        if w is None or not isinstance(redes, dict):
+            return []
+        out = []
+        for clave in redes:
+            if not clave.isdigit() or int(clave) == red_id:
+                continue
+            otra = self.wispro(int(clave))
+            if otra is not None and otra.token == w.token and otra.url == w.url:
+                out.append(int(clave))
+        return out
+
+    def previa_importacion(self, store, red_id: int) -> dict:
+        """Qué cajas y clientes de Wispro se agregarían al mapa, sin cambiar nada."""
+        dw, nota = self._wispro_reciente(red_id)
+        plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id))
+        out = {k: v for k, v in plan.items() if not k.startswith("_")}
+        out["wispro"] = {"leido": dw.cuando}
+        out["errores"] = [nota] if nota else []
+        out["ultima"] = store.ultima_importacion(red_id)
+        otras = [store.network_info(r) for r in self.misma_cuenta(red_id)]
+        out["misma_cuenta"] = [r["nombre"] for r in otras if r]
+        return out
+
+    def importar_red(self, store, red_id: int, cajas: bool, clientes: bool, igual, usuario: str) -> dict:
+        """Agrega al mapa las cajas y los clientes de Wispro que faltan, de una vez (una
+        versión: se deshace con deshacer_importacion). Las cajas que podrían estar ya
+        en el mapa (dudosas) van solo si están en `igual`."""
+        _, dw = self._wispro_o_error(red_id)
+
+        def preparar():
+            plan = plan_importacion(dw, store.naps_red(red_id), store.clientes_red(red_id), igual)
+            nuevas = (plan["_cajas"] if cajas else []) + plan["_igual"]
+            nuevos = nuevas + (plan["_clientes"] if clientes else [])
+            if len(nuevos) > MAX_IMPORTACION:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"Son demasiados elementos para agregar de una vez ({len(nuevos)}).")
+            return nuevos, {"agregados": {"cajas": len(nuevas), "clientes": len(nuevos) - len(nuevas)}}
+
+        return store.importar_elementos(red_id, preparar, usuario, origen="wispro", lote=True)
+
 
 def cliente_de_contrato(item: dict, nap_nombre) -> dict:
     """Un cliente de traza con lo que dice su contrato de Wispro."""
@@ -2990,6 +3128,88 @@ def cliente_de_contrato(item: dict, nap_nombre) -> dict:
     lon, lat = coord_pair(*item["ubicacion"])
     return {"tipo": "cliente", "nombre": nombre, "estado": ESTADOS_WISPRO.get(item["estado"], "instalado"),
             "lon": lon, "lat": lat, "datos": datos, "notas": ""}
+
+
+def caja_de_nap(n: dict, nombre: str, u) -> dict:
+    """Una caja NAP de traza con lo que dice su NAP de Wispro (queda vinculada)."""
+    datos = {"wispro_nap": n.get("id"), "wispro_nap_nombre": nombre}
+    capacidad = numero(n.get("capacity"))  # 16 (o "16")
+    if capacidad is not None and capacidad.is_integer() and 0 < capacidad <= 1024:
+        datos["puertos"] = str(int(capacidad))
+        datos["wispro_llenados"] = "puertos"
+    lon, lat = coord_pair(*u)
+    return {"tipo": "nap", "nombre": check_text(nombre, "nombre")[:MAX_NOMBRE].strip() or "NAP", "estado": "instalado",
+            "lon": lon, "lat": lat, "datos": datos_field({"datos": datos}), "notas": ""}
+
+
+def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dict:
+    """Qué cajas y qué clientes de Wispro faltan en el mapa, listos para agregar
+    (_cajas, _clientes), y por qué no se agrega el resto. Usa el mismo cruce que la
+    ficha de la caja: no se agrega lo que ya está ni lo que podría estar. Una NAP
+    cerca de una caja del mapa sin vincular podría ser esa misma caja: queda como
+    dudosa y se agrega solo si su id está en `igual` (_igual)."""
+    en_mapa, sueltas = set(), []
+    for r in naps_rows:
+        nap, _ = caja_de_wispro(dw, r)
+        if nap is not None:
+            en_mapa.add(nap.get("id"))
+        else:
+            sueltas.append(r)  # cajas del mapa sin NAP de Wispro: podrían ser una de las que faltan
+    igual = set(igual)
+    naps = [n for i, n in dw.naps_por_id.items() if isinstance(i, str) and i]  # una vez cada una
+    cajas, con_igual, dudosas, cajas_omitidas, cajas_ya = [], [], [], [], 0
+    for n in naps:
+        nombre = texto_corto(n.get("name"), MAX_NOMBRE) or "NAP"
+        if n["id"] in en_mapa:
+            cajas_ya += 1
+            continue
+        u = ubicacion(n.get("latitude"), n.get("longitude"))
+        if not u:
+            cajas_omitidas.append({"nombre": nombre, "motivo": "no tiene ubicación en Wispro"})
+            continue
+        cerca = min(((haversine_m(u, [r["lon"], r["lat"]]), r) for r in sueltas), key=lambda x: x[0], default=None)
+        if cerca and cerca[0] <= DUDA_CAJA_M:
+            if n["id"] in igual:
+                con_igual.append(caja_de_nap(n, nombre, u))
+            else:
+                dudosas.append({"id": n["id"], "nombre": nombre, "distancia_m": round(cerca[0]),
+                                "caja": {"id": cerca[1]["id"], "nombre": cerca[1]["nombre"] or "Caja sin nombre"}})
+            continue
+        cajas.append(caja_de_nap(n, nombre, u))
+
+    cruce = Cruce(dw, clientes_rows)
+    clientes, motivos, clientes_ya = [], {}, 0
+
+    def omitir(motivo, item):
+        numero = f" #{item['numero']}" if item["numero"] is not None else ""
+        motivos.setdefault(motivo, []).append(f"{item['cliente'] or 'Sin nombre'}{numero}")
+
+    for cid, item in cruce.items.items():
+        n = dw.naps_por_id.get(item["nap"])
+        en_traza = cruce.en_traza(cid)
+        if n is None:
+            omitir("no tiene caja en Wispro", item)
+        elif en_traza and any(not d.get("lejos_m") for d in en_traza.get("dudosos", [])):
+            omitir("podría ser un cliente que ya está en el mapa: se confirma desde su caja", item)
+        elif en_traza and not en_traza.get("dudosos"):
+            clientes_ya += 1
+        elif not item["ubicacion"]:
+            omitir("no tiene ubicación en Wispro", item)
+        else:
+            u = ubicacion(n.get("latitude"), n.get("longitude"))
+            if u and haversine_m(u, item["ubicacion"]) > LEJOS_CAJA_M:
+                omitir("su ubicación en Wispro está a más de 2 km de su caja", item)
+            else:
+                clientes.append(cliente_de_contrato(item, n.get("name")))
+    return {
+        "cajas": {"total": len(naps), "nuevas": len(cajas), "ya": cajas_ya, "omitidas": cajas_omitidas,
+                  "dudosas": dudosas},
+        "clientes": {"total": len(cruce.items), "nuevos": len(clientes), "ya": clientes_ya,
+                     "omitidos": [{"motivo": m, "cantidad": len(e), "ejemplos": e[:20]} for m, e in motivos.items()]},
+        "_cajas": cajas,
+        "_igual": con_igual,
+        "_clientes": clientes,
+    }
 
 
 def contratos_field(data: dict) -> list:
@@ -3255,6 +3475,27 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Las integraciones no están disponibles en este servidor.")
         if path == "/api/integracion" and method == "GET":
             return HTTPStatus.OK, integ.estado(self.red_param(q("red")))
+        if path == "/api/integracion/importacion" and method == "GET":
+            return HTTPStatus.OK, integ.previa_importacion(self.store, self.red_param(q("red")))
+        if path == "/api/integracion/importacion" and method == "POST":
+            data = self.read_json()
+            red_id = self.red_param(data.get("red"))
+            cajas, clientes, igual = data.get("cajas", True), data.get("clientes", True), data.get("igual", [])
+            if not isinstance(cajas, bool) or not isinstance(clientes, bool):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "cajas y clientes tienen que ser true o false.")
+            if (not isinstance(igual, list) or len(igual) > MAX_IMPORTACION
+                    or not all(isinstance(i, str) and 0 < len(i) <= 100 for i in igual)):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "igual tiene que ser una lista de NAPs de Wispro.")
+            if not cajas and not clientes and not igual:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Elegí cajas, clientes o las dos cosas.")
+            return HTTPStatus.OK, integ.importar_red(self.store, red_id, cajas, clientes, igual, user)
+        if path == "/api/integracion/importacion/deshacer" and method == "POST":
+            data = self.read_json()
+            red_id = self.red_param(data.get("red"))
+            lote = int_value(data.get("version"), "version")
+            if lote <= 0:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "version inválida.")
+            return HTTPStatus.OK, self.store.deshacer_importacion(red_id, lote, user)
         if path == "/api/integracion/nap" and method == "GET":
             return HTTPStatus.OK, integ.nap(self.store, self.element_of_type(q("elemento"), "nap"), q("refrescar") == "1",
                                            q("candidatas") == "1")

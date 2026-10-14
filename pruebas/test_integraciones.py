@@ -753,6 +753,119 @@ class IntegracionesTest(unittest.TestCase):
         finally:
             self.wispro.rutas["/naps"] = naps
 
+    def test_traer_la_red_de_wispro(self):
+        red = self.ok("POST", "/api/redes", {"nombre": "Traer todo"}, status=201)["red"]["id"]
+        self.configurar(red)
+        # Una caja dibujada a mano a 15 m de P5C5, sin vincular: podría ser la misma, no
+        # se agrega otra encima salvo que se pida (P5C4 queda a más de 150 m).
+        nap001 = self.ok("POST", "/api/elementos", {"red": red, "tipo": "nap", "nombre": "NAP-001", "lon": -58.1671,
+                                                    "lat": -26.1811}, status=201)["elemento"]["id"]
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}")
+        self.assertEqual((previa["cajas"]["total"], previa["cajas"]["nuevas"], previa["cajas"]["ya"]), (3, 2, 0))
+        self.assertEqual(previa["cajas"]["omitidas"], [])
+        self.assertEqual(previa["cajas"]["dudosas"], [{"id": U(2), "nombre": "P5C5", "distancia_m": 15,
+                                                       "caja": {"id": nap001, "nombre": "NAP-001"}}])
+        self.assertIsNone(previa["ultima"])
+        self.assertEqual((previa["clientes"]["total"], previa["clientes"]["nuevos"], previa["clientes"]["ya"]), (6, 5, 0))
+        self.assertEqual(previa["clientes"]["omitidos"], [{"motivo": "no tiene ubicación en Wispro", "cantidad": 1,
+                                                          "ejemplos": ["Sin Ubicación #395"]}])
+        self.assertEqual(len(self.ok("GET", f"/api/red?red={red}")["elementos"]["features"]), 1)  # no cambió nada
+        # Agregar todo de una vez: una sola versión.
+        res = self.ok("POST", "/api/integracion/importacion", {"red": red, "cajas": True, "clientes": True})
+        self.assertEqual(res["agregados"], {"cajas": 2, "clientes": 5})
+        self.assertEqual(len(res["elementos"]), 7)
+        self.assertEqual({e["properties"]["version"] for e in res["elementos"]}, {res["version"]})
+        cajas = {e["properties"]["nombre"]: e for e in res["elementos"] if e["properties"]["tipo"] == "nap"}
+        self.assertEqual(set(cajas), {"P5C4", "P9C1"})
+        p5c4 = cajas["P5C4"]
+        self.assertEqual(p5c4["properties"]["datos"]["wispro_nap"], U(1))
+        self.assertEqual(p5c4["properties"]["datos"]["puertos"], "16")
+        self.assertEqual(p5c4["geometry"]["coordinates"], [-58.166, -26.18])
+        # La caja agregada ya muestra sus contratos, vinculados con los clientes agregados.
+        data = self.ok("GET", f"/api/integracion/nap?elemento={p5c4['id']}")
+        self.assertEqual(data["nap"]["por"], "vinculada")
+        por_id = {x["id"]: x for x in data["contratos"]}
+        self.assertEqual(por_id[U(201)]["traza"]["por"], "vinculado")
+        self.assertIsNone(por_id[U(205)]["traza"])  # sin ubicación: no se agregó
+        # Otra vez: no hay nada nuevo (P5C5 sigue esperando), y se ve la importación para deshacerla.
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}")
+        self.assertEqual((previa["cajas"]["nuevas"], previa["cajas"]["ya"], len(previa["cajas"]["dudosas"])), (0, 2, 1))
+        self.assertEqual((previa["clientes"]["nuevos"], previa["clientes"]["ya"]), (0, 5))
+        self.assertEqual((previa["ultima"]["version"], previa["ultima"]["elementos"], previa["ultima"]["usuario"]),
+                         (res["version"], 7, "ana"))
+        self.assertEqual(self.ok("POST", "/api/integracion/importacion", {"red": red})["elementos"], [])
+        # Deshacer: se va lo agregado, salvo lo que se tocó después.
+        cliente = next(e for e in res["elementos"] if e["properties"]["tipo"] == "cliente")
+        self.ok("PUT", f"/api/elementos/{cliente['id']}", {"notas": "visto en la calle",
+                                                          "version": cliente["properties"]["version"]})
+        des = self.ok("POST", "/api/integracion/importacion/deshacer", {"red": red, "version": res["version"]})
+        self.assertEqual((des["quitados"], des["quedan"]), (6, 1))
+        self.assertTrue(all(e["borrado"] for e in des["elementos"]))
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}")
+        self.assertEqual((previa["cajas"]["nuevas"], previa["clientes"]["nuevos"], previa["clientes"]["ya"]), (2, 4, 1))
+        self.assertEqual((previa["ultima"]["version"], previa["ultima"]["elementos"]), (res["version"], 1))
+        # Solo cajas, y P5C5 también (es otra caja que NAP-001).
+        res = self.ok("POST", "/api/integracion/importacion", {"red": red, "cajas": True, "clientes": False,
+                                                               "igual": [U(2)]})
+        self.assertEqual(res["agregados"], {"cajas": 3, "clientes": 0})
+        previa = self.ok("GET", f"/api/integracion/importacion?red={red}")
+        self.assertEqual((previa["cajas"]["nuevas"], previa["cajas"]["ya"], previa["cajas"]["dudosas"]), (0, 3, []))
+        self.assertEqual((previa["ultima"]["version"], previa["ultima"]["elementos"]), (res["version"], 3))
+        # Agregar desde la ficha de una caja no cuenta como importación de la red.
+        p5c4 = next(e["id"] for e in res["elementos"] if e["properties"]["nombre"] == "P5C4")
+        desde_caja = self.ok("POST", "/api/integracion/nap/importar", {"elemento": p5c4, "contratos": [U(203)]})
+        self.assertEqual((len(desde_caja["elementos"]), desde_caja["omitidos"]), (1, []))
+        self.assertEqual(self.ok("GET", f"/api/integracion/importacion?red={red}")["ultima"]["version"], res["version"])
+        # Validaciones.
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion/deshacer", {"red": red, "version": 999999})[0], 404)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion/deshacer", {"red": red, "version": "x"})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion", {"red": red, "cajas": False,
+                                                                            "clientes": False})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion", {"red": red, "cajas": "si"})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion", {"red": red, "igual": U(2)})[0], 400)
+        self.assertEqual(self.pedir("POST", "/api/integracion/importacion", {"red": red, "igual": [2]})[0], 400)
+        sin = self.ok("POST", "/api/redes", {"nombre": "Sin Wispro"}, status=201)["red"]["id"]
+        self.assertEqual(self.pedir("GET", f"/api/integracion/importacion?red={sin}")[0], 409)
+        self.assertEqual(self.pedir("GET", "/api/integracion/importacion?red=999999")[0], 404)
+
+    def test_traer_naps_repetidas_y_sin_id(self):
+        # Wispro entrega de a páginas: si la lista se corre mientras se lee, una NAP puede venir dos veces.
+        sin_id = dict(NAPS[0], id=None, name="Sin id")
+        dw = api.DatosWispro(NAPS + [NAPS[0], sin_id], [], [], [])
+        plan = api.plan_importacion(dw, [], [])
+        self.assertEqual((plan["cajas"]["total"], plan["cajas"]["nuevas"]), (3, 3))
+        self.assertEqual(sorted(c["nombre"] for c in plan["_cajas"]), ["P5C4", "P5C5", "P9C1"])
+        # La capacidad puede venir como texto.
+        dw = api.DatosWispro([dict(NAPS[0], capacity="24")], [], [], [])
+        self.assertEqual(api.plan_importacion(dw, [], [])["_cajas"][0]["datos"]["puertos"], "24")
+
+    def test_traer_con_la_misma_cuenta_en_otra_red(self):
+        a = self.ok("POST", "/api/redes", {"nombre": "Cuenta A"}, status=201)["red"]["id"]
+        b = self.ok("POST", "/api/redes", {"nombre": "Cuenta B"}, status=201)["red"]["id"]
+        self.configurar(a)
+        self.configurar(b)
+        self.assertIn("Cuenta B", self.ok("GET", f"/api/integracion/importacion?red={a}")["misma_cuenta"])
+        self.assertNotIn("Cuenta A", self.ok("GET", f"/api/integracion/importacion?red={a}")["misma_cuenta"])
+
+    def test_traer_la_red_dos_veces_a_la_vez(self):
+        red = self.ok("POST", "/api/redes", {"nombre": "Traer dos veces"}, status=201)["red"]["id"]
+        self.configurar(red)
+        self.ok("GET", f"/api/integracion/importacion?red={red}")  # Wispro leído
+        resultados = []
+
+        def traer():
+            resultados.append(self.pedir("POST", "/api/integracion/importacion", {"red": red}))
+
+        hilos = [threading.Thread(target=traer) for _ in range(3)]
+        for t in hilos:
+            t.start()
+        for t in hilos:
+            t.join()
+        self.assertTrue(all(code == 200 for code, _ in resultados), resultados)
+        self.assertEqual(sorted(len(r["elementos"]) for _, r in resultados), [0, 0, 8])
+        elementos = self.ok("GET", f"/api/red?red={red}")["elementos"]["features"]
+        self.assertEqual(len(elementos), 8)  # 3 cajas y 5 clientes, una sola vez
+
     def test_comando_ver_olts(self):
         red, _ = self.red_con_caja("Ver OLTs")
         archivo = os.path.join(self.tmp.name, "ver-olts.json")

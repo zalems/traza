@@ -325,8 +325,31 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
         red.aplicar(res);
         return res;
       },
+      // Traer de Wispro todas las cajas y sus clientes: lo que falta (sin cambiar nada),
+      // agregarlo de una vez y deshacerlo.
+      previaImportacion: (redId) => api(`api/integracion/importacion?red=${redId}`, { espera: 60000 }),
+      async importarRed(redId, opciones) {
+        const res = await api('api/integracion/importacion', { method: 'POST', body: { red: redId, ...opciones }, espera: 90000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
+        encuadrar(res.elementos.map((e) => e.geometry.coordinates));
+        return res;
+      },
+      async deshacerImportacion(redId, version) {
+        const res = await api('api/integracion/importacion/deshacer', { method: 'POST', body: { red: redId, version }, espera: 60000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
+        return res;
+      },
       toast: (texto) => toast(texto),
       aviso: (texto) => notify(texto),
+    },
+    // Abre la pantalla para traer de Wispro las cajas y los clientes de la red actual.
+    traerDeWispro() {
+      if (!redActual) return;
+      if (modo !== 'ver') setModo('ver');
+      red.seleccionar(null);
+      ficha.importarWispro({ redId: redActual.id, nombre: redActual.nombre });
     },
   };
 
