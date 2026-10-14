@@ -277,7 +277,83 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
     limpiarRecorrido() {
       red.limpiarRecorrido();
     },
+
+    // --- Wispro y el panel de la OLT (se configuran en el servidor)
+    integracion: {
+      // Si la red actual está conectada: null mientras se averigua.
+      estado: () => estadoIntegracion(),
+      leer: (tipo, id, { refrescar = false, candidatas = false } = {}) => api(
+        `api/integracion/${tipo}?elemento=${id}${refrescar ? '&refrescar=1' : ''}${candidatas ? '&candidatas=1' : ''}`,
+        { espera: 60000 },
+      ),
+      medir: (tipo, id) => api(`api/integracion/${tipo}/medir`, { method: 'POST', body: { elemento: id }, espera: 120000 }),
+      async importar(napId, ids) {
+        const redId = red.state.red;
+        const res = await api('api/integracion/nap/importar', { method: 'POST', body: { elemento: napId, contratos: ids }, espera: 60000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
+        return res;
+      },
+      // Guarda en la caja de traza con qué NAP de Wispro se corresponde.
+      async vincularNap(feature, nap) {
+        const redId = red.state.red;
+        const actual = red.state.elementos.get(feature.id) ?? feature;
+        const datos = { ...(actual.properties.datos ?? {}), wispro_nap: nap.id, wispro_nap_nombre: nap.nombre };
+        try {
+          const res = await api(`api/elementos/${feature.id}`, { method: 'PUT', body: { datos, version: actual.properties.version } });
+          if (!otraRed(redId)) red.aplicar(res);
+        } catch (err) {
+          if (!otraRed(redId) && err.status === 409 && err.data?.actual) red.aplicar({ elemento: err.data.actual });
+          throw err;
+        }
+      },
+      // Confirma que un cliente del mapa es el de un contrato de Wispro (queda vinculado).
+      async vincularCliente(clienteId, contratoId) {
+        const redId = red.state.red;
+        const res = await api('api/integracion/vincular', { method: 'POST', body: { cliente: clienteId, contrato: contratoId }, espera: 60000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
+        return res;
+      },
+      // Ese cliente no es el de ese contrato: se deshace el vínculo y no se lo vuelve a
+      // proponer (con deshacer: se vuelve a considerar).
+      async desvincularCliente(clienteId, contratoId, { deshacer = false } = {}) {
+        const redId = red.state.red;
+        const body = { cliente: clienteId, contrato: contratoId, ...(deshacer ? { deshacer: true } : {}) };
+        const res = await api('api/integracion/desvincular', { method: 'POST', body, espera: 60000 });
+        if (otraRed(redId)) return null;
+        red.aplicar(res);
+        return res;
+      },
+      toast: (texto) => toast(texto),
+      aviso: (texto) => notify(texto),
+    },
   };
+
+  // Si la red está conectada con Wispro y con el panel de la OLT: se pregunta una
+  // vez por red y, cuando llega la respuesta, se rehace la ficha que esté abierta.
+  // Si la pregunta falla (sin señal al entrar), se repite en una ficha posterior.
+  const REPREGUNTAR_INTEGRACION_MS = 20 * 1000;
+  let integracionRed = { red: null, estado: null, fallo: 0 };
+  function estadoIntegracion() {
+    const redId = red.state.red;
+    if (!redId) return null;
+    const repreguntar = integracionRed.red === redId && integracionRed.fallo
+      && Date.now() - integracionRed.fallo > REPREGUNTAR_INTEGRACION_MS;
+    if (integracionRed.red !== redId || repreguntar) {
+      integracionRed = { red: redId, estado: null, fallo: 0 };
+      api(`api/integracion?red=${redId}`).then((estado) => {
+        if (integracionRed.red !== redId) return;
+        integracionRed.estado = estado;
+        if (!estado.wispro && !estado.panel) return;
+        const sel = red.seleccionado();
+        if (sel?.clase === 'elemento' && ficha.modo() === 'elemento') ficha.verElemento(sel.feature);
+      }, () => {
+        if (integracionRed.red === redId) integracionRed.fallo = Date.now();
+      });
+    }
+    return integracionRed.estado;
+  }
 
   const ficha = setupFicha({ root: $('ficha'), red, acciones });
   const carta = setupCarta({ root: $('carta'), red, acciones, toast });
@@ -931,6 +1007,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
       // sin almacenamiento: se pregunta la próxima vez
     }
     await red.cargar(id);
+    estadoIntegracion();
   }
 
   let avisoInicio = false;

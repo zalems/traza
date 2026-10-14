@@ -32,6 +32,18 @@ otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx
   POST   /api/fusiones/borrar          {ids}: quita varias uniones (deshacer)
   GET    /api/historial?red=ID&limite=N   últimos cambios (quién, qué, cuándo)
 
+Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
+  GET    /api/integracion?red=ID       si la red está conectada con Wispro y con el panel de la OLT
+  GET    /api/integracion/nap?elemento=ID       la NAP en Wispro, sus contratos, el cliente de traza de
+                                       cada uno y la potencia de su ONT (refrescar=1 vuelve a leer;
+                                       candidatas=1 suma las NAPs de Wispro con que se puede vincular)
+  GET    /api/integracion/cliente?elemento=ID   el contrato de un cliente y su ONT
+  POST   /api/integracion/nap/medir    {elemento}: potencia en vivo de las ONTs de la NAP, por Wispro
+  POST   /api/integracion/cliente/medir  {elemento}
+  POST   /api/integracion/nap/importar {elemento, contratos}: agrega al mapa los clientes que faltan
+  POST   /api/integracion/vincular     {cliente, contrato}: confirma que un cliente es el de ese contrato
+  POST   /api/integracion/desvincular  {cliente, contrato, deshacer?}: ese cliente no es el de ese contrato
+
 Extremos de una unión, siempre dentro de un elemento:
   cCABLE:LADO:FIBRA   fibra de un cable; LADO a = el tramo hacia el comienzo del
                       cable, b = el tramo hacia el final (un cable que pasa por el
@@ -43,24 +55,37 @@ PUT y DELETE aceptan la versión que el usuario tenía a la vista: si mientras
 tanto alguien cambió ese objeto, la respuesta es 409 con el estado actual.
 
 Uso:
-  ftth-api.py serve [--db RUTA] [--port 8901] [--secreto ARCHIVO]
+  ftth-api.py serve [--db RUTA] [--port 8901] [--secreto ARCHIVO] [--integraciones ARCHIVO]
+  ftth-api.py integraciones ver | wispro RED | panel RED URL [--olt N] | quitar RED [wispro|panel] | probar RED
 """
 
 import argparse
+import errno
+import getpass
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import math
 import os
 import re
+import socket
 import sqlite3
+import ssl
 import sys
+import tempfile
 import threading
-from datetime import datetime, timezone
+import time
+import unicodedata
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FuturesTimeout
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 MAX_BODY = 256 * 1024
 MAX_NOMBRE = 80
@@ -641,6 +666,130 @@ class Store:
             self.rollback()
             raise
         return out
+
+    def _insertar(self, red_id: int, fields: dict, usuario: str, t: str, version: int, origen: str = None) -> int:
+        cur = self.conn().execute(
+            "INSERT INTO elementos (red_id, tipo, nombre, estado, lon, lat, datos, carta, notas, creado, creado_por, "
+            "modificado, modificado_por, version) VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)",
+            (red_id, fields["tipo"], fields.get("nombre", ""), fields.get("estado", "instalado"), fields["lon"],
+             fields["lat"], json.dumps(fields.get("datos", {}), ensure_ascii=False), fields.get("notas", ""),
+             t, usuario, t, usuario, version),
+        )
+        detalle = {"tipo": fields["tipo"], "nombre": fields.get("nombre", "")}
+        if origen:
+            detalle["origen"] = origen
+        self.log_change(red_id, usuario, "crear", "elementos", cur.lastrowid, detalle)
+        return cur.lastrowid
+
+    def importar_clientes(self, red_id: int, preparar, usuario: str, origen: str = None) -> dict:
+        """Agrega los clientes que calcula preparar(clientes de la red), leídos dentro
+        de la misma transacción: dos pedidos a la vez no agregan dos veces lo mismo.
+        preparar devuelve (nuevos, omitidos); todos van con una sola versión."""
+        t = now_iso()
+        self.begin()
+        try:
+            nuevos, omitidos = preparar(self.clientes_red(red_id))
+            if nuevos:
+                v = self.next_version()
+                ids = [self._insertar(red_id, f, usuario, t, v, origen) for f in nuevos]
+                out = {"elementos": [self.element_feature(self.get_element(i)) for i in ids], "version": v}
+            else:
+                out = {"elementos": [], "version": self.version()}
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        out["omitidos"] = omitidos
+        return out
+
+    def vincular_cliente(self, element_id: int, item: dict, usuario: str, vigentes=()) -> dict:
+        """Anota en un cliente su contrato de Wispro (y lo que le falte: abonado, ONT,
+        dirección; lo que se completó queda anotado, para deshacerlo). Un contrato va
+        con un solo cliente, y un cliente con un solo contrato de los que siguen en
+        Wispro (vigentes): si no, 409."""
+        cid = item["id"].lower()
+        self.begin()
+        try:
+            row = self.get_element(element_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese cliente ya no existe: lo borró otro usuario.")
+            datos = datos_de(row)
+            antes = str(datos.get("wispro_contrato") or "").lower()
+            if antes and antes != cid and antes in vigentes:
+                raise ApiError(HTTPStatus.CONFLICT, f"{row['nombre'] or 'Este cliente'} ya está vinculado con otro contrato de "
+                               "Wispro. Si ese no es el suyo, primero tocá «No es su contrato» en su ficha.")
+            for otro in self.clientes_red(row["red_id"]):
+                if otro["id"] != element_id and str(datos_de(otro).get("wispro_contrato") or "").lower() == cid:
+                    nombre = otro["nombre"] or "otro cliente"
+                    raise ApiError(HTTPStatus.CONFLICT, f"Ese contrato ya está vinculado con {nombre}. Si no es ese, primero "
+                                   f"tocá «No es su contrato» en la ficha de {nombre}.")
+            llenados = []
+            if item["numero"] is not None and str(datos.get("contrato") or "").strip().lstrip("#").strip() != str(item["numero"]):
+                datos["contrato"] = str(item["numero"])
+                llenados.append("contrato")
+            for k, valor in (("abonado", item["cliente_numero"]), ("ont", item["sn"]), ("direccion", item["direccion"])):
+                if valor not in (None, "") and not datos.get(k):
+                    datos[k] = str(valor)
+                    llenados.append(k)
+            previos = [k for k in str(datos.get("wispro_llenados") or "").split(",") if k] if antes == cid else []
+            datos["wispro_llenados"] = ",".join(dict.fromkeys(previos + llenados))
+            datos["wispro_contrato"] = item["id"]
+            datos["wispro_no"] = ",".join(u for u in lista_uuid(datos.get("wispro_no")) if u != cid)
+            return self._guardar_datos(row, datos, usuario)
+        except Exception:
+            self.rollback()
+            raise
+
+    def desvincular_cliente(self, element_id: int, contrato_id: str, item, usuario: str, deshacer: bool = False) -> dict:
+        """El cliente no es el de ese contrato: se quita el vínculo y lo que el vínculo
+        había completado (si sigue igual), y se anota para no volver a proponerlo.
+        Con deshacer=True solo se borra esa anotación (un «No es» tocado sin querer)."""
+        cid = contrato_id.lower()
+        self.begin()
+        try:
+            row = self.get_element(element_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ese cliente ya no existe: lo borró otro usuario.")
+            datos = datos_de(row)
+            if deshacer:
+                datos["wispro_no"] = ",".join(u for u in lista_uuid(datos.get("wispro_no")) if u != cid)
+                return self._guardar_datos(row, datos, usuario)
+            if str(datos.get("wispro_contrato") or "").lower() == cid:
+                valores = {} if item is None else {"contrato": item["numero"], "abonado": item["cliente_numero"],
+                                                   "ont": item["sn"], "direccion": item["direccion"],
+                                                   "nap_puerto": datos.get("nap_puerto")}
+                for k in str(datos.get("wispro_llenados") or "").split(","):
+                    if k in valores and valores[k] not in (None, "") and str(datos.get(k) or "") == str(valores[k]):
+                        datos.pop(k, None)
+                datos.pop("wispro_contrato", None)
+                datos.pop("wispro_llenados", None)
+            no = [u for u in lista_uuid(datos.get("wispro_no")) if u != cid] + [cid]
+            datos["wispro_no"] = ",".join(no[-10:])
+            return self._guardar_datos(row, datos, usuario)
+        except Exception:
+            self.rollback()
+            raise
+
+    def _guardar_datos(self, row, datos: dict, usuario: str) -> dict:
+        """Guarda los datos de un elemento dentro de la transacción abierta y la cierra."""
+        datos = datos_field({"datos": datos})
+        v = self.next_version()
+        t = now_iso()
+        self.conn().execute(
+            "UPDATE elementos SET datos = ?, modificado = ?, modificado_por = ?, version = ? WHERE id = ?",
+            (json.dumps(datos, ensure_ascii=False), t, usuario, v, row["id"]))
+        self.log_change(row["red_id"], usuario, "editar", "elementos", row["id"],
+                        {"tipo": row["tipo"], "nombre": row["nombre"], "antes": self.element_feature(row), "origen": "wispro"})
+        out = {"elemento": self.element_feature(self.get_element(row["id"])), "version": v}
+        self.commit()
+        return out
+
+    def clientes_red(self, red_id: int):
+        """Los clientes de una red, para cruzarlos con los contratos de Wispro."""
+        return self.conn().execute(
+            "SELECT id, nombre, lon, lat, datos FROM elementos WHERE red_id = ? AND tipo = 'cliente' AND borrado IS NULL",
+            (red_id,),
+        ).fetchall()
 
     def _check_new_type(self, row, tipo: str):
         """Un elemento con carta de empalme no puede pasar a ser de un tipo que no la tiene."""
@@ -1622,11 +1771,1253 @@ def ids_field(data: dict) -> list:
     return out
 
 
+# --------------------------------------------------------------- integraciones
+#
+# Wispro (el sistema de gestión del ISP) y el panel de la OLT (SmartOLT libre):
+# traza solo los lee. Cada red puede tener los suyos en integraciones.json, junto
+# a la base y con permisos 600, así el token de Wispro nunca pasa por el visor:
+#   {"redes": {"1": {"wispro": {"token": "…"},
+#                    "panel": {"url": "http://10.10.0.230:8080", "olts": [1]}}}}
+# Lo leído se guarda un rato en memoria (VIVE_*) para no pedirlo en cada ficha.
+
+WISPRO_URL = "https://www.cloud.wispro.co/api/v1"
+UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+SN_EN_TEXTO = re.compile(r"(?<![0-9A-Za-z])([0-9A-Fa-f]{8}[-\s]?[0-9A-Fa-f]{8}|[A-Za-z]{4}[-\s]?[0-9A-Fa-f]{8})(?![0-9A-Za-z])")
+VIVE_WISPRO = 300  # s: NAPs, contratos y clientes de Wispro
+VIVE_PANEL = 60  # s: ONTs del panel (el panel las lee cada 2 minutos)
+VIVE_HISTORIA = 300  # s: serie y eventos de una ONT
+VIVE_EN_VIVO = 60  # s: una medición en vivo por Wispro no se repite antes
+MUESTRA_EN_VIVO = 900  # s: y se sigue mostrando hasta este tiempo
+VIVE_FALLA = 30  # s: después de una falla no se reintenta enseguida (no hace esperar a cada ficha)
+REFRESCO_MINIMO = 15  # s: "Actualizar" no vuelve a pedir lo que se trajo hace menos
+ESPERA_WISPRO, TOTAL_WISPRO = 20, 30  # s: por cada lectura del socket y por pedido completo
+ESPERA_PANEL, TOTAL_PANEL = 8, 12
+PLAZO_DATOS = 35  # s que un pedido del visor espera a Wispro y al panel (nginx corta a los 60)
+PLAZO_HISTORIA = 8  # s para la historia de las ONTs de una caja; lo que no llega, se ve después
+PLAZO_MEDIR = 40  # s para las mediciones en vivo de una caja (contando lo que tardó leer Wispro)
+VIVE_ACCION = 1800  # s: medir, agregar o vincular usan la última lectura de Wispro si es de hace menos
+MAX_CONTRATOS_NAP = 128
+MAX_EN_VIVO = 64
+MAX_PAGINAS = 100
+CERCA_M = 300  # un cliente de traza y un contrato con el mismo nombre, a lo sumo a esta distancia
+NUMERO_CERCA_M = 2000  # un cliente con el número de un contrato o de abonado, a lo sumo a esta distancia
+CANDIDATAS_M = 1500  # NAPs de Wispro que se ofrecen para vincular una caja, hasta esta distancia
+LEJOS_CAJA_M = 2000  # un contrato ubicado más lejos que esto de su caja no se agrega al mapa
+ESTADOS_WISPRO = {"enabled": "activo", "alerted": "activo", "degraded": "activo", "disabled": "instalado"}
+
+# Las lecturas de Wispro y del panel corren en estos hilos: un pedido del visor las
+# espera un plazo y, si no llegan, responde con lo que tiene; la lectura sigue y
+# queda para el próximo pedido.
+_HILOS = ThreadPoolExecutor(max_workers=24, thread_name_prefix="integracion")
+# Las colecciones de Wispro van en hilos aparte: una lectura que corre en _HILOS no
+# espera nunca a tareas de su mismo grupo, así no se traba con mucha carga.
+_HILOS_WISPRO = ThreadPoolExecutor(max_workers=8, thread_name_prefix="integracion-wispro")
+
+
+class IntegracionError(Exception):
+    """Una falla al leer Wispro o el panel, con un mensaje para el usuario."""
+
+    def __init__(self, message: str, codigo: int = None):
+        super().__init__(message)
+        self.codigo = codigo
+
+
+def normalizado(texto) -> str:
+    """Minúsculas y sin tildes."""
+    s = unicodedata.normalize("NFD", str(texto or ""))
+    return "".join(c for c in s if unicodedata.category(c) != "Mn").lower().strip()
+
+
+def palabras(texto) -> set:
+    """Las palabras de un nombre que sirven para compararlo (sin 'de', 'la'…)."""
+    return {p for p in re.split(r"[^a-z0-9]+", normalizado(texto)) if len(p) >= 3}
+
+
+def parecido(a: set, b: set) -> float:
+    """Qué parte del nombre más corto está en el otro (de 0 a 1)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def mismo_nombre(a: set, b: set) -> bool:
+    return parecido(a, b) >= 0.75 and len(a & b) >= min(2, len(a), len(b))
+
+
+def clave_caja(nombre) -> str:
+    """'NAP-031', 'nap 31' y 'Nap31' son la misma caja ('NAP31'). Entre dos números
+    el separador cuenta: 'NAP 1-2' ('NAP1-2') no es 'NAP12'."""
+    partes = re.findall(r"[A-Z]+|\d+", normalizado(nombre).upper())
+    out = ""
+    for i, p in enumerate(partes):
+        if p.isdigit():
+            if i and partes[i - 1].isdigit():
+                out += "-"
+            p = str(int(p))
+        out += p
+    return out
+
+
+def sn_canonico(valor):
+    """El número de serie de una ONT en una sola forma, 'HWTC90BCF28A'. Acepta el
+    hexadecimal de 16 cifras ('4857544390BCF28A', como lo da la OLT) y el de
+    fabricante y 8 cifras ('HWTC-90BCF28A')."""
+    if valor in (None, ""):
+        return None
+    t = re.sub(r"[^0-9A-Za-z]", "", str(valor)).upper()
+    if re.fullmatch(r"[0-9A-F]{16}", t):
+        try:
+            fabricante = bytes.fromhex(t[:8]).decode("ascii")
+        except (ValueError, UnicodeDecodeError):
+            fabricante = ""
+        return fabricante + t[8:] if re.fullmatch(r"[A-Z0-9]{4}", fabricante) else t
+    return t if 8 <= len(t) <= 32 else None
+
+
+def sns_en_texto(texto) -> list:
+    """Los números de serie que aparecen en un texto libre ('HG8145V5 · 48575443…')."""
+    return [s for s in (sn_canonico(m) for m in SN_EN_TEXTO.findall(str(texto or ""))) if s]
+
+
+def numero_de_descripcion(texto):
+    """'#394 Gómez Ana' -> 394: el número de contrato con que Wispro describe la ONT."""
+    m = re.match(r"\s*#\s*(\d{1,9})(?!\d)", str(texto or ""))
+    return int(m.group(1)) if m else None
+
+
+def numero(valor):
+    """'-27.69' -> -27.69; '-', '' o cualquier otra cosa -> None."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    try:
+        n = float(str(valor).strip().replace(",", "."))
+    except ValueError:
+        return None
+    return n if math.isfinite(n) else None
+
+
+def interfaz_pon(valor):
+    """'0/19/3' o 'GPON 0/19/3:5' -> '0/19/3' (marco, placa y puerto)."""
+    partes = re.findall(r"\d+", str(valor or ""))
+    return "/".join(str(int(p)) for p in partes[:3]) if len(partes) >= 3 else None
+
+
+def ubicacion(lat, lon):
+    """[lon, lat] si son coordenadas que sirven (no 0,0), si no None."""
+    la, lo = numero(lat), numero(lon)
+    if la is None or lo is None or (abs(la) < 1e-6 and abs(lo) < 1e-6) or not (-85 <= la <= 85 and -180 <= lo <= 180):
+        return None
+    return [round(lo, 7), round(la, 7)]
+
+
+def texto_corto(valor, limite: int):
+    s = str(valor or "").strip()
+    return s[:limite] or None
+
+
+def hace_texto(iso) -> str:
+    """'hace 7 min', 'hace 3 h', 'hace 8 días'."""
+    horas = horas_desde(iso)
+    if horas is None:
+        return "antes"
+    if horas < 1 / 60:
+        return "recién"
+    if horas < 1:
+        return f"hace {round(horas * 60)} min"
+    if horas < 48:
+        return f"hace {round(horas)} h"
+    return f"hace {round(horas / 24)} días"
+
+
+def motivo_de(err) -> str:
+    """Una falla de red, en palabras."""
+    r = getattr(err, "reason", None) or err
+    if isinstance(r, (TimeoutError, socket.timeout)) or "timed out" in str(r):
+        return "no respondió a tiempo"
+    if isinstance(r, ConnectionRefusedError):
+        return "rechazó la conexión (¿está andando?)"
+    if isinstance(r, socket.gaierror):
+        return "no se encontró su dirección"
+    if isinstance(r, ssl.SSLError):
+        return "hubo un problema con su certificado HTTPS"
+    if isinstance(r, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.HTTPException)):
+        return "cortó la conexión"
+    if isinstance(r, OSError) and r.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+        return "no se llega a su dirección"
+    return "no responde"
+
+
+class _SinRedireccion(urllib.request.HTTPRedirectHandler):
+    """Una redirección no se sigue: podría llevar el token de Wispro a otro lado."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_ABRIDOR = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SinRedireccion)
+
+
+def pedir_json(url: str, cabeceras: dict = None, espera: float = 10, total: float = 20,
+               limite: int = 48 * 1024 * 1024):
+    """GET de un JSON, con `espera` segundos por lectura y `total` para todo el
+    pedido. Devuelve (estado HTTP, datos) o lanza IntegracionError."""
+    fin = time.monotonic() + total
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "traza-ftth",
+                                               **(cabeceras or {})})
+    try:
+        with _ABRIDOR.open(req, timeout=espera) as res:
+            estado = res.status
+            partes, tam = [], 0
+            while True:
+                if time.monotonic() > fin:
+                    raise IntegracionError("no respondió a tiempo")
+                parte = res.read1(65536)
+                if not parte:
+                    break
+                tam += len(parte)
+                if tam > limite:
+                    raise IntegracionError("respondió algo demasiado grande")
+                partes.append(parte)
+            cuerpo = b"".join(partes)
+    except urllib.error.HTTPError as err:
+        estado = err.code
+        try:
+            cuerpo = err.read(256 * 1024)
+        except (OSError, http.client.HTTPException):
+            cuerpo = b""
+    except IntegracionError:
+        raise
+    except (OSError, http.client.HTTPException, ValueError) as err:
+        raise IntegracionError(motivo_de(err)) from None
+    try:
+        return estado, json.loads(cuerpo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        if estado != 200:
+            raise IntegracionError(f"respondió {estado}", estado) from None
+        raise IntegracionError("respondió algo que no es JSON") from None
+
+
+class Wispro:
+    """La API pública de Wispro. Responde 200 aun con errores (el estado real va
+    en el cuerpo) y entrega las colecciones de a páginas."""
+
+    def __init__(self, token: str, url: str = WISPRO_URL):
+        self.token = token
+        self.url = (url or WISPRO_URL).rstrip("/")
+
+    def get(self, ruta: str, **params) -> dict:
+        consulta = urlencode(params)
+        estado, data = pedir_json(f"{self.url}{ruta}{'?' + consulta if consulta else ''}",
+                                  {"Authorization": self.token}, ESPERA_WISPRO, TOTAL_WISPRO)
+        real = data.get("status") if isinstance(data, dict) and isinstance(data.get("status"), int) else estado
+        if 401 in (estado, real):
+            raise IntegracionError("no aceptó el token", 401)
+        if estado != 200 or real != 200:
+            detalle = ""
+            if isinstance(data, dict):
+                errores = data.get("errors")
+                if isinstance(errores, dict):
+                    detalle = "; ".join(str(x) for v in errores.values() for x in (v if isinstance(v, list) else [v]))
+                detalle = detalle or str(data.get("message") or "")
+            raise IntegracionError(f"respondió {real}" + (f": {detalle[:200]}" if detalle else ""), real)
+        if not isinstance(data, dict):
+            raise IntegracionError("respondió algo inesperado")
+        return data
+
+    def todo(self, ruta: str) -> list:
+        """Una colección completa, página por página."""
+        out = []
+        for pagina in range(1, MAX_PAGINAS + 1):
+            data = self.get(ruta, page=pagina, per_page=1000)
+            items = data.get("data")
+            if not isinstance(items, list):
+                raise IntegracionError("respondió algo inesperado")
+            out.extend(x for x in items if isinstance(x, dict))
+            total = ((data.get("meta") or {}).get("pagination") or {}).get("total_pages")
+            if not items or not isinstance(total, int) or pagina >= total:
+                return out
+        log.warning("Wispro %s: más de %d páginas, se leyeron las primeras", ruta, MAX_PAGINAS)
+        return out
+
+    def total(self, ruta: str):
+        """Cuántos hay en una colección, sin traerla."""
+        data = self.get(ruta, page=1, per_page=1)
+        return ((data.get("meta") or {}).get("pagination") or {}).get("total_records")
+
+    def estado_ont(self, contrato_id: str) -> dict:
+        """La ONT de un contrato, que Wispro lee en ese momento de la OLT."""
+        try:
+            data = self.get(f"/contracts/{contrato_id}/status_ont")
+        except IntegracionError as err:
+            if err.codigo in (400, 404, 412, 422):
+                texto = str(err)
+                if "blanco" in texto or "not found" in texto.lower():
+                    return {"error": "sin ONT vinculada en Wispro"}
+                return {"error": texto}
+            raise
+        anidado = data.get("data") if isinstance(data.get("data"), dict) else {}
+        for cand in (data.get("olt"), anidado.get("olt"), anidado, data):
+            if isinstance(cand, dict) and ("rx_power" in cand or "serial_number" in cand):
+                return medida_wispro(cand)
+        return {"error": "Wispro no devolvió la potencia"}
+
+
+class Panel:
+    """El panel de la OLT (SmartOLT libre): las ONTs con su última lectura, la
+    historia de cada una y los umbrales."""
+
+    def __init__(self, url: str, olts=None):
+        self.url = url.rstrip("/")
+        lista = olts if isinstance(olts, list) else [olts] if olts is not None else []
+        self.olts_red = [int(x) for x in lista
+                         if (isinstance(x, int) and not isinstance(x, bool)) or (isinstance(x, str) and x.isdigit())]
+
+    def get(self, ruta: str, **params):
+        consulta = urlencode(params)
+        estado, data = pedir_json(f"{self.url}{ruta}{'?' + consulta if consulta else ''}", None, ESPERA_PANEL, TOTAL_PANEL)
+        if estado != 200:
+            raise IntegracionError(f"respondió {estado}", estado)
+        return data
+
+    def olts(self) -> list:
+        data = self.get("/api/olts")
+        return [o for o in (data if isinstance(data, list) else []) if isinstance(o, dict)]
+
+    def onts(self, olt_id: int) -> list:
+        """Todas las ONTs de una OLT. Se pide de a 500 hasta que no vengan nuevas
+        (sirve aunque el panel entregue menos por página o ignore el desplazamiento)."""
+        out, vistas, desde = [], set(), 0
+        for _ in range(MAX_PAGINAS):
+            data = self.get(f"/api/olts/{olt_id}/onts", limit=500, offset=desde)
+            items = data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else None)
+            if not isinstance(items, list):
+                raise IntegracionError("respondió algo inesperado")
+            nuevas = [x for x in items if isinstance(x, dict) and (x.get("id"), x.get("sn")) not in vistas]
+            if not nuevas:
+                break
+            vistas.update((x.get("id"), x.get("sn")) for x in nuevas)
+            out.extend(nuevas)
+            desde += len(items)
+        return out
+
+    def historia(self, ont_id: int) -> dict:
+        serie = self.get(f"/api/onts/{ont_id}/series", hours=168, buckets=42)
+        eventos = self.get(f"/api/onts/{ont_id}/events", limit=20)
+        return {"tendencia": tendencia_panel(serie), "eventos": eventos_panel(eventos)}
+
+    def umbrales(self):
+        data = self.get("/api/thresholds")
+        return data if isinstance(data, dict) else None
+
+
+def medida_panel(ont: dict, olt_nombre=None) -> dict:
+    """Lo que el panel sabe de una ONT, como lo usa traza."""
+    slot, port = ont.get("slot"), ont.get("port")
+    marco = ont.get("frame") if isinstance(ont.get("frame"), int) else 0
+    ok = all(isinstance(x, int) and not isinstance(x, bool) for x in (slot, port))
+    return {
+        "fuente": "panel",
+        "panel_id": ont.get("id") if isinstance(ont.get("id"), int) else None,
+        "olt": texto_corto(olt_nombre, 80),
+        "sn": sn_canonico(ont.get("sn")),
+        "interfaz": f"{marco}/{slot}/{port}" if ok else None,
+        "ont_id": ont.get("ont_id") if isinstance(ont.get("ont_id"), int) else None,
+        "estado": texto_corto(ont.get("run_state"), 30),
+        "rx": numero(ont.get("rx_power_dbm")),
+        "tx": numero(ont.get("tx_power_dbm")),
+        "rx_estado": texto_corto(ont.get("rx_status"), 30),
+        "cuando": texto_corto(ont.get("last_seen"), 40),
+        "ultima_caida": texto_corto(ont.get("last_down_time"), 40),
+        "causa": texto_corto(ont.get("last_down_cause"), 60),
+        "tecnologia": texto_corto(ont.get("technology"), 40),
+    }
+
+
+def medida_wispro(o: dict) -> dict:
+    return {
+        "fuente": "wispro",
+        "sn": sn_canonico(o.get("serial_number")),
+        "interfaz": interfaz_pon(o.get("ont_interface")),
+        "rx": numero(o.get("rx_power")),
+        "tx": numero(o.get("tx_power")),
+        "temperatura": numero(o.get("temperature")),
+        "rx_estado": texto_corto(o.get("status_rx_power"), 30),
+        "cuando": now_iso(),
+    }
+
+
+def tendencia_panel(serie):
+    t = serie.get("trend") if isinstance(serie, dict) else None
+    if not isinstance(t, dict):
+        return None
+    muestras = t.get("samples") if isinstance(t.get("samples"), int) else None
+    return {"muestras": muestras, "rx_min": numero(t.get("rx_min")), "rx_max": numero(t.get("rx_max")),
+            "rx_prom": numero(t.get("rx_avg")), "db_semana": numero(t.get("rx_db_per_week")),
+            "desde": texto_corto(t.get("first_at"), 40), "hasta": texto_corto(t.get("last_at"), 40)}
+
+
+def eventos_panel(eventos) -> list:
+    out = []
+    for e in eventos if isinstance(eventos, list) else []:
+        if not isinstance(e, dict):
+            continue
+        det = e.get("details") if isinstance(e.get("details"), dict) else {}
+        out.append({"cuando": texto_corto(e.get("occurred_at"), 40), "tipo": texto_corto(e.get("event_type"), 40),
+                    "causa": texto_corto(det.get("cause") or det.get("reason") or det.get("down_cause"), 60)})
+    return out[:20]
+
+
+class DatosWispro:
+    """Una lectura completa de Wispro (NAPs, contratos, clientes y OLTs), con índices."""
+
+    def __init__(self, naps: list, contratos: list, clientes: list, olts: list):
+        self.cuando = now_iso()
+        self.naps = naps
+        self.naps_por_id = {n.get("id"): n for n in naps}
+        self.contratos = contratos
+        self.por_nap, self.por_id, self.por_sn, self.por_numero, self.por_cliente = {}, {}, {}, {}, {}
+        self.clientes = {c.get("id"): c for c in clientes}
+        for c in contratos:
+            self.por_nap.setdefault(c.get("nap_id"), []).append(c)
+            self.por_id[c.get("id")] = c
+            sn = sn_canonico(c.get("ont_serial_number"))
+            if sn:
+                self.por_sn.setdefault(sn, []).append(c)
+            if c.get("public_id") is not None:
+                self.por_numero.setdefault(str(c["public_id"]), []).append(c)
+            numero_cliente = (self.clientes.get(c.get("client_id")) or {}).get("public_id")
+            if numero_cliente is not None:
+                self.por_cliente.setdefault(str(numero_cliente), []).append(c)
+        self.olts = {o.get("id"): o for o in olts}
+
+    def nap(self, n: dict, distancia=None, por=None) -> dict:
+        olt = self.olts.get(n.get("olt_id")) or {}
+        fbp = n.get("fbp")
+        return {
+            "id": n.get("id"),
+            "nombre": texto_corto(n.get("name"), 80) or "",
+            "capacidad": n.get("capacity") if isinstance(n.get("capacity"), int) else None,
+            "contratos": len(self.por_nap.get(n.get("id"), [])),
+            "fbp": interfaz_pon(fbp) or texto_corto(fbp, 20),
+            "olt": texto_corto(olt.get("name"), 80),
+            "ubicacion": ubicacion(n.get("latitude"), n.get("longitude")),
+            "distancia_m": round(distancia) if distancia is not None else None,
+            "por": por,
+        }
+
+    def contrato(self, c: dict) -> dict:
+        cli = self.clientes.get(c.get("client_id")) or {}
+        calle = " ".join(str(x).strip() for x in (c.get("address_street"), c.get("address_number")) if x not in (None, ""))
+        if not calle:
+            calle = " ".join(str(x).strip() for x in (cli.get("street"), cli.get("number")) if x not in (None, ""))
+        return {
+            "id": c.get("id"),
+            "numero": c.get("public_id") if isinstance(c.get("public_id"), int) else None,
+            "estado": texto_corto(c.get("state"), 20),
+            "cliente": texto_corto(cli.get("name"), 120) or "",
+            "cliente_numero": cli.get("public_id") if isinstance(cli.get("public_id"), int) else None,
+            "direccion": texto_corto(calle or cli.get("address"), 200),
+            "ubicacion": ubicacion(c.get("latitude"), c.get("longitude")) or ubicacion(cli.get("latitude"), cli.get("longitude")),
+            "sn": sn_canonico(c.get("ont_serial_number")),
+            "interfaz": interfaz_pon(c.get("interface_gpon")),
+            "nap": c.get("nap_id"),
+        }
+
+
+class DatosPanel:
+    """Una lectura de las ONTs del panel, con índices por número de serie y por
+    el número de contrato de su descripción."""
+
+    def __init__(self, olts: list, onts_por_olt: dict, umbrales):
+        self.cuando = now_iso()
+        nombres = {o.get("id"): o.get("name") for o in olts}
+        self.olts = [texto_corto(nombres.get(i), 80) or f"OLT {i}" for i in onts_por_olt]
+        self.umbrales = umbrales
+        por_sn, self.por_numero = {}, {}
+        leidas = []
+        for olt_id, onts in onts_por_olt.items():
+            for ont in onts:
+                m = medida_panel(ont, nombres.get(olt_id))
+                if m["sn"]:
+                    por_sn.setdefault(m["sn"], []).append(m)
+                n = numero_de_descripcion(ont.get("description"))
+                if n is not None:
+                    self.por_numero.setdefault(n, []).append(m)
+                if m["cuando"]:
+                    leidas.append(m["cuando"])
+        # Un número de serie repetido (un registro viejo que quedó al mover la ONT de
+        # puerto): vale el que está en línea o, si no, el visto último.
+        self.por_sn = {sn: max(lista, key=lambda m: (m["estado"] == "online", m["cuando"] or ""))
+                       for sn, lista in por_sn.items()}
+        self.leido = max(leidas) if leidas else None
+        self.total = sum(len(v) for v in onts_por_olt.values())
+
+    def ont(self, sn=None, numero_contrato=None, sns_ajenos=()):
+        """La ONT de un contrato: por su número de serie o, si el contrato no lo
+        tiene, por el número de contrato con que empieza la descripción (salvo
+        que la serie de esa ONT sea la de otro contrato)."""
+        if sn:
+            m = self.por_sn.get(sn)
+            return (m, "sn") if m else (None, None)
+        lista = [m for m in self.por_numero.get(numero_contrato, []) if not (m["sn"] and m["sn"] in sns_ajenos)]
+        return (lista[0], "numero") if len(lista) == 1 else (None, None)
+
+
+def lista_uuid(texto) -> list:
+    """Contratos de Wispro anotados en datos como texto ("uuid,uuid")."""
+    return [u.lower() for u in UUID.findall(str(texto or ""))]
+
+
+def datos_de(row) -> dict:
+    """Los datos de un elemento leído de la base (un objeto, aunque estén mal)."""
+    try:
+        d = json.loads(row["datos"] or "{}")
+    except ValueError:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+class ClientesTraza:
+    """Los clientes de una red de traza, con índices para encontrar el de cada contrato."""
+
+    CELDA = 0.003  # grados, para buscar por cercanía
+
+    def __init__(self, rows):
+        self.por_uuid, self.por_sn, self.por_contrato, self.por_abonado = {}, {}, {}, {}
+        self.todos, self.grilla = [], {}
+        for r in rows:
+            d = datos_de(r)
+            # "no": contratos que alguien dijo que no son de este cliente.
+            ref = {"id": r["id"], "nombre": r["nombre"], "lonlat": [r["lon"], r["lat"]], "palabras": palabras(r["nombre"]),
+                   "no": set(lista_uuid(d.get("wispro_no")))}
+            u = d.get("wispro_contrato")
+            if isinstance(u, str) and UUID.fullmatch(u):
+                self.por_uuid.setdefault(u.lower(), []).append(ref)
+            for sn in set(sns_en_texto(d.get("ont"))):
+                self.por_sn.setdefault(sn, []).append(ref)
+            for campo, indice in (("contrato", self.por_contrato), ("abonado", self.por_abonado)):
+                v = str(d.get(campo) or "").strip().lstrip("#").strip()
+                if v:
+                    indice.setdefault(v, []).append(ref)
+            self.todos.append(ref)
+            self.grilla.setdefault(self._celda(r["lon"], r["lat"]), []).append(ref)
+
+    def _celda(self, lon, lat):
+        return (math.floor(lat / self.CELDA), math.floor(lon / self.CELDA))
+
+    def cerca(self, lonlat, radio: float) -> list:
+        lon, lat = lonlat
+        nlat = math.ceil(radio / (111000 * self.CELDA))
+        nlon = math.ceil(radio / (111000 * max(0.1, math.cos(math.radians(lat))) * self.CELDA))
+        fila, col = self._celda(lon, lat)
+        out = []
+        for i in range(fila - nlat, fila + nlat + 1):
+            for j in range(col - nlon, col + nlon + 1):
+                out.extend(r for r in self.grilla.get((i, j), []) if haversine_m(r["lonlat"], lonlat) <= radio)
+        return out
+
+
+class Cruce:
+    """Qué cliente de traza corresponde a cada contrato de Wispro, en toda la red.
+    Los criterios van en orden: vinculado a mano, la ONT, el número de contrato,
+    el de abonado (si ese cliente de Wispro tiene un solo contrato) y el nombre
+    cerca. Un criterio asigna solo si de los dos lados hay una única coincidencia.
+    Varios clientes de traza con el mismo vínculo, ONT o contrato (aunque se los
+    haya encontrado por criterios distintos) quedan como repetidos; los que
+    coinciden en algo sin poder asignarse (un número lejos, un nombre que tienen
+    dos), como dudosos: hay que confirmarlos, y mientras tanto ese contrato no se
+    agrega al mapa. Un cliente nunca se cruza con un contrato del que alguien dijo
+    "no es este" (wispro_no). La vista de la caja, la del cliente, agregar al mapa
+    y el comando probar usan este mismo cruce."""
+
+    FUERTES = ("vinculado", "ont", "contrato")
+    CRITERIOS = ("vinculado", "ont", "contrato", "abonado", "nombre")
+
+    def __init__(self, dw: DatosWispro, rows):
+        self.dw = dw
+        self.traza = ClientesTraza(rows)
+        self.items = {c.get("id"): dw.contrato(c) for c in dw.contratos if c.get("id")}
+        self.lugar_nap = {n.get("id"): ubicacion(n.get("latitude"), n.get("longitude")) for n in dw.naps}
+        self.de_contrato = {}  # id de contrato -> {"id", "nombre", "por"} | {"repetidos": […], "por"} | {"dudosos": […]}
+        self.de_cliente = {}  # id de cliente de traza -> (id de contrato, por)
+        self.dudas_de_cliente = {}  # id de cliente de traza -> [ids de contrato]
+        usados = set()
+        for criterio in self.CRITERIOS:
+            candidatos = {}
+            for cid, item in self.items.items():
+                if cid in self.de_contrato:
+                    continue
+                refs = list({r["id"]: r for r in self._candidatos(criterio, item) if r["id"] not in usados}.values())
+                if refs:
+                    candidatos[cid] = refs
+            pedidos = {}
+            for cid, refs in candidatos.items():
+                for r in refs:
+                    pedidos.setdefault(r["id"], []).append(cid)
+            for cid, refs in candidatos.items():
+                if any(len(pedidos[r["id"]]) > 1 for r in refs):
+                    continue  # un cliente de traza que pide más de un contrato: ambiguo
+                if len(refs) == 1:
+                    self.de_contrato[cid] = {"id": refs[0]["id"], "nombre": refs[0]["nombre"], "por": criterio}
+                elif criterio in self.FUERTES:
+                    self.de_contrato[cid] = {"repetidos": [{"id": r["id"], "nombre": r["nombre"]} for r in refs],
+                                             "por": criterio}
+                else:
+                    continue
+                for r in refs:
+                    self.de_cliente[r["id"]] = (cid, criterio)
+                    usados.add(r["id"])
+        # Un cliente con el vínculo, la ONT o el número de un contrato que ya tiene el
+        # suyo (encontrado por otro criterio) es el mismo cliente dibujado dos veces.
+        for cid, asignado in list(self.de_contrato.items()):
+            extra = {}
+            for criterio in self.FUERTES:
+                for r in self._candidatos(criterio, self.items[cid]):
+                    if r["id"] not in usados and r["id"] not in extra:
+                        extra[r["id"]] = (r, criterio)
+            if not extra:
+                continue
+            if "repetidos" in asignado:
+                ya, por = asignado["repetidos"], asignado["por"]
+            else:
+                ya, por = [{"id": asignado["id"], "nombre": asignado["nombre"]}], next(iter(extra.values()))[1]
+            self.de_contrato[cid] = {"repetidos": ya + [{"id": r["id"], "nombre": r["nombre"]} for r, _ in extra.values()],
+                                     "por": por}
+            for rid, (_, criterio) in extra.items():
+                self.de_cliente[rid] = (cid, criterio)
+                usados.add(rid)
+        # Lo que no se pudo asignar pero tiene un cliente de traza con su vínculo, su
+        # ONT, su número (aunque esté lejos) o su nombre cerca: queda para confirmar.
+        for cid, item in self.items.items():
+            if cid in self.de_contrato:
+                continue
+            refs = {}
+            for criterio in self.CRITERIOS:
+                for r in self._candidatos(criterio, item, todos=True):
+                    if r["id"] not in usados and r["id"] not in refs:
+                        duda = {"id": r["id"], "nombre": r["nombre"], "por": criterio}
+                        d = self._distancia(r, item)
+                        if d is not None and d > NUMERO_CERCA_M:
+                            duda["lejos_m"] = round(d)
+                        refs[r["id"]] = duda
+            if refs:
+                self.de_contrato[cid] = {"dudosos": list(refs.values())}
+                for rid in refs:
+                    self.dudas_de_cliente.setdefault(rid, []).append(cid)
+
+    def _lugares(self, item) -> list:
+        """Dónde debería estar el cliente de un contrato: su ubicación en Wispro y la
+        de su NAP (si la del contrato está mal cargada, la de la NAP sirve igual)."""
+        out = [item["ubicacion"]] if item["ubicacion"] else []
+        u = self.lugar_nap.get(item["nap"])
+        if u:
+            out.append(u)
+        return out
+
+    def _distancia(self, ref, item):
+        lugares = self._lugares(item)
+        return min(haversine_m(ref["lonlat"], u) for u in lugares) if lugares else None
+
+    def _plausible(self, ref, item, pedir_nombre: bool) -> bool:
+        """Un número coincide de casualidad seguido (los de contrato y los de cliente
+        van por separado): vale si el cliente está cerca del contrato o de su NAP, o,
+        sin ubicaciones, si se parecen los nombres."""
+        d = self._distancia(ref, item)
+        if d is not None:
+            return d <= NUMERO_CERCA_M
+        return not pedir_nombre or bool(palabras(item["cliente"]) & ref["palabras"])
+
+    def _candidatos(self, criterio: str, item: dict, todos: bool = False) -> list:
+        """Los clientes de traza que coinciden con un contrato por un criterio. Con
+        todos=True (para los dudosos), también los números lejos y los clientes de
+        Wispro con varios contratos. Un «No es» descarta lo dudoso (el abonado, el
+        nombre, un número lejos), no lo que coincide de verdad: la ONT o el número de
+        contrato cerca, que el técnico anotó (si no es, se corrige el dato)."""
+        refs = self._coinciden(criterio, item, todos)
+        if criterio in ("vinculado", "ont"):
+            return refs
+        no = str(item["id"] or "").lower()
+        if criterio == "contrato":
+            return [r for r in refs if no not in r["no"] or self._plausible(r, item, False)]
+        return [r for r in refs if no not in r["no"]]
+
+    def coincidencias(self, cliente_id) -> list:
+        """Los contratos con los que coincide algún dato de un cliente del mapa (aunque
+        sean de otro cliente o se hayan descartado), con el primer criterio que coincide:
+        [(id de contrato, criterio)]. Para explicar en su ficha por qué no se le asignó."""
+        out = []
+        for cid, item in self.items.items():
+            for criterio in self.CRITERIOS:
+                if any(r["id"] == cliente_id for r in self._coinciden(criterio, item, True)):
+                    out.append((cid, criterio))
+                    break
+        return out
+
+    def _coinciden(self, criterio: str, item: dict, todos: bool) -> list:
+        t = self.traza
+        if criterio == "vinculado":
+            return t.por_uuid.get(str(item["id"] or "").lower(), [])
+        if criterio == "ont":
+            return t.por_sn.get(item["sn"], []) if item["sn"] else []
+        if criterio == "contrato":
+            refs = t.por_contrato.get(str(item["numero"]), []) if item["numero"] is not None else []
+            return refs if todos else [r for r in refs if self._plausible(r, item, False)]
+        if criterio == "abonado":
+            n = item["cliente_numero"]
+            if n is None or (not todos and len(self.dw.por_cliente.get(str(n), [])) != 1):
+                return []
+            refs = t.por_abonado.get(str(n), [])
+            return refs if todos else [r for r in refs if self._plausible(r, item, True)]
+        if not item["cliente"]:
+            return []
+        pal = palabras(item["cliente"])
+        out = {}
+        for lugar in self._lugares(item):
+            for r in t.cerca(lugar, CERCA_M):
+                if r["id"] not in out and mismo_nombre(pal, r["palabras"]):
+                    out[r["id"]] = r
+        return list(out.values())
+
+    def en_traza(self, cid: str):
+        """Para la ficha: {"id", "nombre", "por"}, {"repetidos": …}, {"dudosos": …} o None."""
+        return self.de_contrato.get(cid)
+
+
+def caja_de_wispro(dw: DatosWispro, row):
+    """La NAP de Wispro de una caja de traza: la que se vinculó a mano o, si no
+    hay, la única con el mismo nombre. Devuelve (nap, por)."""
+    guardada = datos_de(row).get("wispro_nap")
+    if isinstance(guardada, str) and guardada in dw.naps_por_id:
+        return dw.naps_por_id[guardada], "vinculada"
+    clave = clave_caja(row["nombre"])
+    iguales = [n for n in dw.naps if clave and clave_caja(n.get("name")) == clave]
+    if len(iguales) == 1:
+        return iguales[0], "nombre"
+    return None, ("perdida" if guardada else None)
+
+
+def candidatas(dw: DatosWispro, row) -> list:
+    """NAPs de Wispro que pueden ser esta caja: las más cercanas y las de nombre parecido."""
+    aca = [row["lon"], row["lat"]]
+    clave = clave_caja(row["nombre"])
+    elegidas = {}
+    cerca = []
+    for n in dw.naps:
+        u = ubicacion(n.get("latitude"), n.get("longitude"))
+        d = haversine_m(aca, u) if u else None
+        if d is not None and d <= CANDIDATAS_M:
+            cerca.append((d, n))
+    for d, n in sorted(cerca, key=lambda x: x[0])[:6]:
+        elegidas[n.get("id")] = (d, n)
+    if len(clave) >= 2:
+        for n in dw.naps:
+            k = clave_caja(n.get("name"))
+            if k and (clave in k or k in clave) and n.get("id") not in elegidas and len(elegidas) < 9:
+                u = ubicacion(n.get("latitude"), n.get("longitude"))
+                elegidas[n.get("id")] = (haversine_m(aca, u) if u else None, n)
+    orden = sorted(elegidas.values(), key=lambda x: (x[0] is None, x[0] or 0))
+    return [dw.nap(n, d) for d, n in orden]
+
+
+class Integraciones:
+    """Lo que traza lee de Wispro y del panel de la OLT, red por red, con caché."""
+
+    def __init__(self, ruta: str):
+        self.ruta = ruta
+        self._candado = threading.Lock()
+        self._config = {}
+        self._firma = None
+        self._cache = {}  # clave -> (cuando, valor)
+        self._fallas = {}  # clave -> (cuando, IntegracionError)
+        self._candados = {}
+
+    # --- configuración (se relee sola cuando cambia el archivo)
+    def config(self) -> dict:
+        try:
+            st = os.stat(self.ruta)
+            firma = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            firma = None
+        with self._candado:
+            if firma != self._firma:
+                data = {}
+                if firma is not None:
+                    try:
+                        with open(self.ruta, encoding="utf-8") as fh:
+                            data = json.load(fh)
+                    except (OSError, ValueError) as err:
+                        log.warning("no se pudo leer %s: %s", self.ruta, err)
+                self._config = data if isinstance(data, dict) else {}
+                self._firma = firma
+                # Lo leído con la configuración anterior no sirve (las claves de la caché
+                # llevan la firma, así que tampoco lo que esté leyéndose ahora).
+                self._cache.clear()
+                self._fallas.clear()
+                self._candados.clear()
+            return self._config
+
+    def de_red(self, red_id: int) -> dict:
+        redes = self.config().get("redes")
+        cfg = redes.get(str(red_id)) if isinstance(redes, dict) else None
+        return cfg if isinstance(cfg, dict) else {}
+
+    def wispro(self, red_id: int):
+        c = self.de_red(red_id).get("wispro")
+        if isinstance(c, dict) and isinstance(c.get("token"), str) and c["token"].strip():
+            return Wispro(c["token"].strip(), c.get("url") or WISPRO_URL)
+        return None
+
+    def panel(self, red_id: int):
+        c = self.de_red(red_id).get("panel")
+        if isinstance(c, dict) and isinstance(c.get("url"), str) and c["url"].startswith(("http://", "https://")):
+            return Panel(c["url"], c.get("olts"))
+        return None
+
+    def estado(self, red_id: int) -> dict:
+        return {"wispro": self.wispro(red_id) is not None, "panel": self.panel(red_id) is not None}
+
+    # --- caché
+    def _guardado(self, clave, vive: float, traer, refrescar=False, respaldo=False, plazo: float = PLAZO_DATOS):
+        """Lo que devuelve traer(), guardado `vive` segundos. Si dos pedidos quieren
+        lo mismo a la vez, el segundo espera al primero (hasta `plazo`). Una falla
+        se recuerda VIVE_FALLA segundos para no hacer esperar a cada ficha. Con
+        respaldo=True devuelve (valor, falla): si traerlo falla y hay un valor
+        anterior bueno, ese, con la falla para avisarla."""
+        pedido = time.monotonic()
+        clave = (self._firma,) + clave
+        with self._candado:
+            candado = self._candados.setdefault(clave, threading.Lock())
+
+        def fallar(err):
+            with self._candado:
+                hit = self._cache.get(clave)
+            if respaldo and hit:
+                return hit[1], err
+            raise IntegracionError(str(err), err.codigo)
+
+        if not candado.acquire(timeout=plazo):
+            return fallar(IntegracionError("está tardando en responder"))
+        try:
+            with self._candado:
+                hit, falla = self._cache.get(clave), self._fallas.get(clave)
+            ahora = time.monotonic()
+            if hit and (hit[0] >= pedido or (ahora - hit[0] < vive and not (refrescar and ahora - hit[0] >= REFRESCO_MINIMO))):
+                return (hit[1], None) if respaldo else hit[1]
+            if falla and (falla[0] >= pedido or (ahora - falla[0] < VIVE_FALLA and not (refrescar and ahora - falla[0] >= 3))):
+                return fallar(falla[1])
+            try:
+                valor = traer()
+            except IntegracionError as err:
+                with self._candado:
+                    self._fallas[clave] = (time.monotonic(), err)
+                return fallar(err)
+            with self._candado:
+                self._cache[clave] = (time.monotonic(), valor)
+                self._fallas.pop(clave, None)
+            return (valor, None) if respaldo else valor
+        finally:
+            candado.release()
+
+    def _ultimo(self, clave):
+        """Lo último bueno que se leyó (sin esperar a una lectura en curso)."""
+        hit = self._ultimo_con_edad(clave)
+        return hit[0] if hit else None
+
+    def _ultimo_con_edad(self, clave):
+        """(lo último bueno que se leyó, hace cuántos segundos) o None."""
+        with self._candado:
+            hit = self._cache.get((self._firma,) + clave)
+        return (hit[1], time.monotonic() - hit[0]) if hit else None
+
+    def datos_wispro(self, red_id: int, refrescar=False):
+        """(DatosWispro, falla): la falla, si se devuelve una lectura anterior."""
+        w = self.wispro(red_id)
+        if w is None:
+            return None
+
+        def traer():
+            pedidos = {k: _HILOS_WISPRO.submit(w.todo, f"/{k}") for k in ("naps", "contracts", "clients", "olts")}
+            naps, contratos, clientes = (pedidos[k].result() for k in ("naps", "contracts", "clients"))
+            try:
+                olts = pedidos["olts"].result()
+            except IntegracionError:
+                olts = []
+            return DatosWispro(naps, contratos, clientes, olts)
+
+        return self._guardado(("wispro", red_id), VIVE_WISPRO, traer, refrescar, respaldo=True)
+
+    def datos_panel(self, red_id: int, refrescar=False):
+        """(DatosPanel, falla), como datos_wispro."""
+        p = self.panel(red_id)
+        if p is None:
+            return None
+
+        def traer():
+            olts = p.olts()
+            hay = {o.get("id") for o in olts}
+            ids = p.olts_red
+            if not ids:
+                # Sin decir cuáles, solo si hay una sola: el panel puede tener OLTs de otras empresas.
+                if len(olts) != 1:
+                    raise IntegracionError("tiene varias OLT y no se indicó cuál es de esta red "
+                                           "(sudo /srv/ftth/bin/integraciones panel RED URL --olt N)")
+                ids = [olts[0].get("id")]
+            for i in ids:
+                if i not in hay:
+                    raise IntegracionError(f"no tiene la OLT {i}")
+            onts = {i: p.onts(i) for i in ids}
+            try:
+                umbrales = p.umbrales()
+            except IntegracionError:
+                umbrales = None
+            return DatosPanel(olts, onts, umbrales)
+
+        return self._guardado(("panel", red_id), VIVE_PANEL, traer, refrescar, respaldo=True)
+
+    def historia(self, red_id: int, panel_id: int, refrescar=False):
+        p = self.panel(red_id)
+        if p is None:
+            raise IntegracionError("ya no está configurado")
+        return self._guardado(("historia", red_id, panel_id), VIVE_HISTORIA, lambda: p.historia(panel_id), refrescar)
+
+    def en_vivo(self, red_id: int, contrato_id: str, w: Wispro):
+        return self._guardado(("vivo", red_id, contrato_id), VIVE_EN_VIVO, lambda: w.estado_ont(contrato_id))
+
+    def en_vivo_guardado(self, red_id: int, contrato_id):
+        with self._candado:
+            hit = self._cache.get((self._firma, "vivo", red_id, contrato_id))
+        if hit and isinstance(hit[1], dict) and "error" not in hit[1] and time.monotonic() - hit[0] < MUESTRA_EN_VIVO:
+            return hit[1]
+        return None
+
+    def _leer(self, red_id: int, refrescar: bool, out: dict):
+        """Wispro y el panel a la vez, esperando a lo sumo PLAZO_DATOS. Lo que falla
+        o tarda queda anotado en out["errores"]; si hay una lectura anterior, se usa."""
+        tareas = {}
+        if self.wispro(red_id) is not None:
+            tareas["wispro"] = _HILOS.submit(self.datos_wispro, red_id, refrescar)
+        if self.panel(red_id) is not None:
+            tareas["panel"] = _HILOS.submit(self.datos_panel, red_id, refrescar)
+        wait(list(tareas.values()), timeout=PLAZO_DATOS)
+        res = {}
+        for nombre, etiqueta in (("wispro", "Wispro"), ("panel", "Panel de la OLT")):
+            tarea = tareas.get(nombre)
+            res[nombre] = None
+            if tarea is None:
+                continue
+            if not tarea.done():
+                anterior = self._ultimo((nombre, red_id))
+                out["errores"].append(f"{etiqueta}: está tardando en responder"
+                                      + (f"; se muestra lo leído {hace_texto(anterior.cuando)}." if anterior else
+                                         "; probá «Actualizar» en un momento."))
+                res[nombre] = anterior
+                continue
+            try:
+                valor, falla = tarea.result()
+            except IntegracionError as err:
+                out["errores"].append(f"{etiqueta}: {err}.")
+                continue
+            if falla:
+                out["errores"].append(f"{etiqueta}: {falla}; se muestra lo leído {hace_texto(valor.cuando)}.")
+            res[nombre] = valor
+        return res["wispro"], res["panel"]
+
+    def _panel_json(self, dp):
+        return {"leido": dp.leido, "onts": dp.total, "olts": dp.olts, "umbrales": dp.umbrales}
+
+    def _historias(self, red_id: int, items: list, refrescar: bool, out: dict):
+        """La serie y los eventos de cada ONT (para la estabilidad), a la vez y con
+        plazo: lo que no llega se ve en la próxima lectura."""
+        tareas = {}
+        for item in items:
+            pid = (item.get("medida") or {}).get("panel_id")
+            if pid is not None and pid not in tareas:
+                tareas[pid] = _HILOS.submit(self.historia, red_id, pid, refrescar)
+        wait(list(tareas.values()), timeout=PLAZO_HISTORIA)
+        faltan = 0
+        for item in items:
+            pid = (item.get("medida") or {}).get("panel_id")
+            if pid is None:
+                continue
+            tarea = tareas[pid]
+            item["historia"] = None
+            if tarea.done() and tarea.exception() is None:
+                item["historia"] = tarea.result()
+            else:
+                faltan += 1
+        if faltan:
+            out["errores"].append(f"Panel de la OLT: falta la historia de {faltan} ONT{'s' if faltan > 1 else ''} "
+                                  "(tardó o falló); se completa en la próxima lectura.")
+
+    # --- lo que pide el visor
+    def nap(self, store, row, refrescar=False, con_candidatas=False) -> dict:
+        red_id = row["red_id"]
+        out = {"configurada": self.estado(red_id), "errores": []}
+        dw, dp = self._leer(red_id, refrescar, out)
+        if dp is not None:
+            out["panel"] = self._panel_json(dp)
+        if dw is None:
+            return out
+        out["wispro"] = {"leido": dw.cuando}
+        nap, por = caja_de_wispro(dw, row)
+        if nap is None:
+            out["perdida"] = por == "perdida"
+            out["candidatas"] = candidatas(dw, row)
+            return out
+        caja = [row["lon"], row["lat"]]
+        u = ubicacion(nap.get("latitude"), nap.get("longitude"))
+        out["nap"] = dw.nap(nap, haversine_m(caja, u) if u else None, por)
+        if con_candidatas:  # para cambiar el vínculo
+            out["candidatas"] = candidatas(dw, row)
+        cruce = Cruce(dw, store.clientes_red(red_id))
+        items = []
+        for c in dw.por_nap.get(nap.get("id"), [])[:MAX_CONTRATOS_NAP]:
+            item = dict(cruce.items[c.get("id")])
+            item["traza"] = cruce.en_traza(item["id"])
+            if item["ubicacion"]:
+                d = haversine_m(caja, item["ubicacion"])
+                item["lejos_m"] = round(d) if d > LEJOS_CAJA_M else None
+            item["medida"] = dp.ont(item["sn"], None if item["sn"] else item["numero"], dw.por_sn)[0] if dp else None
+            item["vivo"] = self.en_vivo_guardado(red_id, item["id"])
+            items.append(item)
+        if dp is not None:
+            self._historias(red_id, items, refrescar, out)
+        out["contratos"] = items
+        return out
+
+    def cliente(self, store, row, refrescar=False) -> dict:
+        red_id = row["red_id"]
+        out = {"configurada": self.estado(red_id), "errores": []}
+        dw, dp = self._leer(red_id, refrescar, out)
+        datos = datos_de(row)
+        item = None
+        if dw is not None:
+            out["wispro"] = {"leido": dw.cuando}
+            cruce = Cruce(dw, store.clientes_red(red_id))
+            hit = cruce.de_cliente.get(row["id"])
+            if hit:
+                cid, por = hit
+                item = dict(cruce.items[cid])
+                item["por"] = por
+                item["nap_nombre"] = texto_corto((dw.naps_por_id.get(item["nap"]) or {}).get("name"), 80)
+                item["vivo"] = self.en_vivo_guardado(red_id, cid)
+                otros = [r for r in (cruce.en_traza(cid) or {}).get("repetidos", []) if r["id"] != row["id"]]
+                if otros:
+                    item["repetidos"] = otros
+            dudas = []
+            for cid in cruce.dudas_de_cliente.get(row["id"], []):
+                d = dict(cruce.items[cid])
+                duda = next((x for x in cruce.en_traza(cid)["dudosos"] if x["id"] == row["id"]), {})
+                d["por"], d["lejos_m"] = duda.get("por"), duda.get("lejos_m")
+                d["nap_nombre"] = texto_corto((dw.naps_por_id.get(d["nap"]) or {}).get("name"), 80)
+                dudas.append(d)
+            if dudas:
+                out["posibles"] = dudas[:10]
+
+            def resumen(cid):
+                c = cruce.items[cid]
+                return {"id": cid, "numero": c["numero"], "cliente": c["cliente"],
+                        "nap_nombre": texto_corto((dw.naps_por_id.get(c["nap"]) or {}).get("name"), 80)}
+
+            # Los contratos que se marcaron «No es» (se pueden volver a considerar)...
+            no = lista_uuid(datos.get("wispro_no"))
+            original = {str(k).lower(): k for k in cruce.items}
+            descartados = [resumen(original[u]) if u in original else {"id": u} for u in no]
+            if descartados:
+                out["descartados"] = descartados
+            # ...y, si no se le asignó ninguno, con cuáles coincide algún dato aunque sean de
+            # otro cliente del mapa (puede ser el mismo cliente dibujado dos veces).
+            if not hit and not dudas:
+                ocupados = []
+                for cid, criterio in cruce.coincidencias(row["id"]):
+                    asignado = cruce.en_traza(cid) or {}
+                    en_mapa = asignado.get("repetidos") or ([asignado] if asignado.get("id") else [])
+                    if str(cid).lower() in no or not en_mapa:
+                        continue
+                    ocupados.append({**resumen(cid), "por": criterio,
+                                     "en_mapa": [{"id": r["id"], "nombre": r["nombre"]} for r in en_mapa]})
+                if ocupados:
+                    out["ocupados"] = ocupados[:10]
+        out["contrato"] = item
+        sn = (item or {}).get("sn") or next(iter(sns_en_texto(datos.get("ont"))), None)
+        if dp is not None:
+            out["panel"] = self._panel_json(dp)
+            medida = dp.ont(sn, None if sn else (item or {}).get("numero"), dw.por_sn if dw else ())[0]
+            out["medida"] = medida
+            if medida and medida.get("panel_id") is not None:
+                try:
+                    out["historia"] = self.historia(red_id, medida["panel_id"], refrescar)
+                except IntegracionError as err:
+                    out["errores"].append(f"Panel de la OLT: {err}.")
+        return out
+
+    def _wispro_o_error(self, red_id: int):
+        """Wispro para una acción (medir, agregar, vincular): la última lectura si es de
+        hace menos de VIVE_ACCION (es lo que el usuario está viendo); si no, se lee con
+        plazo, y si tarda o falla se usa la anterior que haya."""
+        w = self.wispro(red_id)
+        if w is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Esta red no está conectada con Wispro.")
+        anterior = self._ultimo_con_edad(("wispro", red_id))
+        if anterior and anterior[1] < VIVE_ACCION:
+            return w, anterior[0]
+        tarea = _HILOS.submit(self.datos_wispro, red_id)
+        try:
+            dw, _ = tarea.result(timeout=PLAZO_DATOS)
+        except FuturesTimeout:
+            if anterior:
+                return w, anterior[0]
+            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "Wispro está tardando en responder: probá de nuevo en un momento.")
+        except IntegracionError as err:
+            if anterior and err.codigo != 401:
+                return w, anterior[0]
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"No se pudo leer Wispro: {err}.")
+        return w, dw
+
+    def _medir(self, red_id: int, w: Wispro, ids: list, plazo: float = PLAZO_MEDIR) -> dict:
+        tareas = {cid: _HILOS.submit(self.en_vivo, red_id, cid, w) for cid in ids}
+        wait(list(tareas.values()), timeout=max(5, plazo))
+        medidas = {}
+        for cid, tarea in tareas.items():
+            if not tarea.done():
+                medidas[cid] = {"error": "Wispro no respondió a tiempo"}
+            elif isinstance(tarea.exception(), IntegracionError):
+                err = tarea.exception()
+                if err.codigo == 401:
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, "Wispro no aceptó el token: hay que revisarlo en el servidor.")
+                medidas[cid] = {"error": str(err)}
+            else:
+                medidas[cid] = tarea.result()
+        return {"medidas": medidas}
+
+    def medir_nap(self, row) -> dict:
+        red_id = row["red_id"]
+        inicio = time.monotonic()
+        w, dw = self._wispro_o_error(red_id)
+        nap, _ = caja_de_wispro(dw, row)
+        if nap is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Primero vinculá esta caja con su NAP de Wispro.")
+        ids = [c.get("id") for c in dw.por_nap.get(nap.get("id"), []) if c.get("ont_serial_number")][:MAX_EN_VIVO]
+        return self._medir(red_id, w, ids, PLAZO_MEDIR - (time.monotonic() - inicio))
+
+    def medir_cliente(self, store, row) -> dict:
+        red_id = row["red_id"]
+        inicio = time.monotonic()
+        w, dw = self._wispro_o_error(red_id)
+        hit = Cruce(dw, store.clientes_red(red_id)).de_cliente.get(row["id"])
+        if hit is None:
+            raise ApiError(HTTPStatus.CONFLICT, "No se encontró el contrato de este cliente en Wispro.")
+        return self._medir(red_id, w, [hit[0]], PLAZO_MEDIR - (time.monotonic() - inicio))
+
+    def importar(self, store, row, ids: list, usuario: str) -> dict:
+        """Agrega al mapa los clientes de una caja que están en Wispro y no en traza.
+        El cruce se hace dentro de la misma transacción que los agrega: dos pedidos
+        a la vez no duplican nada."""
+        red_id = row["red_id"]
+        _, dw = self._wispro_o_error(red_id)
+        nap, _ = caja_de_wispro(dw, row)
+        if nap is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Primero vinculá esta caja con su NAP de Wispro.")
+        de_la_caja = {c.get("id"): c for c in dw.por_nap.get(nap.get("id"), [])}
+        caja = [row["lon"], row["lat"]]
+
+        def preparar(rows):
+            cruce = Cruce(dw, rows)
+            nuevos, omitidos = [], []
+            for cid in ids:
+                if cid not in de_la_caja:
+                    omitidos.append({"contrato": cid, "motivo": "no es de esta caja en Wispro"})
+                    continue
+                item = cruce.items[cid]
+                en_traza = cruce.en_traza(cid)
+                # Un número que coincide lejos (a más de 2 km) no frena: es poco probable que sea el mismo.
+                if en_traza and any(not d.get("lejos_m") for d in en_traza.get("dudosos", [])):
+                    omitidos.append({"contrato": cid, "motivo": "hay un cliente en el mapa que podría ser este: confirmalo desde la caja"})
+                    continue
+                if en_traza and en_traza.get("dudosos"):
+                    en_traza = None
+                if en_traza:
+                    omitidos.append({"contrato": cid, "motivo": "ya está en el mapa"})
+                    continue
+                if not item["ubicacion"]:
+                    omitidos.append({"contrato": cid, "motivo": "no tiene ubicación en Wispro"})
+                    continue
+                d = haversine_m(caja, item["ubicacion"])
+                if d > LEJOS_CAJA_M:
+                    omitidos.append({"contrato": cid, "motivo": f"su ubicación en Wispro está a {d / 1000:.1f} km de la caja".replace(".", ",")})
+                    continue
+                nuevos.append(cliente_de_contrato(item, nap.get("name")))
+            return nuevos, omitidos
+
+        return store.importar_clientes(red_id, preparar, usuario, origen="wispro")
+
+    def vincular(self, store, row, contrato_id: str, usuario: str) -> dict:
+        """Confirma que un cliente de traza es el de un contrato de Wispro."""
+        _, dw = self._wispro_o_error(row["red_id"])
+        c = dw.por_id.get(contrato_id)
+        if c is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Ese contrato ya no está en Wispro.")
+        return store.vincular_cliente(row["id"], dw.contrato(c), usuario, {str(k).lower() for k in dw.por_id})
+
+    def desvincular(self, store, row, contrato_id: str, usuario: str, deshacer: bool = False) -> dict:
+        """El cliente no es el de ese contrato (o, con deshacer, sí puede serlo). Anda
+        aunque Wispro no responda (entonces no se sabe qué datos había completado el
+        vínculo, y quedan)."""
+        if deshacer:
+            return store.desvincular_cliente(row["id"], contrato_id, None, usuario, deshacer=True)
+        try:
+            _, dw = self._wispro_o_error(row["red_id"])
+        except ApiError:
+            dw = None
+        c = dw.por_id.get(contrato_id) if dw is not None else None
+        return store.desvincular_cliente(row["id"], contrato_id, dw.contrato(c) if c else None, usuario)
+
+
+def cliente_de_contrato(item: dict, nap_nombre) -> dict:
+    """Un cliente de traza con lo que dice su contrato de Wispro."""
+    nombre = check_text(item["cliente"] or (f"Contrato #{item['numero']}" if item["numero"] is not None else "Cliente"),
+                        "nombre")[:MAX_NOMBRE].strip()
+    datos = {
+        "contrato": str(item["numero"]) if item["numero"] is not None else None,
+        "abonado": str(item["cliente_numero"]) if item["cliente_numero"] is not None else None,
+        "direccion": item["direccion"],
+        "ont": item["sn"],
+        "nap_puerto": texto_corto(nap_nombre, 80),
+    }
+    datos["wispro_llenados"] = ",".join(k for k, v in datos.items() if v not in (None, ""))
+    datos["wispro_contrato"] = item["id"]
+    datos = datos_field({"datos": datos})
+    lon, lat = coord_pair(*item["ubicacion"])
+    return {"tipo": "cliente", "nombre": nombre, "estado": ESTADOS_WISPRO.get(item["estado"], "instalado"),
+            "lon": lon, "lat": lat, "datos": datos, "notas": ""}
+
+
+def contratos_field(data: dict) -> list:
+    value = data.get("contratos")
+    if not isinstance(value, list) or not value or len(value) > MAX_CONTRATOS_NAP:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "contratos tiene que ser una lista de contratos de Wispro.")
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not UUID.fullmatch(item):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Contrato de Wispro inválido.")
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def contrato_field(data: dict) -> str:
+    value = data.get("contrato")
+    if not isinstance(value, str) or not UUID.fullmatch(value):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Contrato de Wispro inválido.")
+    return value
+
+
 # ----------------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ftth-api/1"
     store: Store = None
+    integraciones: Integraciones = None
     secreto: str = ""  # vacío: no se exige (pruebas, desarrollo)
 
     def log_message(self, fmt, *args):
@@ -1698,6 +3089,15 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar el elemento.")
         return element_id
 
+    def element_of_type(self, value, tipo: str):
+        row = self.store.get_element(self.element_param(value))
+        if row is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
+        if row["tipo"] != tipo:
+            raise ApiError(HTTPStatus.BAD_REQUEST,
+                           "Ese elemento no es una NAP." if tipo == "nap" else "Ese elemento no es un cliente.")
+        return row
+
     @staticmethod
     def route_id(path: str, prefix: str):
         """'/api/elementos/12' -> 12 para prefix '/api/elementos/'; None si no corresponde."""
@@ -1728,6 +3128,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, payload)
         except ApiError as err:
             self.send_json(err.status, {"error": err.message, **err.extra})
+        except IntegracionError as err:
+            self.send_json(HTTPStatus.BAD_GATEWAY, {"error": f"No se pudo leer el otro sistema: {err}."})
         except sqlite3.OperationalError as err:
             log.exception("base ocupada o con problemas atendiendo %s %s", method, path)
             busy = "locked" in str(err) or "busy" in str(err)
@@ -1841,6 +3243,43 @@ class Handler(BaseHTTPRequestHandler):
         if fusion_id is not None and method == "DELETE":
             return HTTPStatus.OK, store.delete_fusiones([fusion_id], version_field(q("version")), user)
 
+        if path.startswith("/api/integracion"):
+            return self.route_integracion(method, path, q, user)
+
+        raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
+
+    def route_integracion(self, method, path, q, user):
+        """Wispro y el panel de la OLT (solo lectura, salvo agregar clientes al mapa)."""
+        integ = self.integraciones
+        if integ is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Las integraciones no están disponibles en este servidor.")
+        if path == "/api/integracion" and method == "GET":
+            return HTTPStatus.OK, integ.estado(self.red_param(q("red")))
+        if path == "/api/integracion/nap" and method == "GET":
+            return HTTPStatus.OK, integ.nap(self.store, self.element_of_type(q("elemento"), "nap"), q("refrescar") == "1",
+                                           q("candidatas") == "1")
+        if path == "/api/integracion/cliente" and method == "GET":
+            return HTTPStatus.OK, integ.cliente(self.store, self.element_of_type(q("elemento"), "cliente"),
+                                               q("refrescar") == "1")
+        if method == "POST" and path in ("/api/integracion/nap/medir", "/api/integracion/cliente/medir",
+                                         "/api/integracion/nap/importar", "/api/integracion/vincular",
+                                         "/api/integracion/desvincular"):
+            data = self.read_json()
+            if path == "/api/integracion/nap/medir":
+                return HTTPStatus.OK, integ.medir_nap(self.element_of_type(data.get("elemento"), "nap"))
+            if path == "/api/integracion/cliente/medir":
+                return HTTPStatus.OK, integ.medir_cliente(self.store, self.element_of_type(data.get("elemento"), "cliente"))
+            if path == "/api/integracion/vincular":
+                row = self.element_of_type(data.get("cliente"), "cliente")
+                return HTTPStatus.OK, integ.vincular(self.store, row, contrato_field(data), user)
+            if path == "/api/integracion/desvincular":
+                row = self.element_of_type(data.get("cliente"), "cliente")
+                deshacer = data.get("deshacer", False)
+                if not isinstance(deshacer, bool):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "deshacer tiene que ser true o false.")
+                return HTTPStatus.OK, integ.desvincular(self.store, row, contrato_field(data), user, deshacer)
+            row = self.element_of_type(data.get("elemento"), "nap")
+            return HTTPStatus.OK, integ.importar(self.store, row, contratos_field(data), user)
         raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
 
     def do_GET(self):
@@ -1867,9 +3306,15 @@ def read_secret(path: str) -> str:
     return value
 
 
-def serve(db_path: str, host: str, port: int, secret_path: str = ""):
+def ruta_integraciones(db_path: str, archivo: str = "") -> str:
+    """integraciones.json va junto a la base de la red."""
+    return archivo or os.path.join(os.path.dirname(os.path.abspath(db_path)), "integraciones.json")
+
+
+def serve(db_path: str, host: str, port: int, secret_path: str = "", integraciones: str = ""):
     Handler.secreto = read_secret(secret_path) if secret_path else ""
     Handler.store = Store(db_path)
+    Handler.integraciones = Integraciones(ruta_integraciones(db_path, integraciones))
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     log.info("escuchando en http://%s:%d, base %s", host, port, db_path)
@@ -1877,6 +3322,268 @@ def serve(db_path: str, host: str, port: int, secret_path: str = ""):
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+# --------------------------------------------------- comando "integraciones"
+#
+# Se usa desde el servidor (el instalador deja /srv/ftth/bin/integraciones, que lo
+# corre como el usuario del servicio). Así el token se escribe en la terminal del
+# servidor y nunca pasa por el visor ni por un chat.
+
+def leer_config(ruta: str) -> dict:
+    try:
+        with open(ruta, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as err:
+        raise SystemExit(f"No se pudo leer {ruta}: {err}")
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("redes"), dict):
+        data["redes"] = {}
+    return data
+
+
+def guardar_config(ruta: str, data: dict):
+    """Escribe el archivo de una vez (a un temporario que después lo reemplaza),
+    legible solo por su dueño: tiene el token."""
+    fd, tmp = tempfile.mkstemp(prefix=".integraciones-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(ruta)))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, ruta)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def elegir_red(store: Store, texto) -> dict:
+    redes = store.networks()
+    texto = (texto or "").strip()
+    if not texto:
+        raise SystemExit("Indicá la red (su nombre o su número). Redes: "
+                         + (", ".join(f"{r['nombre']} ({r['id']})" for r in redes) or "ninguna todavía") + ".")
+    red = next((r for r in redes if (texto.isdigit() and r["id"] == int(texto)) or r["nombre"].lower() == texto.lower()), None)
+    if red is None:
+        raise SystemExit(f"No hay una red «{texto}». Redes: "
+                         + (", ".join(f"{r['nombre']} ({r['id']})" for r in redes) or "ninguna todavía") + ".")
+    return red
+
+
+def fecha_local(iso) -> str:
+    """Fecha y hora en la zona del servidor, diciendo cuál ("(UTC)", "(UTC−3)"): el
+    visor muestra las mismas lecturas en la hora del teléfono o la computadora."""
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)
+    local = d.astimezone()
+    horas = (local.utcoffset() or timedelta(0)).total_seconds() / 3600
+    zona = f"UTC{'+' if horas > 0 else '−'}{abs(horas):g}" if horas else "UTC"
+    return f"{local:%d/%m/%Y %H:%M} ({zona})"
+
+
+def horas_desde(iso):
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - d).total_seconds() / 3600
+
+
+def cli_ver(store: Store, ruta: str) -> int:
+    data = leer_config(ruta)
+    print(f"Archivo: {ruta}")
+    for red in store.networks():
+        cfg = data["redes"].get(str(red["id"])) or {}
+        w, p = cfg.get("wispro") or {}, cfg.get("panel") or {}
+        if not w and not p:
+            print(f"  {red['nombre']} (red {red['id']}): sin integraciones")
+            continue
+        print(f"  {red['nombre']} (red {red['id']})")
+        if w:
+            token = str(w.get("token") or "")
+            print(f"    Wispro: conectada (token que termina en …{token[-4:]})")
+        if p:
+            # Igual que la API: sin OLT indicada, solo sirve si el panel tiene una sola.
+            ids = Panel(str(p.get("url") or ""), p.get("olts")).olts_red
+            olts = f"OLT {', '.join(str(x) for x in ids)}" if ids else "sin OLT elegida: sirve solo si el panel tiene una"
+            print(f"    Panel de la OLT: {p.get('url')} ({olts})")
+    return 0
+
+
+def cli_wispro(store: Store, ruta: str, args) -> int:
+    red = elegir_red(store, args.red)
+    if args.token_stdin:
+        token = sys.stdin.readline().strip()
+    else:
+        token = getpass.getpass("Token de la API de Wispro (no se ve al escribir; está en Wispro, "
+                                "Configuración avanzada → ISP): ").strip()
+    if not token or len(token) > 512 or any(c.isspace() for c in token):
+        raise SystemExit("Ese token no parece válido. No se guardó nada.")
+    w = Wispro(token, args.wispro_url)
+    print("Probando el token…")
+    try:
+        naps, contratos = w.total("/naps"), w.total("/contracts")
+    except IntegracionError as err:
+        raise SystemExit(f"No se pudo usar Wispro: {err}. No se guardó nada.")
+    try:
+        olts = [str(o.get("name")) for o in w.todo("/olts")]
+    except IntegracionError:
+        olts = []  # la API de la red se arregla sin la lista de OLTs
+    print(f"Wispro respondió: {naps} NAPs, {contratos} contratos" + (f", OLT: {', '.join(olts)}" if olts else "") + ".")
+    data = leer_config(ruta)
+    cfg = {"token": token}
+    if args.wispro_url.rstrip("/") != WISPRO_URL:
+        cfg["url"] = args.wispro_url.rstrip("/")
+    data["redes"].setdefault(str(red["id"]), {})["wispro"] = cfg
+    guardar_config(ruta, data)
+    print(f"Listo: {red['nombre']} quedó conectada con Wispro. En el visor, abrí una NAP para ver sus clientes.")
+    return 0
+
+
+def cli_panel(store: Store, ruta: str, args) -> int:
+    red = elegir_red(store, args.red)
+    url = (args.extra or "").strip().rstrip("/")
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+(/[^\s]*)?", url):
+        raise SystemExit("Indicá la dirección del panel, por ejemplo: http://10.10.0.230:8080")
+    try:
+        olts = Panel(url).olts()
+    except IntegracionError as err:
+        raise SystemExit(f"El panel de la OLT {err}. No se guardó nada.")
+    if not olts:
+        raise SystemExit("El panel no tiene OLTs. No se guardó nada.")
+    print("OLTs del panel:")
+    for o in olts:
+        print(f"  {o.get('id'):>6}  {o.get('name')}  ({o.get('ont_count', '?')} ONTs)")
+    hay = [o.get("id") for o in olts]
+    ids = args.olt
+    if not ids:
+        if len(olts) == 1:
+            ids = hay
+        else:
+            # Sin respuesta por defecto: el panel puede tener OLTs de otras empresas.
+            if not sys.stdin.isatty():
+                raise SystemExit("El panel tiene varias OLTs: indicá cuáles son de esta red con --olt (se puede repetir).")
+            resp = input(f"¿Qué OLTs son de {red['nombre']}? Escribí sus números, separados por coma: ").strip()
+            ids = [int(x) for x in re.findall(r"\d+", resp)]
+            if not ids:
+                raise SystemExit("No se indicó ninguna OLT. No se guardó nada.")
+    faltan = [i for i in ids if i not in hay]
+    if faltan:
+        raise SystemExit(f"El panel no tiene la OLT {', '.join(str(i) for i in faltan)}. No se guardó nada.")
+    data = leer_config(ruta)
+    data["redes"].setdefault(str(red["id"]), {})["panel"] = {"url": url, "olts": sorted(set(ids))}
+    guardar_config(ruta, data)
+    nombres = [str(o.get("name")) for o in olts if o.get("id") in ids]
+    print(f"Listo: {red['nombre']} toma las potencias de {', '.join(nombres)}.")
+    return 0
+
+
+def cli_quitar(store: Store, ruta: str, args) -> int:
+    red = elegir_red(store, args.red)
+    que = (args.extra or "").strip().lower()
+    if que not in ("", "wispro", "panel"):
+        raise SystemExit("Qué quitar: wispro, panel o nada (las dos).")
+    data = leer_config(ruta)
+    cfg = data["redes"].get(str(red["id"])) or {}
+    for k in ([que] if que else ["wispro", "panel"]):
+        cfg.pop(k, None)
+    if cfg:
+        data["redes"][str(red["id"])] = cfg
+    else:
+        data["redes"].pop(str(red["id"]), None)
+    guardar_config(ruta, data)
+    print(f"Listo: {red['nombre']} ya no usa {que or 'Wispro ni el panel de la OLT'}.")
+    return 0
+
+
+def cli_probar(store: Store, ruta: str, args) -> int:
+    red = elegir_red(store, args.red)
+    integ = Integraciones(ruta)
+    estado = integ.estado(red["id"])
+    if not any(estado.values()):
+        print(f"{red['nombre']} no está conectada con Wispro ni con el panel de la OLT.")
+        return 1
+    falla = 0
+    dw = dp = None
+    if estado["wispro"]:
+        t = time.monotonic()
+        try:
+            dw, _ = integ.datos_wispro(red["id"])
+            print(f"Wispro: {len(dw.naps)} NAPs, {len(dw.contratos)} contratos y {len(dw.clientes)} clientes "
+                  f"({time.monotonic() - t:.1f} s).")
+        except IntegracionError as err:
+            print(f"Wispro: {err}.")
+            falla = 1
+    if estado["panel"]:
+        t = time.monotonic()
+        try:
+            dp, _ = integ.datos_panel(red["id"])
+            linea = f"Panel de la OLT: {dp.total} ONTs de {', '.join(dp.olts)} ({time.monotonic() - t:.1f} s)"
+            if dp.leido:
+                horas = horas_desde(dp.leido)
+                linea += f"; última lectura {fecha_local(dp.leido)}"
+                if horas is not None and horas > 0.5:
+                    cuanto = f"{round(horas)} hora{'s' if round(horas) != 1 else ''}" if horas < 48 else f"{round(horas / 24)} días"
+                    linea += f". Ojo: hace {cuanto} que el panel no lee la OLT"
+            print(linea + ".")
+        except IntegracionError as err:
+            print(f"Panel de la OLT: {err}.")
+            falla = 1
+    naps = store.conn().execute(
+        "SELECT id, nombre, lon, lat, datos FROM elementos WHERE red_id = ? AND tipo = 'nap' AND borrado IS NULL ORDER BY nombre",
+        (red["id"],)).fetchall()
+    if dw is not None:
+        sin = [r["nombre"] or f"#{r['id']}" for r in naps if caja_de_wispro(dw, r)[0] is None]
+        faltan = f"; sin encontrar (vinculalas desde su ficha): {', '.join(sin[:12])}{'…' if len(sin) > 12 else ''}"
+        print(f"Cajas NAP en traza: {len(naps)}; encontradas en Wispro: {len(naps) - len(sin)}{faltan if sin else ''}.")
+        cruce = Cruce(dw, store.clientes_red(red["id"]))
+        items = list(cruce.items.values())
+        ubicados = [x for x in cruce.de_contrato.values() if x.get("id") or x.get("repetidos")]
+        repetidos = sum(1 for x in cruce.de_contrato.values() if x.get("repetidos"))
+        dudosos = sum(1 for x in cruce.de_contrato.values() if x.get("dudosos"))
+        print(f"Clientes en traza: {len(cruce.traza.todos)}; contratos de Wispro que ya están en el mapa: "
+              f"{len(ubicados)} de {len(items)}"
+              + (f"; repetidos en el mapa: {repetidos}" if repetidos else "")
+              + (f"; para confirmar desde la caja: {dudosos}" if dudosos else "") + ".")
+    if dw is not None and dp is not None:
+        items = [dw.contrato(c) for c in dw.contratos]
+        con_sn = [i for i in items if i["sn"]]
+        en_panel = sum(1 for i in con_sn if dp.ont(i["sn"])[0])
+        sin_sn = [i for i in items if not i["sn"] and i["numero"] is not None]
+        por_numero = sum(1 for i in sin_sn if dp.ont(None, i["numero"], dw.por_sn)[0])
+        print(f"Contratos con ONT en Wispro: {len(con_sn)}; con su ONT en el panel: {en_panel}. "
+              f"Sin número de serie en Wispro: {len(sin_sn)}; encontrados en el panel por el número de contrato: {por_numero}.")
+    return falla
+
+
+def cli_integraciones(args) -> int:
+    if not os.path.exists(args.db):
+        raise SystemExit(f"No existe la base {args.db}.")
+    if hasattr(os, "geteuid") and os.stat(args.db).st_uid != os.geteuid():
+        raise SystemExit("Corré esto con: sudo /srv/ftth/bin/integraciones … (lo ejecuta como el usuario del servicio).")
+    ruta = ruta_integraciones(args.db, args.archivo)
+    if not ruta.endswith(".json") or os.path.abspath(ruta) == os.path.abspath(args.db):
+        raise SystemExit("El archivo de integraciones tiene que ser un .json aparte.")
+    store = Store(args.db)
+    try:
+        acciones = {"ver": lambda: cli_ver(store, ruta), "wispro": lambda: cli_wispro(store, ruta, args),
+                    "panel": lambda: cli_panel(store, ruta, args), "quitar": lambda: cli_quitar(store, ruta, args),
+                    "probar": lambda: cli_probar(store, ruta, args)}
+        return acciones[args.accion]()
+    finally:
+        store.close()
 
 
 def main() -> int:
@@ -1887,10 +3594,23 @@ def main() -> int:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=int(os.environ.get("FTTH_API_PORT", "8901")))
     s.add_argument("--secreto", default="", help="archivo con la clave que nginx manda en X-Ftth-Secreto")
+    s.add_argument("--integraciones", default="", help="archivo de integraciones (por defecto, junto a la base)")
+    i = sub.add_parser("integraciones", help="conectar una red con Wispro y con el panel de la OLT",
+                       description="ver | wispro RED | panel RED URL [--olt N] | quitar RED [wispro|panel] | probar RED")
+    i.add_argument("accion", choices=("ver", "wispro", "panel", "quitar", "probar"))
+    i.add_argument("red", nargs="?", help="nombre o número de la red")
+    i.add_argument("extra", nargs="?", help="panel: su dirección (http://10.10.0.230:8080); quitar: wispro o panel")
+    i.add_argument("--olt", type=int, action="append", help="panel: una OLT de esta red (se puede repetir)")
+    i.add_argument("--token-stdin", action="store_true", help=argparse.SUPPRESS)
+    i.add_argument("--wispro-url", default=WISPRO_URL, help=argparse.SUPPRESS)
+    i.add_argument("--archivo", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.cmd == "integraciones":
+        logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stderr)
+        return cli_integraciones(args)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
-    serve(args.db, args.host, args.port, args.secreto)
+    serve(args.db, args.host, args.port, args.secreto, args.integraciones)
     return 0
 
 

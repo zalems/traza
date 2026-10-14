@@ -7,6 +7,7 @@ import {
   sugerirNombre,
 } from './modelo.js';
 import * as F from './fibras.js';
+import * as I from './integracion.js';
 
 // Creador de nodos: h('tag.clase', { attr }, ...hijos). Todo texto va como
 // texto (nunca como HTML).
@@ -56,6 +57,16 @@ const estiloColor = (c) => `--c:${c.hex};--m:${c.marca ?? '#1c1c1c'}`;
 const numero = (x) => Math.abs(x).toFixed(1).replace('.', ',');
 const formatDb = (x) => `${numero(x)} dB`;
 const formatDbm = (x) => `${x < -0.05 ? '−' : ''}${numero(x)} dBm`;
+
+// Estado de un contrato de Wispro, en palabras.
+const ESTADO_CONTRATO = { enabled: 'habilitado', alerted: 'alertado', degraded: 'degradado', disabled: 'deshabilitado' };
+const FRESCO_INTEGRACION_MS = 2 * 60 * 1000;
+// Dos interfaces PON son la misma si coinciden placa y puerto ('0/19/3' y '19/3').
+const mismoPon = (a, b) => {
+  const x = String(a ?? '').match(/\d+/g) ?? [];
+  const y = String(b ?? '').match(/\d+/g) ?? [];
+  return x.length >= 2 && y.length >= 2 && x.slice(-2).join('/') === y.slice(-2).join('/');
+};
 
 export function setupFicha({ root, red, acciones }) {
   let modo = null; // 'elemento' | 'cable' | 'redes' | 'recorrido' | 'form-elemento' | 'form-cable'
@@ -288,7 +299,645 @@ export function setupFicha({ root, red, acciones }) {
     };
   }
 
+  // --------------------------------------- Wispro y el panel de la OLT
+
+  // Lo leído de cada NAP o cliente queda un rato: la ficha se rehace seguido (con
+  // los cambios de otros) y no hace falta volver a pedirlo cada vez. Se vuelve a
+  // leer si cambió el elemento (su nombre, sus datos, el vínculo) y, si la
+  // última lectura falló, pasados unos segundos.
+  // 'nap:12' -> { datos, cuando, version, error, fallo, cargando, pedidos, candidatas, ocupado }
+  const integCache = new Map();
+  const REINTENTO_INTEGRACION_MS = 30 * 1000;
+  const MAX_INTEGRACION = 40; // fichas leídas que se recuerdan
+
+  // Cómo se encontró en el mapa al cliente de un contrato (lo vinculado a mano no se aclara).
+  const POR = { ont: 'por la ONT', contrato: 'por el n.º de contrato', abonado: 'por el n.º de abonado', nombre: 'por el nombre, cerca' };
+  const DEBIL = new Set(['abonado', 'nombre']); // coincidencias para confirmar con un toque
+
+  // Para lectores de pantalla: lo que se leyó. Va fuera de la ficha, que se rehace.
+  const anuncio = h('p.sr-only', { role: 'status' });
+  document.body.append(anuncio);
+  function anunciar(texto) {
+    anuncio.textContent = '';
+    setTimeout(() => { anuncio.textContent = texto; }, 60);
+  }
+
+  const mostrando = (id) => !root.hidden && modo === 'elemento' && root.dataset.id === `e${id}`;
+
+  function seccionIntegracion(feature) {
+    const tipo = feature.properties.tipo;
+    if (tipo !== 'nap' && tipo !== 'cliente') return null;
+    const estado = acciones.integracion.estado();
+    if (!estado || (!estado.wispro && !estado.panel)) return null;
+    const sec = h('section.integ', { 'data-integ': `${tipo}-${feature.id}`, 'aria-label': 'Wispro y la OLT' });
+    pintarIntegracion(sec, feature);
+    return sec;
+  }
+
+  function hayQueLeer(entrada, feature) {
+    if (!entrada) return true;
+    if (entrada.cargando || entrada.ocupado) return false;
+    const ahora = Date.now();
+    if (entrada.error) return ahora - entrada.fallo > REINTENTO_INTEGRACION_MS;
+    return ahora - entrada.cuando > FRESCO_INTEGRACION_MS || entrada.version !== feature.properties.version;
+  }
+
+  function pintarIntegracion(sec, feature) {
+    const tipo = feature.properties.tipo;
+    const clave = `${tipo}:${feature.id}`;
+    if (hayQueLeer(integCache.get(clave), feature)) {
+      cargarIntegracion(feature, { candidatas: Boolean(integCache.get(clave)?.candidatas), pintar: false });
+    }
+    const entrada = integCache.get(clave);
+    let contenido;
+    if (entrada.datos) contenido = tipo === 'nap' ? vistaNap(feature, entrada) : vistaCliente(feature, entrada);
+    else if (entrada.error) {
+      contenido = [
+        cabeceraInteg('En Wispro'),
+        h('p.integ-error', { text: entrada.error }),
+        botones(boton(entrada.cargando ? 'Leyendo…' : 'Reintentar', () => cargarIntegracion(feature, { refrescar: true, avisar: true }),
+          { disabled: Boolean(entrada.cargando) })),
+      ];
+    } else contenido = [cabeceraInteg('En Wispro'), h('p.ficha-sub', { text: 'Leyendo Wispro y el panel de la OLT…' })];
+    sec.replaceChildren(...contenido.filter(Boolean));
+    sec.setAttribute('aria-busy', String(Boolean(entrada.cargando || entrada.ocupado)));
+    // Mientras se agrega, se mide o se vincula, la sección queda trabada aunque la
+    // ficha se rehaga con los cambios de otros (ir a otro elemento sí se puede).
+    if (entrada.ocupado) for (const b of sec.querySelectorAll('button:not(.integ-enlace)')) b.disabled = true;
+  }
+
+  function cargarIntegracion(feature, { refrescar = false, candidatas = false, avisar = false, pintar = true } = {}) {
+    const tipo = feature.properties.tipo;
+    const clave = `${tipo}:${feature.id}`;
+    let entrada = integCache.get(clave);
+    if (!entrada) {
+      entrada = { datos: null, cuando: 0, version: null, error: null, fallo: 0, cargando: null, pedidos: 0, candidatas: false, ocupado: null };
+      integCache.set(clave, entrada);
+      // Se olvidan las más viejas: una NAP puede traer muchos contratos.
+      for (const [k, e] of integCache) {
+        if (integCache.size <= MAX_INTEGRACION) break;
+        if (k !== clave && !e.cargando && !e.ocupado) integCache.delete(k);
+      }
+    }
+    entrada.pedidos += 1;
+    const n = entrada.pedidos;
+    const version = feature.properties.version;
+    const primera = !entrada.datos;
+    const pedido = acciones.integracion.leer(tipo, feature.id, { refrescar, candidatas })
+      .then((datos) => {
+        if (n !== entrada.pedidos) return; // se pidió de nuevo: vale la respuesta más nueva
+        Object.assign(entrada, { datos, error: null, cuando: Date.now(), version, candidatas });
+        if ((avisar || primera) && mostrando(feature.id)) anunciar(resumenIntegracion(tipo, datos));
+      })
+      .catch((err) => {
+        if (n !== entrada.pedidos) return;
+        // Lo leído antes se sigue mostrando (con el error arriba) y no cuenta como fresco.
+        Object.assign(entrada, { error: err.message, fallo: Date.now() });
+        if ((avisar || primera) && mostrando(feature.id)) anunciar(err.message);
+      })
+      .finally(() => {
+        if (entrada.cargando === pedido) entrada.cargando = null;
+        repintarIntegracion(tipo, feature.id);
+      });
+    entrada.cargando = pedido;
+    if (pintar) repintarIntegracion(tipo, feature.id);
+    return pedido;
+  }
+
+  // Si la ficha sigue mostrando ese elemento, se rehace solo su sección (una
+  // respuesta tardía no aparece en la ficha de otro).
+  function repintarIntegracion(tipo, id) {
+    if (!mostrando(id)) return;
+    const sec = root.querySelector(`[data-integ="${tipo}-${id}"]`);
+    const feature = red.state.elementos.get(id);
+    if (sec && feature) pintarIntegracion(sec, feature);
+  }
+
+  function resumenIntegracion(tipo, d) {
+    if (tipo === 'nap' && d.nap) return `${d.nap.nombre} en Wispro: ${plural(d.contratos?.length ?? 0, 'contrato', 'contratos')}.`;
+    if (tipo === 'nap' && d.wispro) return 'Esta caja no aparece en Wispro con ese nombre: hay que elegir su NAP.';
+    if (tipo === 'cliente' && d.contrato) {
+      return `En Wispro: contrato${Number.isFinite(d.contrato.numero) ? ` #${d.contrato.numero}` : ''} de ${d.contrato.cliente || 'un cliente sin nombre'}.`;
+    }
+    if (tipo === 'cliente' && d.wispro) return 'Este cliente no aparece en Wispro.';
+    if (d.medida) return 'Se encontró su ONT en el panel de la OLT.';
+    return d.errores?.join(' ') || 'Terminó la lectura de Wispro y del panel de la OLT.';
+  }
+
+  const cabeceraInteg = (titulo, extra = null) => h('header.integ-cab', {}, h('h3', { text: titulo }), extra);
+
+  // Cuando falla una lectura, lo de antes queda a la vista con el error arriba.
+  function errorAlActualizar(entrada) {
+    if (!entrada.error || !entrada.datos) return null;
+    return h('p.integ-error', { text: `No se pudo actualizar: ${entrada.error} Se muestra lo leído ${I.haceCuanto(new Date(entrada.cuando).toISOString())}.` });
+  }
+
+  // Un botón de una acción de la sección: dice "Agregando…" o lo que sea mientras corre.
+  const botonAccion = (entrada, clave, texto, haciendo, alTocar, extra = {}) => boton(entrada.ocupado === clave ? haciendo : texto, alTocar, extra);
+
+  function textoComparacion(dif, estimada, { ont = false } = {}) {
+    if (!Number.isFinite(dif)) return null;
+    const base = `La carta estima ${formatDbm(estimada)}${ont ? ' para esta ONT' : ''}`;
+    if (Math.abs(dif) < 1.5) return `${base}: la medida coincide.`;
+    const cuanto = `la medida da ${formatDb(Math.abs(dif))} ${dif < 0 ? 'menos' : 'más'}`;
+    if (ont && dif <= -I.DESVIO_DB) return `${base}: ${cuanto}. Revisá conectores y empalmes en el camino.`;
+    return `${base}: ${cuanto}.`;
+  }
+
+  // Una acción de la sección (agregar, medir, vincular): mientras dura, la sección
+  // queda trabada; al terminar se vuelve a leer, porque lo de antes ya no sirve.
+  async function accionIntegracion(feature, clave, tarea, { releer = true } = {}) {
+    const tipo = feature.properties.tipo;
+    const entrada = integCache.get(`${tipo}:${feature.id}`);
+    if (!entrada || entrada.ocupado) return;
+    entrada.ocupado = clave;
+    repintarIntegracion(tipo, feature.id);
+    try {
+      await tarea(entrada);
+    } catch (err) {
+      acciones.integracion.aviso(err.message);
+    } finally {
+      try {
+        if (releer) {
+          // Un vínculo o un cliente nuevo cambian también lo que muestran otras fichas
+          // (la caja, el cliente, los dudosos): se vuelven a leer cuando se abran.
+          for (const e of integCache.values()) if (e !== entrada) e.cuando = 0;
+          const actual = red.state.elementos.get(feature.id);
+          if (actual) await cargarIntegracion(actual, { pintar: false });
+        }
+      } finally {
+        entrada.ocupado = null;
+        repintarIntegracion(tipo, feature.id);
+      }
+    }
+  }
+
+  function medirIntegracion(feature) {
+    const tipo = feature.properties.tipo;
+    return accionIntegracion(feature, 'medir', async (entrada) => {
+      const res = await acciones.integracion.medir(tipo, feature.id);
+      const lista = (tipo === 'nap' ? entrada.datos?.contratos : [entrada.datos?.contrato]) ?? [];
+      for (const c of lista) {
+        const m = c ? res.medidas?.[c.id] : null;
+        if (!m) continue;
+        if (m.error) c.vivoError = m.error;
+        else Object.assign(c, { vivo: m, vivoError: null });
+      }
+      const n = Object.values(res.medidas ?? {}).filter((m) => !m.error).length;
+      acciones.integracion.toast(n ? `${plural(n, 'ONT medida', 'ONTs medidas')} en vivo` : 'Wispro no devolvió ninguna medida');
+    }, { releer: false });
+  }
+
+  function importarIntegracion(feature, ids) {
+    return accionIntegracion(feature, `importar:${ids.join(',')}`, async () => {
+      const res = await acciones.integracion.importar(feature.id, ids);
+      if (!res) return;
+      const n = res.elementos.length;
+      const motivos = [...new Set((res.omitidos ?? []).map((o) => o.motivo))];
+      const extra = res.omitidos?.length ? ` · ${plural(res.omitidos.length, 'no se agregó', 'no se agregaron')}: ${motivos.join('; ')}` : '';
+      acciones.integracion.toast(`${n ? `${plural(n, 'cliente agregado', 'clientes agregados')} al mapa` : 'No se agregó ningún cliente'}${extra}`);
+    });
+  }
+
+  function vincularCaja(feature, nap) {
+    return accionIntegracion(feature, `caja:${nap.id}`, async () => {
+      await acciones.integracion.vincularNap(feature, nap);
+      acciones.integracion.toast(`${feature.properties.nombre || 'La caja'} quedó vinculada con ${nap.nombre} de Wispro`);
+    });
+  }
+
+  // Confirma que un cliente del mapa es el de un contrato (queda vinculado).
+  const numeroDe = (contrato) => (Number.isFinite(contrato.numero) ? ` #${contrato.numero}` : '');
+
+  function confirmarCliente(feature, clienteId, contrato) {
+    return accionIntegracion(feature, `confirmar:${contrato.id}:${clienteId}`, async () => {
+      const res = await acciones.integracion.vincularCliente(clienteId, contrato.id);
+      if (!res) return;
+      acciones.integracion.toast(`${res.elemento?.properties?.nombre || 'El cliente'} quedó vinculado con el contrato${numeroDe(contrato)} de Wispro`);
+    });
+  }
+
+  // Un «No es» tocado sin querer: el contrato se vuelve a considerar para este cliente.
+  function reconsiderarContrato(feature, contrato) {
+    return accionIntegracion(feature, `reconsiderar:${contrato.id}`, async () => {
+      const res = await acciones.integracion.desvincularCliente(feature.id, contrato.id, { deshacer: true });
+      if (res) acciones.integracion.toast(`Se vuelve a considerar el contrato${numeroDe(contrato)}`);
+    });
+  }
+
+  // Un cliente del mapa no es el de ese contrato: se deshace el vínculo (si lo había)
+  // y no se lo vuelve a proponer.
+  function descartarCliente(feature, clienteId, contrato) {
+    return accionIntegracion(feature, `descartar:${contrato.id}:${clienteId}`, async () => {
+      const res = await acciones.integracion.desvincularCliente(clienteId, contrato.id);
+      if (!res) return;
+      acciones.integracion.toast(`Listo: ${res.elemento?.properties?.nombre || 'el cliente'} no es el contrato${numeroDe(contrato)} de Wispro`);
+    });
+  }
+
+  function vistaCandidatas(feature, d, entrada) {
+    const cambiando = Boolean(d.nap);
+    const texto = d.perdida
+      ? 'La NAP de Wispro vinculada a esta caja ya no existe. ¿Cuál es ahora?'
+      : cambiando ? '¿Con qué NAP de Wispro se corresponde esta caja?' : 'Esta caja no aparece en Wispro con ese nombre. ¿Es alguna de estas?';
+    const lista = d.candidatas?.length
+      ? h('ul.integ-candidatas', {}, ...d.candidatas.map((n) => {
+        const b = boton('', () => vincularCaja(feature, n), { class: 'enlace', 'aria-pressed': String(d.nap?.id === n.id) });
+        const detalle = [n.distancia_m !== null ? `a ${formatLargo(n.distancia_m)}` : 'sin ubicación', plural(n.contratos, 'contrato', 'contratos'), n.olt,
+          entrada.ocupado === `caja:${n.id}` ? 'vinculando…' : null];
+        b.append(h('strong', { text: n.nombre }), h('small', { text: detalle.filter(Boolean).join(' · ') }));
+        return h('li', {}, b);
+      }))
+      : h('p.ficha-sub', { text: 'No hay NAPs de Wispro a menos de 1,5 km ni con un nombre parecido. Revisá el nombre de la caja o su ubicación en Wispro.' });
+    return [
+      cabeceraInteg('En Wispro', cambiando ? boton('Cancelar', () => {
+        // Lo que esté llegando con las candidatas ya no vale.
+        Object.assign(entrada, { candidatas: false, pedidos: entrada.pedidos + 1, cargando: null });
+        repintarIntegracion('nap', feature.id);
+      }, { class: 'integ-mini' }) : null),
+      errorAlActualizar(entrada),
+      h('p', { text: texto }),
+      lista,
+    ];
+  }
+
+  function avisosNap(d, virtual, est, pons) {
+    const avisos = [];
+    const leido = d.panel?.leido;
+    if (d.configurada?.panel && leido && I.viejo(leido)) {
+      avisos.push(`El panel de la OLT no lee la OLT desde el ${formatFecha(leido)}: las potencias son de ese momento.`
+        + (d.configurada?.wispro ? ' «Medir ahora» las lee en vivo por Wispro.' : ''));
+    }
+    if (est.fuera.length && est.fuera.length === est.conLectura && est.conLectura >= 2) {
+      avisos.push('Todas las ONTs de la caja están sin señal: el corte está antes de la caja (la fibra que llega o el splitter).');
+    } else if (est.fuera.length) {
+      avisos.push(`Sin señal: ${est.fuera.map((c) => c.cliente || `#${c.numero}`).join(', ')}.`);
+    }
+    for (const g of est.juntas) {
+      const causas = [...new Set(g.items.map((x) => x.causa).filter(Boolean))];
+      const luz = causas.length && causas.every((x) => /gasp/i.test(x));
+      avisos.push(`${plural(new Set(g.items.map((x) => x.id)).size, 'ONT', 'ONTs')} se cayeron juntas el ${formatFecha(new Date(g.desde).toISOString())}`
+        + `${causas.length ? ` (${causas.join(', ')})` : ''}: ${luz ? 'parece un corte de luz.' : 'el problema estuvo antes de la caja.'}`);
+    }
+    if (Number.isFinite(virtual?.diferencia) && virtual.diferencia <= -I.DESVIO_DB) {
+      avisos.push(`En las bocas hay ${formatDb(-virtual.diferencia)} menos de lo que estima la carta: algo pierde de más antes de la caja (empalmes, conectores o un splitter distinto del cargado).`);
+    } else if (Number.isFinite(virtual?.diferencia) && virtual.diferencia >= I.DESVIO_DB) {
+      avisos.push(`En las bocas hay ${formatDb(virtual.diferencia)} más de lo que estima la carta: revisá la potencia de la OLT y los splitters cargados.`);
+    }
+    // Lo de cada cliente, junto: llega bajo, varía o viene bajando.
+    const porCliente = new Map();
+    const anotar = (id, nombre, texto) => {
+      if (!porCliente.has(id)) porCliente.set(id, { nombre: nombre || 'Un cliente', textos: [] });
+      porCliente.get(id).textos.push(texto);
+    };
+    for (const f of virtual?.bajas ?? []) anotar(f.id, f.cliente, `llega ${formatDb(virtual.boca - f.boca)} por debajo del resto`);
+    for (const x of est.inestables) anotar(x.id, x.cliente, `varió ${formatDb(x.rango)} en la semana`);
+    for (const x of est.bajando) anotar(x.id, x.cliente, `viene bajando ${formatDb(-x.ritmo)} por semana`);
+    for (const { nombre, textos } of porCliente.values()) {
+      const lista = textos.length > 1 ? `${textos.slice(0, -1).join(', ')} y ${textos.at(-1)}` : textos[0];
+      avisos.push(`${nombre}: ${lista}. Revisá su bajada y sus conectores.`);
+    }
+    if (pons.size > 1) {
+      avisos.push(`Los clientes de esta caja están en ${pons.size} puertos PON: ${[...pons].map(([p, n]) => `${p} (${n})`).join(', ')}.`);
+    } else if (pons.size === 1 && d.nap.fbp && !mismoPon(d.nap.fbp, [...pons.keys()][0])) {
+      avisos.push(`En Wispro la caja figura en ${d.nap.olt ?? 'su OLT'} ${d.nap.fbp}, pero sus ONTs están en ${[...pons.keys()][0]}.`);
+    }
+    return avisos;
+  }
+
+  // Un cliente del mapa, para ir a su ficha; varios van separados por comas (la
+  // coma queda pegada al nombre, no al principio de la línea siguiente).
+  const enlaceCliente = (ref) => boton(ref.nombre || 'Cliente sin nombre', () => acciones.seleccionar('elemento', ref.id), { class: 'integ-enlace' });
+  const enlacesClientes = (refs) => refs.flatMap((r, i) => (i < refs.length - 1 ? [h('span.junto', {}, enlaceCliente(r), ','), ' '] : [enlaceCliente(r)]));
+
+  // Lo que va en la columna de la potencia: corto, para que entre al lado del nombre.
+  function textoPotencia(c, m) {
+    if (m && Number.isFinite(m.rx)) return formatDbm(m.rx);
+    if (m && m.estado && m.estado !== 'online') return 'sin señal';
+    return c.sn ? 'sin lectura' : 'sin ONT en Wispro';
+  }
+
+  // Dónde está en el mapa el cliente de un contrato, o por qué no está.
+  // Cómo coincide un cliente del mapa con un contrato: "por el n.º de abonado, a 4,4 km".
+  const comoCoincide = (x) => [POR[x.por] ?? 'por un dato que coincide', x.lejos_m ? `a ${formatLargo(x.lejos_m)}` : null]
+    .filter(Boolean).join(', ');
+
+  // Dudosos que coinciden solo lejos (a más de 2 km): no frenan agregar el contrato al mapa.
+  const soloLejos = (t) => Boolean(t?.dudosos?.length && t.dudosos.every((x) => x.lejos_m));
+
+  // "Es este" (queda vinculado) y "No es" (no se lo vuelve a proponer) para un
+  // cliente del mapa que podría ser el de un contrato. "No es" no se ofrece si lo
+  // que coincide es la ONT o el n.º de contrato cerca: eso se corrige en el dato.
+  function botonesDuda(feature, entrada, contrato, ref, { si = 'Es este', haciendo = 'Vinculando…', etiquetaSi, etiquetaNo, por, lejos }) {
+    const descartable = DEBIL.has(por) || Boolean(lejos);
+    return h('span.integ-botones', {},
+      botonAccion(entrada, `confirmar:${contrato.id}:${ref.id}`, si, haciendo, () => confirmarCliente(feature, ref.id, contrato),
+        { class: 'integ-mini', 'aria-label': etiquetaSi }),
+      descartable
+        ? botonAccion(entrada, `descartar:${contrato.id}:${ref.id}`, 'No es', 'Quitando…', () => descartarCliente(feature, ref.id, contrato),
+          { class: 'integ-mini', 'aria-label': etiquetaNo })
+        : null);
+  }
+
+  function enElMapa(feature, entrada, c) {
+    const t = c.traza;
+    const quien = c.cliente || (Number.isFinite(c.numero) ? `el contrato #${c.numero}` : 'este contrato');
+    if (t?.id) {
+      const nombre = t.nombre || 'el cliente del mapa';
+      const dudas = DEBIL.has(t.por)
+        ? botonesDuda(feature, entrada, c, t, { si: 'Confirmar', haciendo: 'Confirmando…', por: t.por,
+          etiquetaSi: `Confirmar que ${nombre} es ${quien}`, etiquetaNo: `${nombre} no es ${quien}` })
+        : null;
+      return h('span.integ-falta', {}, h('span', {}, 'En el mapa: ', enlaceCliente(t), POR[t.por] ? h('small', { text: ` (${POR[t.por]})` }) : null), dudas);
+    }
+    if (t?.repetidos) {
+      return h('span.integ-repetido', {}, `Está ${t.repetidos.length} veces en el mapa${POR[t.por] ? ` (${POR[t.por]})` : ''}: `,
+        ...enlacesClientes(t.repetidos), '. Borrá el que sobra.');
+    }
+    if (t?.dudosos) {
+      const agregar = soloLejos(t) && c.ubicacion && !c.lejos_m
+        ? botonAccion(entrada, `importar:${c.id}`, 'Agregar al mapa', 'Agregando…', () => importarIntegracion(feature, [c.id]),
+          { class: 'integ-mini', 'aria-label': `Agregar al mapa a ${quien}` })
+        : null;
+      return h('div.integ-dudosos', {},
+        h('span', { text: 'En el mapa podría ser:' }),
+        h('ul', {}, ...t.dudosos.map((x) => {
+          const nombre = x.nombre || 'Ese cliente del mapa';
+          return h('li', {},
+            h('span', {}, enlaceCliente(x), h('small', { text: ` (${comoCoincide(x)})` })),
+            botonesDuda(feature, entrada, c, x, { por: x.por, lejos: x.lejos_m, etiquetaSi: `${nombre} es ${quien}`, etiquetaNo: `${nombre} no es ${quien}` }));
+        })),
+        agregar ? h('span.integ-falta', {}, h('span', { text: 'Si no es ninguno:' }), agregar) : null);
+    }
+    if (c.lejos_m) return h('span', { text: `No está en el mapa: su ubicación en Wispro está a ${formatLargo(c.lejos_m)} de la caja` });
+    if (c.ubicacion) {
+      return h('span.integ-falta', {}, h('span', { text: 'No está en el mapa' }),
+        botonAccion(entrada, `importar:${c.id}`, 'Agregar al mapa', 'Agregando…', () => importarIntegracion(feature, [c.id]),
+          { class: 'integ-mini', 'aria-label': `Agregar al mapa a ${quien}` }));
+    }
+    return h('span', { text: 'No está en el mapa y Wispro no tiene su ubicación' });
+  }
+
+  function filaContrato(feature, entrada, c) {
+    const m = I.medidaVigente(c);
+    const nivel = I.nivelDe(m);
+    const sinSenal = Boolean(m && !Number.isFinite(m.rx) && m.estado && m.estado !== 'online');
+    const detalle = [
+      c.sn ? `ONT ${c.sn}` : null,
+      m?.interfaz,
+      sinSenal ? m.causa : null,
+      sinSenal && Number.isFinite(m.rx_ultima) ? `tenía ${formatDbm(m.rx_ultima)}` : null,
+      m?.fuente === 'wispro' ? `en vivo ${I.haceCuanto(m.cuando)}` : null,
+      c.vivoError ? `en vivo: ${c.vivoError}` : null,
+    ].filter(Boolean).join(' · ');
+    return h('li.integ-contrato', {},
+      h('div.integ-linea', {},
+        h('span.integ-nombre', {}, h('strong', { text: c.cliente || 'Sin nombre' }),
+          Number.isFinite(c.numero) ? h('small', { text: ` #${c.numero}` }) : null,
+          c.estado && c.estado !== 'enabled' ? h('span.chip', { text: ESTADO_CONTRATO[c.estado] ?? c.estado }) : null),
+        h('span.integ-pot', {}, h('span.integ-num', { text: textoPotencia(c, m) }),
+          nivel && Number.isFinite(m?.rx) ? h(`span.nivel.${nivel.nivel}`, { text: nivel.texto }) : null)),
+      h('div.integ-linea.integ-sub', {}, enElMapa(feature, entrada, c), detalle ? h('small', { text: detalle }) : null));
+  }
+
+  // Orden: sin señal primero, después de la peor potencia a la mejor, y al final los que no tienen lectura.
+  function ordenContratos(contratos) {
+    const clave = (c) => {
+      const m = I.medidaVigente(c);
+      if (m && !Number.isFinite(m.rx) && m.estado && m.estado !== 'online') return [0, 0];
+      if (m && Number.isFinite(m.rx)) return [1, m.rx];
+      return [2, 0];
+    };
+    return [...contratos].sort((a, b) => {
+      const [x, y] = [clave(a), clave(b)];
+      return x[0] - y[0] || x[1] - y[1] || String(a.cliente).localeCompare(String(b.cliente), 'es');
+    });
+  }
+
+  function vistaNap(feature, entrada) {
+    const d = entrada.datos;
+    const errores = d.errores?.length ? h('ul.integ-errores', {}, ...d.errores.map((e) => h('li', { text: e }))) : null;
+    const actualizar = boton(entrada.cargando ? 'Actualizando…' : 'Actualizar', () => cargarIntegracion(feature, { refrescar: true, avisar: true }),
+      { disabled: Boolean(entrada.cargando) });
+    if (!d.configurada?.wispro) {
+      return [cabeceraInteg('En Wispro'),
+        h('p.ficha-sub', { text: 'Esta red no está conectada con Wispro, así que no se sabe qué clientes tiene esta caja. Se conecta en el servidor con el comando integraciones.' })];
+    }
+    if (!d.wispro) return [cabeceraInteg('En Wispro'), errorAlActualizar(entrada), errores, botones(actualizar)];
+    if (!d.nap || entrada.candidatas) return [...vistaCandidatas(feature, d, entrada), errores];
+
+    const s = red.state;
+    const contratos = d.contratos ?? [];
+    const virtual = I.medicionVirtual(s, feature, contratos);
+    const est = I.estabilidad(contratos);
+    const pons = I.puertosPon(contratos);
+    const avisos = avisosNap(d, virtual, est, pons);
+    // "Sin caídas" solo si el panel está al día y llegó la semana de cada ONT que tiene.
+    const conSemana = contratos.some((c) => c.historia?.tendencia?.muestras > 0);
+    const historiaCompleta = contratos.every((c) => c.medida?.panel_id === undefined || c.medida?.panel_id === null || c.historia);
+    const bien = !avisos.length && conSemana && historiaCompleta && !I.viejo(d.panel?.leido) && !est.caidas.length
+      ? 'Sin caídas en los últimos 7 días.' : null;
+    const faltan = contratos.filter((c) => (!c.traza || soloLejos(c.traza)) && c.ubicacion && !c.lejos_m);
+
+    const cambiar = boton('Cambiar', () => cargarIntegracion(feature, { candidatas: true }),
+      { class: 'integ-mini', title: 'Vincular esta caja con otra NAP de Wispro', disabled: Boolean(entrada.cargando) });
+    const sub = [plural(contratos.length, 'contrato', 'contratos'), d.nap.olt, d.nap.fbp,
+      d.nap.por === 'nombre' ? 'encontrada por el nombre' : null].filter(Boolean).join(' · ');
+    let medida = null;
+    if (virtual) {
+      const rango = virtual.filas.length > 1 ? `, entre ${formatDbm(virtual.max)} y ${formatDbm(virtual.min)}` : '';
+      medida = h('div.integ-medida', {},
+        h('p.integ-valor', {}, h('strong', { text: `≈ ${formatDbm(virtual.boca)}` }), h('span', { text: 'en las bocas de la caja' })),
+        h('p.ficha-sub', { text: `Medición virtual con ${plural(virtual.filas.length, 'ONT', 'ONTs')}${rango}.` }),
+        virtual.diferencia !== null && Math.abs(virtual.diferencia) < I.DESVIO_DB
+          ? h('p.integ-comparacion', { text: textoComparacion(virtual.diferencia, virtual.estimada) }) : null);
+    } else if (contratos.length) {
+      medida = h('p.ficha-sub', { text: d.configurada?.panel || d.configurada?.wispro
+        ? 'Todavía no hay potencias de las ONTs de esta caja para la medición virtual.'
+        : 'Sin potencias: la red no está conectada con el panel de la OLT.' });
+    }
+    const medir = contratos.some((c) => c.sn)
+      ? botonAccion(entrada, 'medir', 'Medir ahora', 'Midiendo…', () => medirIntegracion(feature),
+        { title: 'Lee en vivo, por Wispro, la potencia de cada ONT de la caja' })
+      : null;
+    let agregar = null;
+    if (faltan.length) {
+      const ids = faltan.map((c) => c.id);
+      agregar = botonAccion(entrada, `importar:${ids.join(',')}`,
+        faltan.length === 1 ? 'Agregar al mapa el que falta' : `Agregar al mapa los ${faltan.length} que faltan`, 'Agregando…',
+        () => importarIntegracion(feature, ids), { class: 'primario' });
+    }
+    const leidos = [`Wispro: ${I.haceCuanto(d.wispro.leido)}`];
+    if (d.panel?.leido) leidos.push(`panel de la OLT: lecturas del ${formatFecha(d.panel.leido)}`);
+    return [
+      cabeceraInteg(`En Wispro: ${d.nap.nombre}`, cambiar),
+      h('p.ficha-sub', { text: sub }),
+      errorAlActualizar(entrada),
+      medida,
+      avisos.length || bien ? h('ul.integ-avisos', {}, ...avisos.map((t) => h('li', { text: t })), bien ? h('li.bien', { text: bien }) : null) : null,
+      errores,
+      contratos.length
+        ? h('ul.integ-contratos', { 'aria-label': 'Contratos de la caja en Wispro' }, ...ordenContratos(contratos).map((c) => filaContrato(feature, entrada, c)))
+        : h('p.ficha-sub', { text: 'Wispro no tiene contratos en esta caja.' }),
+      botones(agregar, medir, actualizar),
+      h('p.ficha-nota', { text: `${leidos.join(' · ')}. La medición virtual suma a la potencia de cada ONT lo que pierde su bajada (conectores y fibra).` }),
+    ];
+  }
+
+  // Contratos de Wispro que podrían ser de este cliente (coincide un dato, pero no
+  // alcanza para darlo por hecho): se confirma con un toque.
+  function vistaPosibles(feature, entrada, posibles) {
+    return h('div.integ-dudosos', {},
+      h('p', { text: posibles.length === 1 ? '¿Es este su contrato?' : '¿Es alguno de estos su contrato?' }),
+      h('ul', {}, ...posibles.map((p) => {
+        const cual = `El contrato${numeroDe(p)} de ${p.cliente || 'Wispro'}`;
+        return h('li', {},
+          h('span', {}, h('strong', { text: p.cliente || 'Sin nombre' }), Number.isFinite(p.numero) ? h('small', { text: ` #${p.numero}` }) : null,
+            h('small', { text: ` · ${[p.nap_nombre, comoCoincide(p)].filter(Boolean).join(' · ')}` })),
+          botonesDuda(feature, entrada, p, { id: feature.id },
+            { por: p.por, lejos: p.lejos_m, etiquetaSi: `${cual} es el de este cliente`, etiquetaNo: `${cual} no es el de este cliente` }));
+      })));
+  }
+
+  // Contratos con los que coincide algún dato del cliente pero que en el mapa son de
+  // otro: puede ser el mismo cliente dibujado dos veces.
+  const DATO = { vinculado: 'Su vínculo', ont: 'Su ONT', contrato: 'Su n.º de contrato', abonado: 'Su n.º de abonado', nombre: 'Su nombre' };
+  function vistaOcupados(ocupados) {
+    return h('div.integ-dudosos', {},
+      h('ul', {}, ...ocupados.map((o) => h('li', {}, h('span', {},
+        `${DATO[o.por] ?? 'Un dato'} coincide con el contrato${numeroDe(o)} de ${o.cliente || 'Wispro'}, que en el mapa es `,
+        ...enlacesClientes(o.en_mapa), '.')))),
+      h('p.ficha-nota', { text: 'Si es el mismo cliente, borrá uno de los dos; si no, corregí el dato en su ficha.' }));
+  }
+
+  // Los contratos marcados «No es» en este cliente: se puede deshacer (un toque sin querer).
+  function vistaDescartados(feature, entrada, descartados) {
+    return h('div.integ-descartados', {},
+      h('p.ficha-nota', { text: 'Marcados «No es» (no se proponen para este cliente):' }),
+      h('ul', {}, ...descartados.map((x) => h('li', {},
+        h('span', { text: x.numero === undefined ? 'Un contrato que ya no está en Wispro' : `Contrato${numeroDe(x)} de ${x.cliente || 'Wispro'}` }),
+        botonAccion(entrada, `reconsiderar:${x.id}`, 'Deshacer', 'Deshaciendo…', () => reconsiderarContrato(feature, x),
+          { class: 'integ-mini', 'aria-label': `Volver a considerar el contrato${numeroDe(x)} para este cliente` })))));
+  }
+
+  function vistaCliente(feature, entrada) {
+    const d = entrada.datos;
+    const s = red.state;
+    const c = d.contrato;
+    const m = I.medidaVigente({ medida: d.medida, vivo: c?.vivo });
+    const errores = d.errores?.length ? h('ul.integ-errores', {}, ...d.errores.map((e) => h('li', { text: e }))) : null;
+    const actualizar = boton(entrada.cargando ? 'Actualizando…' : 'Actualizar', () => cargarIntegracion(feature, { refrescar: true, avisar: true }),
+      { disabled: Boolean(entrada.cargando) });
+    const posibles = d.posibles?.length ? vistaPosibles(feature, entrada, d.posibles) : null;
+    const ocupados = d.ocupados?.length ? vistaOcupados(d.ocupados) : null;
+    const descartados = d.descartados?.length ? vistaDescartados(feature, entrada, d.descartados) : null;
+    // "No aparece" solo si Wispro se pudo leer (si falló, se ve el error) y no hay otra explicación.
+    let noAparece = null;
+    if (!c && d.wispro && posibles) noAparece = 'No está vinculado con ningún contrato de Wispro, pero hay datos que coinciden.';
+    else if (!c && d.wispro && !ocupados) {
+      noAparece = 'Este cliente no aparece en Wispro: no coinciden su ONT ni su n.º de contrato o de abonado, y no hay un contrato con su nombre cerca. Anotá alguno de esos datos en su ficha.';
+    }
+    if (!c && !m) {
+      const texto = noAparece ?? (d.configurada?.panel && !d.configurada?.wispro
+        ? 'El panel de la OLT no tiene la ONT de este cliente: anotá su número de serie en el campo ONT.' : null);
+      return [cabeceraInteg('En Wispro'), errorAlActualizar(entrada), texto ? h('p.ficha-sub', { text: texto }) : null, posibles, ocupados,
+        errores, botones(actualizar), descartados];
+    }
+    const nivel = I.nivelDe(m);
+    const datos = h('dl.ficha-datos.integ-datos', {},
+      c ? fila('Contrato', [`#${c.numero ?? '—'}`, ESTADO_CONTRATO[c.estado] ?? c.estado].filter(Boolean).join(' · ')) : null,
+      c ? fila('Titular', c.cliente) : null,
+      c && POR[c.por] ? fila('Encontrado', POR[c.por]) : null,
+      c?.nap_nombre ? fila('NAP en Wispro', c.nap_nombre) : null,
+      c?.sn || m?.sn ? fila('ONT', [c?.sn ?? m?.sn, m?.interfaz, m?.olt].filter(Boolean).join(' · ')) : null);
+    let medida = null;
+    if (m) {
+      const cuando = m.fuente === 'wispro'
+        ? `Medida en vivo por Wispro ${I.haceCuanto(m.cuando)}.`
+        : `Lectura del panel de la OLT del ${formatFecha(m.cuando)} (${I.haceCuanto(m.cuando)}).`;
+      // Lo que estima la carta para esta ONT, si el pelo llega a una OLT con su potencia cargada.
+      const con = F.conexionCliente(s, feature);
+      const pot = con?.origen?.motivo === 'olt' ? F.potencias(s, F.recorrido(s, feature.id, con.ext)) : null;
+      const comp = pot?.llega !== null && pot?.llega !== undefined && Number.isFinite(m.rx)
+        ? textoComparacion(m.rx - pot.llega, pot.llega, { ont: true }) : null;
+      const sinSenal = !Number.isFinite(m.rx);
+      medida = h('div.integ-medida', {},
+        h('p.integ-valor', {}, h('strong', { text: sinSenal ? 'sin señal' : formatDbm(m.rx) }),
+          nivel && !sinSenal ? h(`span.nivel.${nivel.nivel}`, { text: nivel.texto }) : null),
+        h('p.ficha-sub', { text: [cuando, sinSenal && m.causa ? `Causa: ${m.causa}.` : null,
+          sinSenal && Number.isFinite(m.rx_ultima) ? `Tenía ${formatDbm(m.rx_ultima)}.` : null].filter(Boolean).join(' ') }),
+        comp ? h('p.integ-comparacion', { text: comp }) : null);
+    } else if (c?.vivoError) {
+      medida = h('p.ficha-sub', { text: `En vivo: ${c.vivoError}.` });
+    }
+    const historia = d.historia;
+    const tend = historia?.tendencia;
+    const lineas = [];
+    if (tend && Number.isFinite(tend.rx_min) && Number.isFinite(tend.rx_max) && tend.muestras) {
+      lineas.push(`En 7 días: entre ${formatDbm(tend.rx_max)} y ${formatDbm(tend.rx_min)} (${plural(tend.muestras, 'lectura', 'lecturas')})`
+        + (Number.isFinite(tend.db_semana) && Math.abs(tend.db_semana) >= 0.05
+          ? `; ${tend.db_semana < 0 ? 'baja' : 'sube'} ${formatDb(Math.abs(tend.db_semana))} por semana.` : '.'));
+    }
+    const est = I.estabilidad([{ id: c?.id ?? 'x', cliente: '', medida: d.medida, historia }]);
+    if (est.caidas.length) {
+      const ultimas = est.caidas.slice(-3).reverse().map((x) => `${formatFecha(new Date(x.t).toISOString())}${x.causa ? ` (${x.causa})` : ''}`);
+      lineas.push(`${plural(est.caidas.length, 'caída', 'caídas')} en 7 días: ${ultimas.join(', ')}${est.caidas.length > 3 ? '…' : ''}.`);
+    } else if (tend?.muestras > 0 && !I.viejo(d.panel?.leido)) lineas.push('Sin caídas en los últimos 7 días.');
+    const avisos = [];
+    // La lectura es vieja si el panel dejó de leer la OLT (una ONT apagada tiene su última lectura vieja, y está bien).
+    if (m?.fuente === 'panel' && d.panel?.leido && I.viejo(d.panel.leido)) {
+      avisos.push([`El panel de la OLT no lee la OLT desde el ${formatFecha(d.panel.leido)}: esta lectura es de ese momento.`]);
+    }
+    if (c?.repetidos?.length) {
+      avisos.push(['Este contrato también está en el mapa como ', ...enlacesClientes(c.repetidos), '. Borrá el que sobra.']);
+    }
+    const medir = c?.sn && d.configurada?.wispro
+      ? botonAccion(entrada, 'medir', 'Medir ahora', 'Midiendo…', () => medirIntegracion(feature), { title: 'Lee en vivo, por Wispro, la potencia de esta ONT' })
+      : null;
+    // Lo encontrado por el abonado o el nombre se confirma (o se descarta); lo demás
+    // también se puede deshacer si no es su contrato.
+    let confirmar = null;
+    let noEs = null;
+    if (c && DEBIL.has(c.por)) {
+      confirmar = h('div.integ-confirmar', {},
+        h('p', { text: `El contrato se encontró ${POR[c.por]}. ¿Es el de este cliente?` }),
+        botonesDuda(feature, entrada, c, { id: feature.id }, { si: 'Sí, es su contrato', haciendo: 'Vinculando…', por: c.por,
+          etiquetaSi: `El contrato${numeroDe(c)} es el de este cliente`, etiquetaNo: `El contrato${numeroDe(c)} no es el de este cliente` }));
+    } else if (c?.por === 'ont' || c?.por === 'contrato') {
+      // Lo encontró un dato que se anotó en la ficha: si está mal, se corrige el dato.
+      noEs = h('p.ficha-nota', { text: c.por === 'ont'
+        ? 'Se encontró por la ONT anotada en su ficha: si no es su contrato, corregila con «Editar».'
+        : 'Se encontró por el n.º de contrato anotado en su ficha: si no es su contrato, corregilo con «Editar».' });
+    } else if (c) {
+      noEs = h('p.ficha-nota.integ-no-es', {}, 'Si este no es su contrato: ',
+        botonAccion(entrada, `descartar:${c.id}:${feature.id}`, 'No es su contrato', 'Quitando…', () => descartarCliente(feature, feature.id, c),
+          { class: 'integ-mini' }));
+    }
+    return [
+      cabeceraInteg('En Wispro'),
+      errorAlActualizar(entrada),
+      datos,
+      confirmar,
+      medida,
+      lineas.length ? h('p.integ-historia', { text: lineas.join(' ') }) : null,
+      avisos.length ? h('ul.integ-avisos', {}, ...avisos.map((partes) => h('li', {}, ...partes))) : null,
+      noAparece ? h('p.ficha-sub', { text: noAparece }) : null,
+      posibles,
+      ocupados,
+      errores,
+      botones(medir, actualizar),
+      noEs,
+      descartados,
+    ];
+  }
+
   function verElemento(feature) {
+    // Al abrir la ficha de otra cosa, una caja que estaba eligiendo su NAP de Wispro
+    // ("Cambiar") vuelve a su vista normal.
+    if (!mostrando(feature.id)) {
+      const e = integCache.get(`nap:${feature.id}`);
+      if (e) e.candidatas = false;
+    }
     const props = feature.properties;
     const def = ELEMENTOS[props.tipo] ?? { label: props.tipo, nombre: props.tipo };
     const datos = props.datos ?? {};
@@ -356,9 +1005,12 @@ export function setupFicha({ root, red, acciones }) {
       avisos.push(pegados.length === 1 ? 'El cable que pasa por acá queda suelto en este punto.' : `Los ${pegados.length} cables que pasan por acá quedan sueltos en este punto.`);
     }
     const confirmar = confirmacion(`¿Borrar ${props.nombre}?${avisos.length ? ` ${avisos.join(' ')}` : ''}`, () => acciones.borrarElemento(feature));
+    const integ = seccionIntegracion(feature);
     abrir('elemento', [
       conexion,
+      props.tipo === 'cliente' ? integ : null,
       detalle,
+      props.tipo === 'nap' ? integ : null,
       cables,
       firma(props),
       conCarta ? botones(boton('Carta de empalme', () => acciones.abrirCarta(feature), { class: 'primario' })) : null,

@@ -1,14 +1,58 @@
 # Cambios
 
-## Sin publicar
+## 0.6.0 · 14/10/2026
 
+Wispro y el panel de la OLT en las NAP: clientes de cada caja, potencias,
+medición virtual y estabilidad.
+
+- Conexión por red, desde el servidor: `bin/integraciones` (`ver`, `wispro`,
+  `panel`, `quitar`, `probar`). El token de Wispro se escribe sin que se vea y
+  queda en `data/integraciones.json` (600, del usuario del servicio); nunca
+  llega al visor, y no se manda a otro servidor si Wispro redirige. Si el
+  panel tiene varias OLT, hay que decir cuáles son de la red: la de otra
+  empresa nunca se lee por defecto. traza solo lee: no cambia nada en Wispro
+  ni en la OLT.
+- Ficha de la NAP: su NAP de Wispro (por el nombre, o elegida entre las más
+  cercanas y guardada en la caja), los contratos de la caja con la potencia
+  de cada ONT (del panel de la OLT por número de serie, o por el número de
+  contrato con que empieza la descripción de la ONT; o en vivo por Wispro con
+  "Medir ahora"), cuáles ya están en el mapa y cómo se encontró cada uno (por
+  la ONT, el contrato, el abonado o el nombre cerca; un número cuenta si el
+  cliente está a menos de 2 km del contrato o de su NAP) y "Agregar al mapa"
+  los que faltan, con sus datos de Wispro. Lo encontrado por el abonado o el
+  nombre se confirma con un toque y queda vinculado, o se descarta con "No
+  es" (se puede deshacer); un contrato va con un solo cliente: si un dato
+  coincide con varios clientes del mapa, se elige cuál, y un contrato que
+  está dos veces en el mapa se avisa. No se agrega lo que ya podría estar, ni
+  lo que en Wispro queda a más de 2 km de la caja.
+- Medición virtual de la potencia en las bocas de la caja (la de cada ONT
+  más lo que pierde su bajada) comparada con la estimada por la carta, y
+  avisos: ONTs sin señal, caídas juntas (antes de la caja, o corte de luz si
+  es "dying gasp"), una bajada que llega bajo, varía o viene bajando, PON
+  distintos en una caja, la caja en otro PON en Wispro, lecturas viejas del
+  panel.
+- Ficha del cliente: contrato, titular y cómo se encontró (para
+  confirmarlo o deshacerlo), NAP de Wispro, ONT, potencia (panel o en vivo)
+  contra la estimada por la carta, historia de 7 días y caídas; si sus datos
+  son los de un contrato que en el mapa es otro cliente, lo dice. Al anotarle
+  el contrato o la ONT, la ficha vuelve a leer sola.
+- El cliente tiene un campo nuevo, N.º de contrato. Las fechas se muestran
+  con hora de 24 horas.
+- API: `/api/integracion`, `/api/integracion/nap`,
+  `/api/integracion/cliente` y sus `medir`, `/api/integracion/nap/importar`
+  (todos o ninguno, una sola versión, decidido dentro de la misma
+  transacción: dos pedidos a la vez no duplican),
+  `/api/integracion/vincular` y `/api/integracion/desvincular` ("No es", y
+  deshacerlo). Lo leído se guarda en memoria unos minutos; si Wispro o el
+  panel fallan se sigue mostrando lo último leído, con el error, y cada
+  lectura tiene un plazo para no pasar el minuto que espera nginx. Sin
+  cambios en la base (esquema 2).
+- La copia de seguridad incluye `integraciones.json`.
 - `herramientas/muestras-olt-wispro.py`: muestra cómo responden el panel de
-  la OLT y la API de Wispro, para preparar la integración de la 0.6.0. Solo
-  consulta; oculta claves, usuarios, IP y MAC, y de los clientes muestra la
-  forma de los textos y la ubicación redondeada. El token de Wispro se pide
-  sin mostrarlo y no se guarda.
+  la OLT y la API de Wispro (solo consulta; oculta claves, usuarios, IP, MAC
+  y los datos de los clientes).
 
-## 0.5.0 · 14/10/2026
+## 0.5.0 · 14/10/2026 · commit 59f7e0f
 
 Acomodar la carta, aspecto más real, colores en el recorrido y potencias.
 

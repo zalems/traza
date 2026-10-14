@@ -728,6 +728,7 @@ src.close()' "$ROOT/data/$db.db" "$tmp/$db.db"
   install -m 0600 -o root -g root "$tmp/$db.db" "$dest/$db.db"
 done
 cp -p "$ROOT/config/config.local.js" "$dest/" 2>/dev/null || true
+[[ ! -f "$ROOT/data/integraciones.json" ]] || install -m 0600 -o root -g root "$ROOT/data/integraciones.json" "$dest/"
 echo "Respaldo en $dest:"
 ls -l "$dest"
 # Las copias diarias se llaman AAAAMMDD-HHMMSS: por nombre, de la más nueva a la
@@ -743,6 +744,24 @@ if (( conservar > 0 )); then
 fi
 TOOL
   cmp -s "$WORK/respaldo" "$ROOT/bin/respaldo" || install -m 0755 "$WORK/respaldo" "$ROOT/bin/respaldo"
+}
+
+# Conectar cada red con Wispro y con el panel de la OLT: el token se escribe en el
+# servidor y queda en data/integraciones.json (600, del usuario del servicio).
+install_integraciones() {
+  cat > "$WORK/integraciones" <<WRAP
+#!/usr/bin/env bash
+# Conecta una red con Wispro y con el panel de la OLT (solo lectura):
+#   ver | wispro RED | panel RED URL [--olt N] | quitar RED [wispro|panel] | probar RED
+[[ \$EUID -eq 0 ]] || { echo "Ejecutar con sudo." >&2; exit 1; }
+cd / || exit 1
+exec runuser -u $AUTH_USER -- /usr/bin/python3 -I $API_PY --db $API_DB integraciones "\$@"
+WRAP
+  cmp -s "$WORK/integraciones" "$ROOT/bin/integraciones" || install -m 0755 "$WORK/integraciones" "$ROOT/bin/integraciones"
+  if [[ -f "$ROOT/data/integraciones.json" ]]; then
+    chown "$AUTH_USER:$AUTH_USER" "$ROOT/data/integraciones.json"
+    chmod 0600 "$ROOT/data/integraciones.json"
+  fi
 }
 
 # Copia diaria (03:30, con un margen al azar) que conserva las últimas BACKUP_KEEP.
@@ -808,6 +827,7 @@ install_auth() {
     fi
     sim "instalar $API_PY y el servicio $API_UNIT (puerto $API_PORT)"
     sim "programar la copia diaria ($BACKUP_TIMER, conserva $BACKUP_KEEP)"
+    sim "instalar $ROOT/bin/integraciones"
     return
   fi
 
@@ -854,6 +874,7 @@ WRAP
     warn "La API que atiende no es la recién instalada: reiniciala a mano antes de usar la plataforma."
   fi
   install_backup_timer
+  install_integraciones
 
   if [[ "$(usuarios listar)" == "No hay usuarios." ]]; then
     if [[ -t 0 && -t 1 ]]; then
@@ -1369,6 +1390,7 @@ step "Listo"
 
 IP="$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)"
 info "Usuarios del login: sudo $ROOT/bin/usuarios listar | agregar NOMBRE | clave NOMBRE | quitar NOMBRE"
+info "Wispro y el panel de la OLT: sudo $ROOT/bin/integraciones ver | wispro RED | panel RED URL | probar RED"
 if (( TLS_ON )); then
   info "Abrí: https://$DOMAIN/"
 elif [[ -n "$DOMAIN" ]]; then

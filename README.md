@@ -1,11 +1,12 @@
-# Plataforma FTTH · kit 0.5.0
+# Plataforma FTTH · kit 0.6.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
 NAP, botellas, nodos, clientes, reservas y cables) y las cartas de empalme
 (fibras con sus colores, fusiones, splitters y el recorrido de cada pelo),
-desde la computadora o desde el teléfono en la calle. Se instala en un
-servidor propio.
+desde la computadora o desde el teléfono en la calle. Si se conecta con
+Wispro y con el panel de la OLT, cada NAP muestra sus clientes y la potencia
+de sus ONTs. Se instala en un servidor propio.
 
 El nombre `ftth` (carpeta `/srv/ftth`, sitio `ftth.conf`, servicios
 `ftth-auth` y `ftth-api`) es neutro a propósito: la instalación no queda atada
@@ -23,6 +24,7 @@ a ningún cliente, y cada cliente o despliegue es una "red" aparte.
 | IGN | Argenmap, la cartografía oficial | Del IGN, en línea |
 | Ortofotos IGN | Fotos aéreas 2011 a 2022 de algunas localidades (vuelos y dron) | Del IGN, en línea y lento |
 | Buscador | La red cargada, y Nominatim (OpenStreetMap) para lugares | Nominatim: servicio público compartido |
+| Wispro y OLT | Opcional, red por red: traza lee las NAPs, contratos y clientes de Wispro y las potencias del panel de la OLT (SmartOLT libre); no cambia nada en ellos | De Wispro (en línea) y del panel, si se conectan |
 
 Con el mapa "Calles" el navegador no le pide nada a terceros. Las otras capas
 se consultan recién cuando alguien las elige.
@@ -83,6 +85,34 @@ se consultan recién cuando alguien las elige.
   ONT (3 dB o más por debajo es para revisar). Se estima con 0,3 dB/km,
   0,1 dB por fusión, 0,5 dB por conector y la pérdida típica de cada splitter
   (PLC 1x8: 10,5 dB; desbalanceado: según el porcentaje de cada salida).
+- **Wispro y la OLT.** Si la red está conectada (ver más abajo), la ficha de
+  cada NAP la busca en Wispro por el nombre ("P5-C4" y "P5C4" son la misma);
+  si no la encuentra, ofrece las NAPs de Wispro más cercanas para elegir.
+  Muestra los contratos de esa caja con la potencia de cada ONT (la última
+  lectura del panel de la OLT, o en vivo por Wispro con "Medir ahora") y
+  cuáles ya están en el mapa, diciendo cómo se encontró cada uno: por la ONT,
+  el número de contrato o de abonado (cerca del contrato o de su NAP), o el
+  nombre cerca de su ubicación. Lo encontrado por el abonado o por el nombre
+  se confirma con un toque y queda vinculado, o se descarta con "No es" (no se
+  vuelve a proponer; desde la ficha del cliente se puede deshacer); lo que
+  coincide por la ONT o el número de contrato anotados, si está mal, se
+  corrige en el dato. Un contrato va con un solo cliente del mapa: si un dato
+  coincide con varios, pregunta cuál es, y si un contrato está dos veces en el
+  mapa, lo avisa. Los que faltan se agregan con un toque, en la ubicación que
+  tienen en Wispro (salvo que quede a más de 2 km de la caja: suele ser un
+  error de carga). Con eso hace la **medición virtual** de la potencia en las
+  bocas de la caja: la de cada ONT más lo que pierde su bajada (por la carta
+  si está dibujada; si no, dos conectores y la fibra), y la compara con lo que
+  estima la carta. Avisa lo que hay que revisar: ONTs sin señal, varias que se
+  cayeron juntas (el problema estuvo antes de la caja; si la causa es "dying
+  gasp", fue un corte de luz), una bajada que llega bastante por debajo del
+  resto o que viene bajando, clientes de la caja en distintos puertos PON y
+  lecturas viejas del panel. La ficha del cliente muestra su contrato (y cómo
+  se encontró, para confirmarlo o deshacerlo), su ONT, la potencia con su
+  historia de 7 días y las caídas; si no aparece en Wispro, alcanza con
+  anotarle el número de contrato o la ONT, y si sus datos son los de un
+  contrato que en el mapa es otro cliente, lo dice (puede estar dibujado dos
+  veces).
 - **Ver, mover, editar, borrar.** Con "Ver", tocar algo abre su ficha. Desde
   la ficha: Editar, Mover (y tocar el lugar nuevo), Trazado en los cables
   (mover puntos, agregar con los puntos blancos intermedios, quitar), Borrar.
@@ -152,6 +182,38 @@ quedan bloqueados hasta un cuarto de hora. Las contraseñas se guardan con scryp
 los tokens de sesión, como hash. Cada cambio en la red queda registrado con
 quién lo hizo y cuándo.
 
+### Wispro y el panel de la OLT
+
+Se conectan desde el servidor, red por red. El token de la API de Wispro (en
+Wispro: Configuración avanzada → ISP) se escribe ahí mismo, sin que se vea, y
+queda en `/srv/ftth/data/integraciones.json`, que solo lee el usuario del
+servicio: nunca pasa por el visor.
+
+```bash
+sudo /srv/ftth/bin/integraciones ver                                 # qué tiene conectado cada red
+sudo /srv/ftth/bin/integraciones wispro ALVATIC                      # pide el token y lo prueba
+sudo /srv/ftth/bin/integraciones panel ALVATIC http://10.10.0.230:8080  # pregunta cuál de sus OLT es de la red
+sudo /srv/ftth/bin/integraciones probar ALVATIC                      # cuánto encuentra de cada lado
+sudo /srv/ftth/bin/integraciones quitar ALVATIC                      # desconecta (o: quitar ALVATIC panel)
+```
+
+La red se nombra como en el visor o por su número. traza solo lee: no cambia
+nada en Wispro ni en la OLT. Lee las NAPs, los contratos y los clientes de
+Wispro cada 5 minutos como mucho, las ONTs del panel cada minuto y la
+historia de cada ONT cada 5 minutos ("Actualizar", en la ficha, lee todo de
+nuevo). Si el panel tiene varias OLT (por ejemplo la de otra empresa),
+`integraciones panel` pregunta cuáles son de la red (o se indican con
+`--olt N`): sin eso no se lee ninguna. Los clientes de una OLT que no está en
+el panel (por ejemplo una V-SOL) igual se pueden medir en vivo por Wispro.
+
+Todos los usuarios de una instalación tienen los mismos permisos: cualquiera
+ve los contratos de Wispro (nombres, direcciones, ONTs) de todas las redes
+conectadas y puede pedir mediciones en vivo. Por eso una instalación con
+Wispro conectado no se comparte entre empresas: cada una, la suya.
+
+Para ver cómo responden Wispro y el panel, sin guardar nada y sin mostrar
+claves ni datos de los clientes: `python3 herramientas/muestras-olt-wispro.py`.
+
 ### Publicarlo con nombre y HTTPS
 
 Sin HTTPS el navegador no entrega la ubicación del GPS, así que para usarlo en
@@ -205,7 +267,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.4.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.6.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -216,7 +278,9 @@ pasar por un usuario.
   data/ftth.db                           usuarios y sesiones (SQLite)
   data/red.db                            redes, elementos, cables, cartas de empalme e historial (SQLite)
   data/api.secreto                       clave entre nginx y la API
+  data/integraciones.json                Wispro y el panel de la OLT de cada red (con el token; solo el usuario ftth)
   bin/usuarios                           administración de usuarios
+  bin/integraciones                      conectar una red con Wispro y con el panel de la OLT
   bin/respaldo                           copia de seguridad de las bases
   bin/pmtiles                            herramienta que recorta el mapa
   acme/                                  validación de Let's Encrypt
@@ -240,7 +304,13 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.5.0
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.6.0
+a 0.5.0 alcanza con `git checkout 59f7e0f` e instalar: misma estructura de
+base; la conexión con Wispro queda guardada sin usarse y los clientes
+agregados desde Wispro quedan como cualquier otro. La copia diaria de 0.5.0
+no incluye `integraciones.json` (queda igual en `data/`), y
+`bin/integraciones` queda pero no anda con la API de 0.5.0: se puede borrar
+con `rm /srv/ftth/bin/integraciones`. De 0.5.0
 a 0.4.0 alcanza con `git checkout 6006a67` e instalar: usan la misma
 estructura de base. Después hay que recargar la página en todos los
 dispositivos (una pestaña de 0.5.0 que quede abierta puede borrar cómo están
@@ -266,11 +336,13 @@ Las copias con etiqueta (las de antes de actualizar) no se borran solas.
 minutos de margen al azar) y quedan las últimas 30 en `/root/respaldos-ftth/`
 (otra cantidad: `FTTH_RESPALDOS=60 ./instalar.sh …`). A mano:
 `sudo /srv/ftth/bin/respaldo`. Cada copia es coherente aunque haya gente
-cargando: los usuarios (`ftth.db`), la red (`red.db`) y los ajustes. La
+cargando: los usuarios (`ftth.db`), la red (`red.db`), los ajustes y la
+conexión con Wispro y el panel (`integraciones.json`, con el token). La
 réplica del contenedor a otro nodo no reemplaza estas copias (replica también
 lo que se borra), y conviene llevarlas además fuera del servidor. Para
-restaurar: `systemctl stop ftth-api ftth-auth`, copiar los `.db` a
-`/srv/ftth/data/` (dueño `ftth`, borrando los `-wal` y `-shm` que haya), y
+restaurar: `systemctl stop ftth-api ftth-auth`, copiar los `.db` y
+`integraciones.json` a `/srv/ftth/data/` (dueño `ftth`; `integraciones.json`
+con permisos 600; borrando los `-wal` y `-shm` que haya), y
 `systemctl start ftth-auth ftth-api`.
 
 **Actualizar las calles.** `./instalar.sh --actualizar-mapa` baja el build del
@@ -344,9 +416,14 @@ instalación normal sirve de referencia.
 `python3 -m unittest discover -s pruebas` prueba la API (validaciones,
 cables pegados que siguen a los elementos, conflictos entre dos usuarios,
 historial, clave de nginx, cartas de empalme y su disposición) con una base
-temporal. `node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores,
-recorridos y potencias del visor (Node 20.19 o más nuevo; el de Debian 13
-sirve).
+temporal, y las integraciones contra un Wispro y un panel de la OLT falsos
+que responden como los reales (cajas, contratos y cómo se cruza cada uno con
+los clientes del mapa, ONTs por número de serie o por el número de contrato
+de su descripción, mediciones en vivo, fallas y plazos, agregar dos veces a
+la vez, el comando `integraciones`). `node pruebas/fibras.test.mjs` prueba
+la lógica de fibras, colores, recorridos y potencias del visor, y
+`node pruebas/integracion.test.mjs` la medición virtual y la estabilidad
+(Node 20.19 o más nuevo; el de Debian 13 sirve).
 
 ## Qué se probó y qué no
 
@@ -367,14 +444,31 @@ descarga de `pmtiles` desde GitHub, systemd para nginx y el servicio de
 sesión, y la emisión del certificado con certbot.
 
 Probado en la instalación real (Debian 13 en LXC con systemd): el servicio
-`ftth-api` (0.3.0 y 0.4.0) y la actualización de 0.3.0 a 0.4.0 con la copia
-previa y la migración de la base.
+`ftth-api` (0.3.0 a 0.5.0), la actualización de 0.3.0 a 0.4.0 con la copia
+previa y la migración de la base, la de 0.4.0 a 0.5.0 con la comprobación de
+que atiende la API nueva, y la copia diaria del timer de systemd.
+
+La integración con Wispro y el panel de la OLT (0.6.0) se escribió con las
+respuestas reales de los dos (leídas el 14/10/2026 con
+`herramientas/muestras-olt-wispro.py`) y se probó contra versiones falsas que
+responden igual, en las pruebas de la API y en Chromium (escritorio,
+teléfono, modo oscuro), y tuvo dos revisiones independientes: sus hallazgos
+quedaron corregidos (entre otros, que agregar dos veces no duplique clientes,
+que un contrato no quede con dos clientes, que no se mezcle la OLT de otra
+empresa y que una ficha no tarde más que el minuto que espera nginx). Contra
+el Wispro y el panel reales se prueba con `integraciones probar` después de
+instalar.
 
 No se pudo probar, y hay que mirarlo en el uso real:
 
 - Teléfonos reales, Safari y Firefox (en especial arrastrar y pellizcar en
   la carta en modo libre).
-- El timer de systemd de la copia diaria funcionando solo.
+- La medición en vivo por Wispro (`status_ont`) con una ONT real: su
+  respuesta se tomó de la documentación de Wispro.
+- Cómo informa el panel una ONT apagada (si conserva su última potencia:
+  traza la toma como sin señal) y cómo se llaman sus eventos de caída (en las
+  muestras solo apareció "appeared"; traza reconoce offline, down, LOS y
+  dying gasp).
 - Ubuntu 22.04 y la arquitectura arm64.
 
 ## Licencias

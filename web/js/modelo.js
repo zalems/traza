@@ -65,6 +65,7 @@ export const CAMPOS = {
   ],
   cliente: [
     { k: 'abonado', l: 'N.º de abonado', t: 'text', ph: 'Como figura en el sistema de gestión' },
+    { k: 'contrato', l: 'N.º de contrato', t: 'text', ph: 'El de Wispro, si lo tiene' },
     { k: 'direccion', l: 'Dirección', t: 'text' },
     { k: 'ont', l: 'ONT (modelo y serie)', t: 'text', ph: 'HG8145V5 · 48575443…' },
     { k: 'potencia', l: 'Potencia en la ONT (dBm)', t: 'number', ph: '-21.5', teclado: 'text', min: -50, max: 10 },
@@ -122,7 +123,7 @@ export function formatFecha(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 }
 
 // Para buscar sin importar mayúsculas ni tildes.

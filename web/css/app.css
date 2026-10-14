@@ -1416,6 +1416,371 @@ button.enlace:hover {
   margin: 0 0 6px;
 }
 
+/* -------------------------------------- Wispro y el panel de la OLT */
+
+.integ {
+  margin: 0 0 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.integ-cab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.integ-cab h3 {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+button.integ-mini {
+  flex: none;
+  min-height: 34px;
+  padding: 2px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+button.integ-mini:hover {
+  background: var(--paper-dim);
+}
+
+.integ-medida {
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-inner);
+  background: var(--paper-dim);
+}
+
+.integ-medida p {
+  margin: 0;
+}
+
+.integ-valor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+.integ-valor strong {
+  font-size: 24px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.integ-valor .nivel {
+  margin-left: 0;
+}
+
+.integ-medida .ficha-sub {
+  margin: 2px 0 0;
+}
+
+.integ-comparacion {
+  margin-top: 4px !important;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.integ-avisos,
+.integ-errores {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.integ-avisos li {
+  padding: 6px 10px;
+  border-left: 3px solid var(--signal);
+  border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  background: color-mix(in srgb, var(--signal) 11%, transparent);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
+.integ-avisos li.bien {
+  border-left-color: #2b9a43;
+  background: color-mix(in srgb, #2b9a43 12%, transparent);
+}
+
+.integ-errores li,
+.integ-error {
+  margin: 0;
+  color: var(--signal);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.integ-error {
+  margin-bottom: 8px;
+}
+
+.integ-contratos {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.integ-contrato {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--paper-dim);
+}
+
+.integ-linea {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 10px;
+}
+
+.integ-nombre {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.integ-nombre strong {
+  font-weight: 650;
+}
+
+.integ-nombre small {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.integ-nombre .chip {
+  margin-left: 6px;
+}
+
+.integ-pot {
+  min-width: 0;
+  margin-left: auto;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.integ-num {
+  white-space: nowrap;
+}
+
+.integ-sub {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.integ-sub small {
+  margin-left: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.integ-falta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+button.integ-enlace {
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+button.integ-enlace:hover {
+  text-decoration-color: var(--ink);
+}
+
+/* Un contrato que está más de una vez en el mapa, o que podría ser un cliente
+   del mapa (hay que confirmarlo). */
+.integ-repetido {
+  min-width: 0;
+  color: var(--signal);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.integ-repetido button.integ-enlace {
+  color: inherit;
+}
+
+/* Un nombre con su coma: no se separan al cortar la línea. */
+.integ .junto {
+  white-space: nowrap;
+}
+
+.integ .junto button {
+  white-space: normal;
+}
+
+.integ-dudosos {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.integ-sub .integ-dudosos {
+  flex: 1 1 100%;
+}
+
+.integ > .integ-dudosos {
+  margin: 6px 0 10px;
+}
+
+.integ-dudosos p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.integ-dudosos ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integ-dudosos li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.integ > .integ-dudosos li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--paper-dim);
+}
+
+.integ-dudosos small {
+  color: var(--muted);
+}
+
+/* "Es este" y "No es", juntos. */
+.integ-botones {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Lo encontrado por el abonado o el nombre, en la ficha del cliente: ¿es su contrato? */
+.integ-confirmar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  margin: 8px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+}
+
+.integ-confirmar p {
+  flex: 1 1 14em;
+  min-width: 0;
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.integ-no-es {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* Contratos marcados «No es» en un cliente, con "Deshacer". */
+.integ-descartados {
+  margin-top: 8px;
+}
+
+.integ-descartados p {
+  margin: 0 0 4px;
+}
+
+.integ-descartados ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.integ-descartados li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.integ-candidatas {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.integ-candidatas button.enlace {
+  display: grid;
+  gap: 1px;
+}
+
+.integ-candidatas button.enlace small {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.integ-candidatas button[aria-pressed='true'] {
+  border-color: var(--ink);
+}
+
+.integ-datos {
+  margin-top: 8px;
+}
+
+.integ-historia {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
 /* ------------------------------------------------- recorrido de un pelo */
 
 .recorrido {
