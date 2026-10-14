@@ -839,6 +839,25 @@ class IntegracionesTest(unittest.TestCase):
         dw = api.DatosWispro([dict(NAPS[0], capacity="24")], [], [], [])
         self.assertEqual(api.plan_importacion(dw, [], [])["_cajas"][0]["datos"]["puertos"], "24")
 
+    def test_traer_con_naps_amontonadas(self):
+        # Wispro con muchas NAPs a pocos metros (ubicación cargada por defecto): una caja del
+        # mapa sin vincular aparta solo la más cercana; las demás se agregan.
+        juntas = [dict(NAPS[0], id=U(60 + k), name=f"P8C{k}", latitude=f"{-26.1810 + k * 0.0001:.4f}",
+                       longitude="-58.1670") for k in range(1, 9)]  # cada 11 m hacia el norte
+        dw = api.DatosWispro(juntas, [], [], [])
+        fila = lambda i, nombre, lon, lat: {"id": i, "nombre": nombre, "lon": lon, "lat": lat, "datos": "{}"}
+        plan = api.plan_importacion(dw, [fila(1, "NAP-001", -58.1670, -26.1810)], [])
+        self.assertEqual([(x["nombre"], x["distancia_m"]) for x in plan["cajas"]["dudosas"]], [("P8C1", 11)])
+        self.assertEqual(plan["cajas"]["nuevas"], 7)
+        # Dos cajas sueltas: cada una aparta una NAP distinta (la más cercana que quede).
+        plan = api.plan_importacion(dw, [fila(1, "NAP-001", -58.1670, -26.1810), fila(2, "NAP-002", -58.1670, -26.1809)], [])
+        self.assertEqual(sorted((x["nombre"], x["caja"]["nombre"]) for x in plan["cajas"]["dudosas"]),
+                         [("P8C1", "NAP-002"), ("P8C2", "NAP-001")])
+        self.assertEqual(plan["cajas"]["nuevas"], 6)
+        # Muy lejos (más de 150 m), ninguna queda aparte.
+        plan = api.plan_importacion(dw, [fila(1, "Lejos", -58.1700, -26.1850)], [])
+        self.assertEqual((plan["cajas"]["dudosas"], plan["cajas"]["nuevas"]), ([], 8))
+
     def test_traer_con_la_misma_cuenta_en_otra_red(self):
         a = self.ok("POST", "/api/redes", {"nombre": "Cuenta A"}, status=201)["red"]["id"]
         b = self.ok("POST", "/api/redes", {"nombre": "Cuenta B"}, status=201)["red"]["id"]

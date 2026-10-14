@@ -1878,7 +1878,7 @@ CERCA_M = 300  # un cliente de traza y un contrato con el mismo nombre, a lo sum
 NUMERO_CERCA_M = 2000  # un cliente con el número de un contrato o de abonado, a lo sumo a esta distancia
 CANDIDATAS_M = 1500  # NAPs de Wispro que se ofrecen para vincular una caja, hasta esta distancia
 LEJOS_CAJA_M = 2000  # un contrato ubicado más lejos que esto de su caja no se agrega al mapa
-DUDA_CAJA_M = 150  # una NAP de Wispro a menos de esto de una caja del mapa sin vincular podría ser esa caja
+DUDA_CAJA_M = 150  # la NAP de Wispro más cercana a una caja del mapa sin vincular, a menos de esto, podría ser esa caja
 MAX_IMPORTACION = 5000  # elementos que se agregan de una vez al traer una red de Wispro
 ESTADOS_WISPRO = {"enabled": "activo", "alerted": "activo", "degraded": "activo", "disabled": "instalado"}
 
@@ -3145,9 +3145,10 @@ def caja_de_nap(n: dict, nombre: str, u) -> dict:
 def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dict:
     """Qué cajas y qué clientes de Wispro faltan en el mapa, listos para agregar
     (_cajas, _clientes), y por qué no se agrega el resto. Usa el mismo cruce que la
-    ficha de la caja: no se agrega lo que ya está ni lo que podría estar. Una NAP
-    cerca de una caja del mapa sin vincular podría ser esa misma caja: queda como
-    dudosa y se agrega solo si su id está en `igual` (_igual)."""
+    ficha de la caja: no se agrega lo que ya está ni lo que podría estar. Una caja
+    del mapa sin vincular puede ser una (y solo una) de las NAPs que faltan: la más
+    cercana, a menos de DUDA_CAJA_M, queda como dudosa y se agrega solo si su id
+    está en `igual` (_igual)."""
     en_mapa, sueltas = set(), []
     for r in naps_rows:
         nap, _ = caja_de_wispro(dw, r)
@@ -3157,7 +3158,7 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
             sueltas.append(r)  # cajas del mapa sin NAP de Wispro: podrían ser una de las que faltan
     igual = set(igual)
     naps = [n for i, n in dw.naps_por_id.items() if isinstance(i, str) and i]  # una vez cada una
-    cajas, con_igual, dudosas, cajas_omitidas, cajas_ya = [], [], [], [], 0
+    faltan, cajas_omitidas, cajas_ya = [], [], 0
     for n in naps:
         nombre = texto_corto(n.get("name"), MAX_NOMBRE) or "NAP"
         if n["id"] in en_mapa:
@@ -3167,15 +3168,31 @@ def plan_importacion(dw: DatosWispro, naps_rows, clientes_rows, igual=()) -> dic
         if not u:
             cajas_omitidas.append({"nombre": nombre, "motivo": "no tiene ubicación en Wispro"})
             continue
-        cerca = min(((haversine_m(u, [r["lon"], r["lat"]]), r) for r in sueltas), key=lambda x: x[0], default=None)
-        if cerca and cerca[0] <= DUDA_CAJA_M:
-            if n["id"] in igual:
-                con_igual.append(caja_de_nap(n, nombre, u))
-            else:
-                dudosas.append({"id": n["id"], "nombre": nombre, "distancia_m": round(cerca[0]),
-                                "caja": {"id": cerca[1]["id"], "nombre": cerca[1]["nombre"] or "Caja sin nombre"}})
+        faltan.append((n, nombre, u))
+    # Cada caja suelta con la NAP más cercana, de a pares (una caja, una NAP), empezando
+    # por los pares más cercanos: aunque Wispro tenga muchas NAPs amontonadas cerca, una
+    # caja del mapa aparta una sola.
+    pares = sorted((haversine_m(u, [r["lon"], r["lat"]]), nombre, n["id"], r["id"], r)
+                   for r in sueltas for n, nombre, u in faltan)
+    duda_de, con_caja = {}, set()
+    for distancia, _, nap_id, caja_id, r in pares:
+        if distancia > DUDA_CAJA_M:
+            break
+        if nap_id in duda_de or caja_id in con_caja:
             continue
-        cajas.append(caja_de_nap(n, nombre, u))
+        duda_de[nap_id] = (distancia, r)
+        con_caja.add(caja_id)
+    cajas, con_igual, dudosas = [], [], []
+    for n, nombre, u in faltan:
+        duda = duda_de.get(n["id"])
+        if duda is None:
+            cajas.append(caja_de_nap(n, nombre, u))
+        elif n["id"] in igual:
+            con_igual.append(caja_de_nap(n, nombre, u))
+        else:
+            distancia, r = duda
+            dudosas.append({"id": n["id"], "nombre": nombre, "distancia_m": round(distancia),
+                            "caja": {"id": r["id"], "nombre": r["nombre"] or "Caja sin nombre"}})
 
     cruce = Cruce(dw, clientes_rows)
     clientes, motivos, clientes_ya = [], {}, 0
