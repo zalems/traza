@@ -27,12 +27,12 @@ import urllib.request
 
 # Claves, usuarios y datos de red: no se muestran.
 OCULTAR = re.compile(r"community|pass|secret|token|api_?key|jwt|user|usuario|login|ssh|snmp|telnet|host|^ip$|_ip$|^ip_|"
-                     r"mac|pppoe|netmask|gateway|cred", re.I)
+                     r"mac|pppoe|netmask|gateway|cred|connect_to|server|url", re.I)
 # Datos de personas: se muestra la forma del texto.
 PERSONAL = re.compile(r"desc|name|nombre|apellido|razon|client|alias|titular|abonado|address|direcc|domicilio|calle|street|"
                       r"phone|tel[eé]f|celular|whatsapp|mail|national|taxpayer|dni|cuit|doc|details|city|neighborhood|barrio|"
                       r"contact|observ|comment|nota|note", re.I)
-UBICACION = re.compile(r"^(lat|lon|lng)|latitud|longitud|coord", re.I)
+UBICACION = re.compile(r"^(lat|lon|lng)|latitud|longitud", re.I)
 # Identificadores y nombres de equipos o de la red: se muestran.
 VISIBLE = re.compile(r"(^|_)id$|^(node|nodo|nap|olt|plan|zone|zona|server|board|port|odb|area|city|ciudad|device|service|"
                      r"servicio|branch|sucursal|type|tipo|status|estado|mode|modo)_?name$|^(nodo|node|nap|caja|odb|zone|zona)$", re.I)
@@ -140,6 +140,16 @@ def cuantos(filas, condicion):
     return sum(1 for x in filas if isinstance(x, dict) and condicion(x))
 
 
+def con_ubicacion(x):
+    """Si la fila tiene latitud y longitud con valor (no vacío, no 0)."""
+    def vale(v):
+        try:
+            return v not in (None, "") and abs(float(v)) > 1e-6
+        except (TypeError, ValueError):
+            return False
+    return any(UBICACION.search(k) and vale(v) for k, v in x.items())
+
+
 def buscar_token(dato, profundidad=0):
     """Un token dentro de la respuesta de auth, esté donde esté."""
     if isinstance(dato, dict):
@@ -207,63 +217,100 @@ def ispbrain(empresa, base=None):
         print("Ninguna cabecera sirvió para /api/v2/areas; sigo con 'Authorization: Bearer' por si el problema es la ruta.")
         cab = cabeceras[0][1]
 
-    # La lista de rutas, si el Swagger la entrega como JSON.
-    for ruta in ("/swagger/v1/swagger.json", "/swagger.json", "/swagger/swagger.json", "/api/v2/swagger.json",
-                 "/openapi.json", "/api-docs", "/swagger/json"):
-        estado, spec, s = pedir(f"{base}{ruta}", cab)
+    # La lista de rutas, si el Swagger la entrega como JSON: primero se mira de dónde la carga la página.
+    rutas_spec = []
+    estado, pagina, _ = pedir(f"{base}/swagger", cab)
+    print(f"\nGET /swagger -> {estado}" + (f" ({len(pagina)} caracteres)" if isinstance(pagina, str) else ""))
+    if isinstance(pagina, str):
+        for m in re.finditer(r"""(?:url|spec|src|href)\s*[:=]\s*["']([^"']+)["']""", pagina):
+            u = m.group(1)
+            if re.search(r"json|api-docs|swagger|openapi|spec", u, re.I) and not re.search(r"\.(js|css|png)$", u):
+                rutas_spec.append(u)
+        print("Rutas que menciona la página:", ", ".join(rutas_spec) or "ninguna con json/swagger")
+    rutas_spec += ["/swagger/v1/swagger.json", "/swagger.json", "/swagger/swagger.json", "/swagger/v2/swagger.json",
+                   "/api/v2/swagger.json", "/openapi.json", "/api-docs", "/api-docs/swagger.json", "/swagger/json",
+                   "/v2/api-docs", "/swagger/api-docs", "/api/v2/docs", "/api/v2/openapi.json", "/swagger/openapi.json"]
+    vistas = set()
+    for ruta in rutas_spec:
+        if ruta in vistas:
+            continue
+        vistas.add(ruta)
+        url = ruta if ruta.startswith("http") else f"{base}{ruta if ruta.startswith('/') else '/' + ruta}"
+        estado, spec, s = pedir(url, cab)
+        print(f"GET {ruta} -> {estado}")
         if estado == 200 and isinstance(spec, dict) and spec.get("paths"):
             titulo(f"Rutas del Swagger: GET {ruta}", estado, s)
             for p, ops in spec["paths"].items():
                 if isinstance(ops, dict):
-                    print(" ", ", ".join(m.upper() for m in ops if m in ("get", "post", "put", "delete")), p)
+                    params = []
+                    g = ops.get("get") or {}
+                    for prm in g.get("parameters", []) if isinstance(g, dict) else []:
+                        params.append(f"{prm.get('name')}{'*' if prm.get('required') else ''}")
+                    print(" ", ", ".join(m.upper() for m in ops if m in ("get", "post", "put", "delete")), p,
+                          f"| GET: {', '.join(params)}" if params else "")
             esquemas = (spec.get("components") or {}).get("schemas") or (spec.get("definitions") or {})
-            interesantes = [k for k in esquemas if re.search(r"customer|connection|service|node|box|nap|device", k, re.I)]
-            for k in interesantes[:8]:
-                props = esquemas[k].get("properties") or {}
-                print(f"  esquema {k}: {', '.join(props)}")
+            for k in esquemas:
+                props = (esquemas[k] or {}).get("properties") or {}
+                if props:
+                    print(f"  esquema {k}: {', '.join(props)}")
             break
     else:
-        print("\nEl Swagger no entregó el JSON en ninguna ruta conocida (abrí {base}/swagger en el navegador y mirá, en la"
-              " pestaña Red, de dónde carga el .json).".replace("{base}", base))
+        print("El Swagger no entregó el JSON: abrí {base}/swagger en el navegador, tocá Explore y mirá en la pestaña Red "
+              "de dónde carga el .json; pasame esa ruta.".replace("{base}", base))
 
-    def get(ruta):
+    def get(ruta, mostrar=True):
         estado, dato, s = pedir(f"{base}{ruta}", cab)
-        titulo(f"GET {ruta}", estado, s)
-        return dato
+        if mostrar:
+            titulo(f"GET {ruta}", estado, s)
+        return estado, dato
 
-    for ruta in ("/api/v2/areas", "/api/v2/cities", "/api/v2/devices", "/api/v2/plans", "/api/v2/services", "/api/v2/branches"):
-        dato = get(ruta)
+    for ruta in ("/api/v2/areas", "/api/v2/cities", "/api/v2/devices", "/api/v2/plans", "/api/v2/services", "/api/v2/branches",
+                 "/api/v2/nodes", "/api/v2/nodos", "/api/v2/boxes", "/api/v2/naps", "/api/v2/olts", "/api/v2/onus",
+                 "/api/v2/zones", "/api/v2/sold_services", "/api/v2/sold-services", "/api/v2/soldservices", "/api/v2/services_sold"):
+        estado, dato = get(ruta)
         filas = lista(dato)
         if filas:
             print(f"{len(filas)} filas. Campos: {campos(filas)}")
-            imprimir(resumir(filas[:2], personal=True))
+            imprimir(resumir(filas[:2], personal=True), limite=1500)
+        elif estado == 200:
+            imprimir(resumir(dato), limite=1500)
         else:
-            imprimir(resumir(dato))
+            print(json.dumps(resumir(dato), ensure_ascii=False)[:300])
 
-    for nombre, ruta in (("clientes", "/api/v2/customers"), ("conexiones", "/api/v2/connections"), ("servicios vendidos", "/api/v2/sold_services")):
-        for sufijo in ("?limit=3", "?page=1&per_page=3", ""):
-            dato = get(ruta + sufijo)
-            if dato is None or (isinstance(dato, int)):
+    # Las listas grandes piden paginación, con nombres que no están documentados: se prueban varios.
+    paginaciones = ("?page=1&limit=5", "?page=1&per_page=5", "?page=1&page_size=5", "?limit=5&offset=0",
+                    "?pagina=1&cantidad=5", "?page=1&size=5", "?page=1&rows=5", "?page=1")
+    paginacion = None
+    primer_cliente = None
+    for nombre, ruta in (("clientes", "/api/v2/customers"), ("conexiones", "/api/v2/connections")):
+        for sufijo in ([paginacion] if paginacion else paginaciones):
+            estado, dato = get(ruta + sufijo)
+            if estado != 200:
+                print("  ", json.dumps(resumir(dato), ensure_ascii=False)[:200])
                 continue
+            paginacion = sufijo
             filas = lista(dato)
-            if filas or (isinstance(dato, dict) and dato):
-                print(f"{nombre}: {len(filas)} filas en la respuesta. Campos: {campos(filas)}")
-                if isinstance(dato, dict):
-                    print("Claves de la respuesta:", ", ".join(k for k in dato if not isinstance(dato[k], list)))
-                imprimir(resumir(filas[:2] if filas else dato, personal=True, decimales=3))
-                if filas:
-                    print(f"  con ubicación: {cuantos(filas, lambda x: any(UBICACION.search(k) and x.get(k) not in (None, '', 0) for k in x))}"
-                          f"; con nodo/caja: {cuantos(filas, lambda x: any(re.search(r'nodo|node|nap|caja|box', k, re.I) and x.get(k) for k in x))}"
-                          f"; con ONU/serie/MAC: {cuantos(filas, lambda x: any(re.search(r'onu|ont|serial|mac', k, re.I) and x.get(k) for k in x))}")
-                break
-    # Un cliente con sus conexiones, para ver cómo se relacionan.
-    dato = get("/api/v2/customers?limit=1")
-    filas = lista(dato)
-    if filas and isinstance(filas[0], dict) and filas[0].get("id") is not None:
-        cid = filas[0]["id"]
-        for ruta in (f"/api/v2/customers/{cid}", f"/api/v2/customers/{cid}/connections", f"/api/v2/customers/{cid}/services"):
-            dato = get(ruta)
-            imprimir(resumir(dato, personal=True, decimales=3))
+            print(f"{nombre}: {len(filas)} filas en la respuesta. Campos: {campos(filas)}")
+            if isinstance(dato, dict):
+                print("Claves de la respuesta (fuera de la lista):",
+                      json.dumps({k: v for k, v in dato.items() if not isinstance(v, (list, dict))}, ensure_ascii=False)[:300])
+            imprimir(resumir(filas[:2] if filas else dato, personal=True, decimales=3), limite=5000)
+            if filas:
+                print(f"  con ubicación: {cuantos(filas, con_ubicacion)}"
+                      f"; con nodo/caja: {cuantos(filas, lambda x: any(re.search(r'nodo|node|nap|caja|box|odb', k, re.I) and x.get(k) for k in x))}"
+                      f"; con ONU/serie/MAC: {cuantos(filas, lambda x: any(re.search(r'onu|ont|serial|mac', k, re.I) and x.get(k) for k in x))}")
+                if nombre == "clientes" and isinstance(filas[0], dict):
+                    primer_cliente = filas[0].get("id")
+            break
+    if not paginacion:
+        print("Ninguna forma de paginación sirvió: hay que mirar el Swagger.")
+    # Un cliente con sus conexiones y servicios, para ver cómo se relacionan.
+    if primer_cliente is not None:
+        for ruta in (f"/api/v2/customers/{primer_cliente}", f"/api/v2/customers/{primer_cliente}/connections",
+                     f"/api/v2/customers/{primer_cliente}/services", f"/api/v2/customers/{primer_cliente}/balance",
+                     f"/api/v2/connections{paginacion}&customer_id={primer_cliente}"):
+            estado, dato = get(ruta)
+            imprimir(resumir(dato, personal=True, decimales=3), limite=3000)
 
 
 # ----------------------------------------------------------------------------- SmartOLT
@@ -297,30 +344,62 @@ def smartolt(base):
     dato = get("/api/system/get_zones", personal=False)
     zonas = [z for z in lista(dato) if isinstance(z, dict)]
     print(f"{len(zonas)} zonas. Campos: {campos(zonas)}")
-    imprimir(resumir(zonas[:3], personal=False))
+    print("Nombres de las zonas:", " | ".join(str(z.get("name")) for z in zonas))
     dato = get("/api/system/get_odbs")
     odbs = [o for o in lista(dato) if isinstance(o, dict)]
     print(f"{len(odbs)} ODB (cajas/splitters). Campos: {campos(odbs)}")
     if odbs:
-        print(f"  con ubicación: {cuantos(odbs, lambda x: any(UBICACION.search(k) and x.get(k) not in (None, '', 0) for k in x))}")
-        print("  primeros nombres:", ", ".join(str(o.get("name") or o.get("odb_name")) for o in odbs[:12]))
-        imprimir(resumir(odbs[:3], personal=False, decimales=4))
+        print(f"  con ubicación: {cuantos(odbs, con_ubicacion)}")
+        print("  todas (nombre, puertos, zona, ubicación redondeada):")
+        for o in odbs:
+            u = f"{round(float(o['latitude']), 3)},{round(float(o['longitude']), 3)}" if con_ubicacion(o) else "sin ubicación"
+            print(f"    {o.get('name')} | {o.get('nr_of_ports')} p | {o.get('zone_name')} | {u}"
+                  + (f" | {forma(o.get('comment'))}" if o.get("comment") else ""))
+        imprimir(resumir(odbs[:1], personal=False, decimales=3))
 
-    dato = get("/api/onu/get_all_onus_details?page=1&page_size=100")
-    onus = [o for o in lista(dato) if isinstance(o, dict)]
-    if isinstance(dato, dict):
-        print("Claves de la respuesta:", ", ".join(k for k in dato if not isinstance(dato[k], list)),
-              "| total_items:", dato.get("total_items"), "| total_pages:", dato.get("total_pages"))
-    print(f"{len(onus)} ONUs en esta página. Campos: {campos(onus)}")
+    onus = []
+    pagina, total_paginas = 1, 1
+    while pagina <= total_paginas and pagina <= 30:
+        dato = get(f"/api/onu/get_all_onus_details?page={pagina}&page_size=100", personal=True) if pagina == 1 \
+            else pedir(f"{base}/api/onu/get_all_onus_details?page={pagina}&page_size=100", cab)[1]
+        parte = [o for o in lista(dato) if isinstance(o, dict)]
+        if pagina == 1 and isinstance(dato, dict):
+            print("Claves de la respuesta:", ", ".join(k for k in dato if not isinstance(dato[k], list)),
+                  "| total_items:", dato.get("total_items"), "| total_pages:", dato.get("total_pages"))
+            try:
+                total_paginas = int(dato.get("total_pages") or 1)
+            except (TypeError, ValueError):
+                total_paginas = 1
+        if not parte:
+            break
+        onus += parte
+        pagina += 1
+    print(f"{len(onus)} ONUs en total ({pagina - 1} páginas). Campos: {campos(onus)}")
     if onus:
         print(f"  con odb_name: {cuantos(onus, lambda x: x.get('odb_name'))}; con odb_port: {cuantos(onus, lambda x: x.get('odb_port'))}"
-              f"; con ubicación: {cuantos(onus, lambda x: x.get('latitude') not in (None, '', 0))}"
-              f"; con dirección: {cuantos(onus, lambda x: x.get('address'))}; con nombre: {cuantos(onus, lambda x: x.get('name'))}")
+              f"; con ubicación: {cuantos(onus, con_ubicacion)}"
+              f"; con dirección: {cuantos(onus, lambda x: x.get('address'))}; con nombre: {cuantos(onus, lambda x: x.get('name'))}"
+              f"; con contacto: {cuantos(onus, lambda x: x.get('contact'))}")
         print("  estados:", json.dumps({s: cuantos(onus, lambda x, s=s: x.get('status') == s) for s in {str(o.get('status')) for o in onus}}))
         print("  por OLT:", json.dumps({str(o.get('olt_name')): cuantos(onus, lambda x, o=o: x.get('olt_id') == o.get('olt_id')) for o in onus}))
-        print("  primeros nombres de ODB:", ", ".join(str(o.get("odb_name")) for o in onus if o.get("odb_name"))[:300])
+        por_zona = {}
+        for o in onus:
+            por_zona[str(o.get("zone_name"))] = por_zona.get(str(o.get("zone_name")), 0) + 1
+        print("  ONUs por zona:", json.dumps(por_zona, ensure_ascii=False))
+        por_odb = {}
+        for o in onus:
+            if o.get("odb_name"):
+                por_odb[str(o.get("odb_name"))] = por_odb.get(str(o.get("odb_name")), 0) + 1
+        print("  ONUs por ODB:", json.dumps(por_odb, ensure_ascii=False))
+        por_pon = {}
+        for o in onus:
+            k = f"{o.get('board')}/{o.get('port')}"
+            por_pon[k] = por_pon.get(k, 0) + 1
+        print("  ONUs por placa/puerto PON:", json.dumps(por_pon))
         print("  forma de los primeros nombres de ONU:", "; ".join(forma(o.get("name")) for o in onus[:8] if o.get("name")))
-        imprimir(resumir(onus[:2], personal=True, decimales=3))
+        print("  forma de las primeras direcciones:", "; ".join(forma(o.get("address")) for o in onus[:8] if o.get("address")))
+        print("  forma de los primeros contactos:", "; ".join(forma(o.get("contact")) for o in onus if o.get("contact"))[:300])
+        imprimir(resumir(onus[:1], personal=True, decimales=3), limite=2500)
 
     dato = get("/api/onu/get_onus_signals")
     senales = [o for o in lista(dato) if isinstance(o, dict)]
