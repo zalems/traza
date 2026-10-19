@@ -158,14 +158,18 @@ async function checkSession() {
       location.replace('login.html');
       return new Promise(() => {});
     }
-    return res.ok ? (await res.json()).usuario : null;
+    if (!res.ok) return null;
+    const sesion = await res.json();
+    // administra: ve todas las redes, crea redes y les cambia el nombre (sin el dato, como antes de 0.8.0).
+    return { usuario: sesion.usuario, administra: sesion.administra !== false };
   } catch {
     return null;
   }
 }
 
 async function start() {
-  const user = await checkSession();
+  const sesion = await checkSession();
+  const user = sesion?.usuario ?? null;
   const config = await loadConfig();
   const saved = readState();
 
@@ -424,7 +428,7 @@ async function start() {
 
   // --------------------------------------------------------- la red (carga)
 
-  const herramientas = user ? setupHerramientas({ map, maplibregl, usuario: user, notify: showNotice, toast }) : null;
+  const herramientas = user ? setupHerramientas({ map, maplibregl, usuario: user, administra: sesion.administra, notify: showNotice, toast }) : null;
   if (!user) $('herramientas').hidden = true;
 
   setupSearch({ map, maplibregl, config, buscarEnRed: (texto) => herramientas?.buscarEnRed(texto) ?? [] });

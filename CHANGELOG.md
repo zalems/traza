@@ -1,6 +1,26 @@
 # Cambios
 
-## 0.7.1 · 14/10/2026
+## 0.8.0 · 19/10/2026
+
+Redes por usuario: una instalación puede alojar a varias empresas.
+
+- Cada usuario administra (ve todas las redes, crea redes y les cambia el
+  nombre) o ve solo las redes que se le asignaron. Lo de una red que no tiene
+  asignada no se ve ni se toca: la API responde 403 en redes, elementos,
+  cables, equipos, uniones e integraciones; el visor lista solo sus redes,
+  entra directo si tiene una sola y no ofrece crear ni renombrar.
+- `usuarios agregar NOMBRE --red RED` y `usuarios redes NOMBRE RED …`
+  (o `--todas`); `listar` muestra las redes de cada uno. Las redes se nombran
+  como en el visor o por su número (el CLI lee `red.db`). Los cambios valen
+  al instante para las sesiones abiertas. Los usuarios anteriores quedan como
+  administradores.
+- El servicio de sesión responde `X-Redes` ("*" todas, "1,3" esas, "-"
+  ninguna) y nginx se la pasa a la API; `/auth/session` y `/api/yo` dicen si
+  el usuario administra y qué redes ve. La base de usuarios gana la columna
+  `redes` (migración automática).
+- Pruebas del servicio de sesión (`pruebas/test_auth.py`).
+
+## 0.7.1 · 14/10/2026 · commit c3ffdc3
 
 Traer de Wispro, con lo que apareció en la red real.
 

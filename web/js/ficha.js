@@ -1333,7 +1333,7 @@ export function setupFicha({ root, red, acciones }) {
 
   // -------------------------------------------------------------- redes
 
-  function redes({ lista, actualId }) {
+  function redes({ lista, actualId, administra = true }) {
     const items = lista.map((r) => {
       const id = `red-${r.id}`;
       return h('li', {},
@@ -1346,20 +1346,23 @@ export function setupFicha({ root, red, acciones }) {
       );
     });
 
+    // Crear redes y cambiarles el nombre: solo quien administra.
     const input = h('input', { type: 'text', name: 'nombre', placeholder: 'Cliente, localidad o despliegue', autocomplete: 'off', maxlength: 80 });
-    const crear = h('form.ficha-form.ficha-nueva-red', { autocomplete: 'off', novalidate: true },
+    const crear = administra ? h('form.ficha-form.ficha-nueva-red', { autocomplete: 'off', novalidate: true },
       h('label.campo', {}, h('span', { text: lista.length ? 'Nueva red' : 'Nombre de la primera red' }), input),
       botones(boton('Crear', null, { type: 'submit', class: 'primario' })),
-    );
-    enviar(crear, async () => {
-      const nombre = input.value.trim();
-      if (!nombre) throw new Error('Poné un nombre para la red.');
-      await acciones.crearRed(nombre);
-    });
+    ) : null;
+    if (crear) {
+      enviar(crear, async () => {
+        const nombre = input.value.trim();
+        if (!nombre) throw new Error('Poné un nombre para la red.');
+        await acciones.crearRed(nombre);
+      });
+    }
 
     const actualRed = lista.find((r) => r.id === actualId);
     let renombrar = null;
-    if (actualRed) {
+    if (actualRed && administra) {
       const nuevoNombre = h('input', { type: 'text', name: 'nombre', autocomplete: 'off', maxlength: 80, value: actualRed.nombre });
       renombrar = h('form.ficha-form.ficha-renombrar', { autocomplete: 'off', novalidate: true, hidden: true },
         h('label.campo', {}, h('span', { text: `Nuevo nombre de ${actualRed.nombre}` }), nuevoNombre),
@@ -1379,10 +1382,18 @@ export function setupFicha({ root, red, acciones }) {
         botones(boton('Traer cajas y clientes de Wispro', () => acciones.traerDeWispro())))
       : null;
 
+    let intro;
+    if (lista.length) {
+      intro = lista.length === 1 && !administra
+        ? `Trabajás con la red ${lista[0].nombre}.`
+        : 'Cada red (un cliente, una localidad, un despliegue) tiene sus propios elementos y cables. Elegí con cuál trabajar.';
+    } else {
+      intro = administra
+        ? 'Todavía no hay redes. Cada red (un cliente, una localidad, un despliegue) tiene sus propios elementos y cables.'
+        : 'Tu usuario todavía no tiene ninguna red asignada: pedile a quien administra traza que te asigne la tuya.';
+    }
     abrir('redes', [
-      h('p.ficha-sub', { text: lista.length
-        ? 'Cada red (un cliente, una localidad, un despliegue) tiene sus propios elementos y cables. Elegí con cuál trabajar.'
-        : 'Todavía no hay redes. Cada red (un cliente, una localidad, un despliegue) tiene sus propios elementos y cables.' }),
+      h('p.ficha-sub', { text: intro }),
       lista.length ? h('ul.ficha-opciones', {}, ...items) : null,
       renombrar ? h('div.ficha-acciones.ficha-acciones-chicas', {},
         boton('Cambiar el nombre de esta red', () => {
@@ -1393,7 +1404,7 @@ export function setupFicha({ root, red, acciones }) {
       traer,
       crear,
     ], { titulo: 'Redes', onCerrar: () => (lista.length ? acciones.cancelar() : null) });
-    if (!lista.length) input.focus({ preventScroll: true });
+    if (!lista.length && crear) input.focus({ preventScroll: true });
   }
 
   // --------------------------------------------------- traer de Wispro

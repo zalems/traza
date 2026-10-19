@@ -24,7 +24,7 @@ function largoDe(puntos) {
 
 const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
 
-export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
+export function setupHerramientas({ map, maplibregl, usuario, administra = true, notify, toast }) {
   const red = setupRed({ map, maplibregl, usuario });
   const barra = $('herramientas');
   const chip = $('red-chip');
@@ -232,7 +232,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
       const res = await api(`api/redes/${id}`, { method: 'PUT', body: { nombre } });
       redes = (await api('api/redes')).redes;
       if (redActual?.id === id) pintarRed(redes.find((r) => r.id === id) ?? res.red);
-      ficha.redes({ lista: redes, actualId: redActual?.id ?? null });
+      ficha.redes({ lista: redes, actualId: redActual?.id ?? null, administra });
       toast(`La red ahora se llama ${res.red.nombre}`);
     },
 
@@ -1019,7 +1019,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
     }
     if (modo !== 'ver') setModo('ver');
     red.seleccionar(null);
-    ficha.redes({ lista: redes, actualId: redActual?.id ?? null });
+    ficha.redes({ lista: redes, actualId: redActual?.id ?? null, administra });
   }
 
   function pintarRed(r) {
@@ -1072,7 +1072,7 @@ export function setupHerramientas({ map, maplibregl, usuario, notify, toast }) {
       }
     } else {
       pintarBarra();
-      ficha.redes({ lista: redes, actualId: null });
+      ficha.redes({ lista: redes, actualId: null, administra });
     }
   }
 

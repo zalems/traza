@@ -3,16 +3,19 @@
 
 Un solo archivo, sin dependencias fuera de la biblioteca estándar. Guarda todo
 en SQLite y atiende en 127.0.0.1 detrás de nginx, que solo deja pasar pedidos
-con sesión y agrega dos cabeceras: X-Usuario (la obtiene de ftth-auth.py) y
-X-Ftth-Secreto, una clave que comparten nginx y este servicio para que ningún
-otro programa de la máquina pueda hablarle a la API haciéndose pasar por nginx.
+con sesión y agrega tres cabeceras: X-Usuario y X-Redes (las obtiene de
+ftth-auth.py: quién es y qué redes puede ver, "*" todas, "1,3" esas, "-"
+ninguna; sin la cabecera, todas) y X-Ftth-Secreto, una clave que comparten
+nginx y este servicio para que ningún otro programa de la máquina pueda
+hablarle a la API haciéndose pasar por nginx. Todo lo que es de una red que el
+usuario no puede ver responde 403.
 
   GET    /api/salud                    el servicio está vivo (sin sesión): esquema de la base y, con
                                        la clave de nginx, el código del programa que atiende
-  GET    /api/yo                       quién está conectado
-  GET    /api/redes                    redes (una por cliente o despliegue)
-  POST   /api/redes                    {nombre}
-  PUT    /api/redes/ID                 {nombre}
+  GET    /api/yo                       quién está conectado, si administra y qué redes ve
+  GET    /api/redes                    redes (una por cliente o despliegue) que el usuario puede ver
+  POST   /api/redes                    {nombre} (solo quien administra)
+  PUT    /api/redes/ID                 {nombre} (solo quien administra)
   GET    /api/red?red=ID               toda la red (GeoJSON, equipos y uniones) y la versión actual
   GET    /api/cambios?red=ID&desde=V   lo que cambió después de la versión V (incluye bajas)
   POST   /api/elementos                {red, tipo, nombre, estado, lon, lat, datos, notas}
@@ -413,6 +416,17 @@ class Store:
             "FROM redes r ORDER BY r.nombre COLLATE NOCASE"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def red_de(self, tabla: str, registro_id: int):
+        """La red de un elemento, cable, equipo o unión (aunque esté borrado); None si no existe."""
+        consultas = {
+            "elementos": "SELECT red_id FROM elementos WHERE id = ?",
+            "cables": "SELECT red_id FROM cables WHERE id = ?",
+            "equipos": "SELECT e.red_id FROM equipos q JOIN elementos e ON e.id = q.elemento_id WHERE q.id = ?",
+            "fusiones": "SELECT e.red_id FROM fusiones f JOIN elementos e ON e.id = f.elemento_id WHERE f.id = ?",
+        }
+        row = self.conn().execute(consultas[tabla], (registro_id,)).fetchone()
+        return row["red_id"] if row else None
 
     def network_info(self, red_id: int):
         row = self.conn().execute("SELECT id, nombre, creado, creado_por FROM redes WHERE id = ?", (red_id,)).fetchone()
@@ -3390,6 +3404,29 @@ class Handler(BaseHTTPRequestHandler):
         expected = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(":")[0]
         return host.lower() == expected.lower()
 
+    def redes_permitidas(self):
+        """Qué redes puede ver el usuario (X-Redes, de ftth-auth vía nginx): None = todas."""
+        raw = (self.headers.get("X-Redes") or "").strip()
+        if raw in ("", "*"):
+            return None  # administra (o nginx todavía no manda la cabecera: como antes de 0.8.0)
+        return {int(x) for x in raw.split(",") if x.strip().isdigit()}
+
+    def administra(self) -> bool:
+        return self.redes_permitidas() is None
+
+    def permitir(self, red_id: int):
+        permitidas = self.redes_permitidas()
+        if permitidas is not None and red_id not in permitidas:
+            raise ApiError(HTTPStatus.FORBIDDEN, "No tenés acceso a esa red.")
+
+    def objeto_permitido(self, tabla: str, registro_id: int) -> int:
+        """Comprueba que el elemento, cable, equipo o unión sea de una red que el usuario
+        puede ver (lo que no existe pasa: la operación va a responder 404 por su cuenta)."""
+        red_id = self.store.red_de(tabla, registro_id)
+        if red_id is not None:
+            self.permitir(red_id)
+        return registro_id
+
     def read_json(self) -> dict:
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype != "application/json":
@@ -3428,6 +3465,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar la red.")
         if self.store.network_info(red_id) is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa red.")
+        self.permitir(red_id)
         return red_id
 
     @staticmethod
@@ -3444,6 +3482,7 @@ class Handler(BaseHTTPRequestHandler):
         row = self.store.get_element(self.element_param(value))
         if row is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "Ese elemento ya no existe: lo borró otro usuario.")
+        self.permitir(row["red_id"])
         if row["tipo"] != tipo:
             raise ApiError(HTTPStatus.BAD_REQUEST,
                            "Ese elemento no es una NAP." if tipo == "nap" else "Ese elemento no es un cliente.")
@@ -3498,18 +3537,28 @@ class Handler(BaseHTTPRequestHandler):
         q = lambda key, default="": query.get(key, [default])[0]  # noqa: E731
 
         if path == "/api/yo" and method == "GET":
-            return HTTPStatus.OK, {"usuario": user}
+            permitidas = self.redes_permitidas()
+            return HTTPStatus.OK, {"usuario": user, "administra": permitidas is None,
+                                   "redes": None if permitidas is None else sorted(permitidas)}
 
         if path == "/api/redes":
             if method == "GET":
-                return HTTPStatus.OK, {"redes": store.networks()}
+                permitidas = self.redes_permitidas()
+                redes = store.networks()
+                if permitidas is not None:
+                    redes = [r for r in redes if r["id"] in permitidas]
+                return HTTPStatus.OK, {"redes": redes}
             if method == "POST":
+                if not self.administra():
+                    raise ApiError(HTTPStatus.FORBIDDEN, "Solo quien administra puede crear redes.")
                 nombre = text_field(self.read_json(), "nombre", MAX_NOMBRE, required=True)
                 if not nombre:
                     raise ApiError(HTTPStatus.BAD_REQUEST, "La red necesita un nombre.")
                 return HTTPStatus.CREATED, {"red": store.add_network(nombre, user)}
         red_id = self.route_id(path, "/api/redes/")
         if red_id is not None and method == "PUT":
+            if not self.administra():
+                raise ApiError(HTTPStatus.FORBIDDEN, "Solo quien administra puede cambiar el nombre de una red.")
             nombre = text_field(self.read_json(), "nombre", MAX_NOMBRE, required=True)
             if not nombre:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "La red necesita un nombre.")
@@ -3540,6 +3589,7 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.CREATED, store.add_element(red_id, element_fields(data, creating=True), user)
         element_id = self.route_id(path, "/api/elementos/")
         if element_id is not None:
+            self.objeto_permitido("elementos", element_id)
             if method == "PUT":
                 data = self.read_json()
                 return HTTPStatus.OK, store.update_element(
@@ -3553,6 +3603,7 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.CREATED, store.add_cable(red_id, cable_fields(data, creating=True), user)
         cable_id = self.route_id(path, "/api/cables/")
         if cable_id is not None:
+            self.objeto_permitido("cables", cable_id)
             if method == "PUT":
                 data = self.read_json()
                 return HTTPStatus.OK, store.update_cable(
@@ -3563,9 +3614,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/equipos" and method == "POST":
             data = self.read_json()
             return HTTPStatus.CREATED, store.add_equipo(
-                self.element_param(data.get("elemento")), equipo_fields(data, creating=True), user)
+                self.objeto_permitido("elementos", self.element_param(data.get("elemento"))),
+                equipo_fields(data, creating=True), user)
         equipo_id = self.route_id(path, "/api/equipos/")
         if equipo_id is not None:
+            self.objeto_permitido("equipos", equipo_id)
             if method == "PUT":
                 data = self.read_json()
                 return HTTPStatus.OK, store.update_equipo(
@@ -3577,10 +3630,16 @@ class Handler(BaseHTTPRequestHandler):
             data = self.read_json()
             tipo = choice_field(data, "tipo", TIPOS_UNION)
             return HTTPStatus.CREATED, store.add_fusiones(
-                self.element_param(data.get("elemento")), pares_field(data), tipo, user)
+                self.objeto_permitido("elementos", self.element_param(data.get("elemento"))),
+                pares_field(data), tipo, user)
         if path == "/api/fusiones/borrar" and method == "POST":
-            return HTTPStatus.OK, store.delete_fusiones(ids_field(self.read_json()), None, user)
+            ids = ids_field(self.read_json())
+            for fusion_id in ids:
+                self.objeto_permitido("fusiones", fusion_id)
+            return HTTPStatus.OK, store.delete_fusiones(ids, None, user)
         fusion_id = self.route_id(path, "/api/fusiones/")
+        if fusion_id is not None:
+            self.objeto_permitido("fusiones", fusion_id)
         if fusion_id is not None and method == "PUT":
             data = self.read_json()
             cambios = {}

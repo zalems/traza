@@ -665,6 +665,52 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.pedir("PUT", url, {"lon": 10 ** 400, "lat": 0})[0], 400)
         self.assertEqual(self.pedir("PUT", url, raw=b'{"lon": NaN, "lat": 0}', headers={"Content-Type": "application/json"})[0], 400)
 
+    def test_redes_por_usuario(self):
+        """X-Redes (de ftth-auth vía nginx): un usuario ve solo sus redes; sin la cabecera o con *, todas."""
+        x = self.armar("Redes por usuario A")
+        otra = self.nueva_red("Redes por usuario B")
+        a, b = x["red"], otra
+        solo_b = {"X-Redes": str(b)}
+        # Listados y lectura.
+        nombres = [r["nombre"] for r in self.ok("GET", "/api/redes", headers=solo_b)["redes"]]
+        self.assertEqual(nombres, ["Redes por usuario B"])
+        self.assertEqual(self.ok("GET", "/api/yo", headers=solo_b), {"usuario": "ana", "administra": False, "redes": [b]})
+        self.assertEqual(self.ok("GET", "/api/yo", headers={"X-Redes": "*"})["administra"], True)
+        self.assertEqual(self.ok("GET", "/api/yo", headers={"X-Redes": "-"}), {"usuario": "ana", "administra": False, "redes": []})
+        self.assertEqual(self.ok("GET", "/api/redes", headers={"X-Redes": "-"})["redes"], [])
+        for ruta in (f"/api/red?red={a}", f"/api/cambios?red={a}&desde=0", f"/api/historial?red={a}"):
+            self.assertEqual(self.pedir("GET", ruta, headers=solo_b)[0], 403, ruta)
+            self.assertEqual(self.pedir("GET", ruta, headers={"X-Redes": f"{a},{b}"})[0], 200, ruta)
+        # Crear y renombrar redes: solo quien administra.
+        self.assertEqual(self.pedir("POST", "/api/redes", {"nombre": "Otra más"}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("PUT", f"/api/redes/{b}", {"nombre": "Mía"}, headers=solo_b)[0], 403)
+        # Elementos, cables, equipos y uniones de la red A: ni leer ni tocar desde B.
+        nap, cli = x["nap"], x["cli"]
+        self.assertEqual(self.pedir("POST", "/api/elementos", {"red": a, "tipo": "poste", "lon": -58.1, "lat": -26.1}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("PUT", f"/api/elementos/{cli['id']}", {"notas": "x", "version": cli["properties"]["version"]}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("DELETE", f"/api/elementos/{cli['id']}?version={cli['properties']['version']}", headers=solo_b)[0], 403)
+        t = x["cables"]["t"]
+        self.assertEqual(self.pedir("PUT", f"/api/cables/{t['id']}", {"notas": "x", "version": t["properties"]["version"]}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("DELETE", f"/api/cables/{t['id']}?version={t['properties']['version']}", headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("POST", "/api/cables", {"red": a, "nombre": "X", "fibras": 2, "coords": [[-58.17, -26.18], [-58.16, -26.18]],
+                                                           "nodos": [None, None]}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("POST", "/api/equipos", {"elemento": nap["id"], "tipo": "splitter", "salidas": 8}, headers=solo_b)[0], 403)
+        eq = self.ok("POST", "/api/equipos", {"elemento": nap["id"], "tipo": "splitter", "salidas": 8}, status=201)["equipos"][0]
+        self.assertEqual(self.pedir("PUT", f"/api/equipos/{eq['id']}", {"nombre": "S", "version": eq["version"]}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("DELETE", f"/api/equipos/{eq['id']}?version={eq['version']}", headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("POST", "/api/fusiones", {"elemento": x["bot"]["id"], "pares": [{"a": f"c{x['t']}:a:5", "b": f"c{x['r']}:b:1"}]},
+                                    headers=solo_b)[0], 403)
+        f = self.unir(x["bot"], [(f"c{x['t']}:a:5", f"c{x['r']}:b:1")])["fusiones"][0]
+        self.assertEqual(self.pedir("PUT", f"/api/fusiones/{f['id']}", {"a": f"c{x['t']}:a:6", "version": f["version"]}, headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("DELETE", f"/api/fusiones/{f['id']}?version={f['version']}", headers=solo_b)[0], 403)
+        self.assertEqual(self.pedir("POST", "/api/fusiones/borrar", {"ids": [f["id"]]}, headers=solo_b)[0], 403)
+        # Lo que no existe sigue siendo 404 (no se revela nada por la red).
+        self.assertEqual(self.pedir("PUT", "/api/elementos/999999", {"notas": "x", "version": 1}, headers=solo_b)[0], 404)
+        # Con su propia red, todo normal.
+        poste = self.ok("POST", "/api/elementos", {"red": b, "tipo": "poste", "lon": -58.1, "lat": -26.1, "nombre": "P"}, status=201, headers=solo_b)["elemento"]
+        self.ok("PUT", f"/api/elementos/{poste['id']}", {"notas": "mío", "version": poste["properties"]["version"]}, headers=solo_b)
+        self.assertEqual(len(self.ok("GET", f"/api/red?red={b}", headers=solo_b)["elementos"]["features"]), 1)
+
     def test_salud_con_y_sin_clave(self):
         api.Handler.secreto = "k" * 40
         try:

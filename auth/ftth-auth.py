@@ -6,16 +6,22 @@ usuarios y sesiones en SQLite y atiende en 127.0.0.1 detrás de nginx:
 
   GET  /auth/check    nginx lo consulta (auth_request) antes de servir cada
                       archivo: 200 si la cookie de sesión vale, 401 si no.
+                      Responde X-Usuario y X-Redes (qué redes puede ver: "*" todas,
+                      "1,3" esas, "-" ninguna), que nginx le pasa a la API.
   POST /auth/login    usuario y contraseña (JSON) -> cookie de sesión.
   POST /auth/logout   cierra la sesión.
-  GET  /auth/session  quién está conectado (para la interfaz).
+  GET  /auth/session  quién está conectado y si administra (para la interfaz).
   GET  /auth/health   el servicio está vivo.
 
 Uso:
   ftth-auth.py serve  [--db RUTA] [--port 8900]
-  ftth-auth.py usuarios listar | agregar NOMBRE | clave NOMBRE | quitar NOMBRE [--db RUTA]
+  ftth-auth.py usuarios listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE
+               | redes NOMBRE (RED … | --todas)                       [--db RUTA]
 
-Todos los usuarios tienen los mismos permisos.
+Un usuario administra (ve todas las redes, crea redes y les cambia el nombre) o
+ve solo las redes que se le asignaron. Los que existían antes de 0.8.0 quedan
+como administradores. Las redes se nombran como en el visor o por su número
+(se leen de la base de la red, red.db, si está junto a la de usuarios).
 """
 
 import argparse
@@ -80,7 +86,8 @@ CREATE TABLE IF NOT EXISTS usuarios (
     id      INTEGER PRIMARY KEY,
     nombre  TEXT NOT NULL UNIQUE,
     clave   TEXT NOT NULL,
-    creado  TEXT NOT NULL
+    creado  TEXT NOT NULL,
+    redes   TEXT                -- NULL: todas (administra); "1,3": solo esas; "": ninguna
 );
 CREATE TABLE IF NOT EXISTS sesiones (
     token_hash  TEXT PRIMARY KEY,
@@ -99,6 +106,27 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def redes_texto(redes):
+    """Lista de ids de red -> lo que se guarda (None = todas)."""
+    if redes is None:
+        return None
+    return ",".join(str(int(r)) for r in sorted({int(r) for r in redes}))
+
+
+def redes_lista(texto):
+    """Lo guardado -> None (todas) o lista de ids."""
+    if texto is None:
+        return None
+    return [int(x) for x in str(texto).split(",") if x.strip().isdigit()]
+
+
+def redes_cabecera(redes) -> str:
+    """Lo que va en X-Redes: "*" todas, "1,3" esas, "-" ninguna."""
+    if redes is None:
+        return "*"
+    return ",".join(str(r) for r in redes) if redes else "-"
+
+
 def iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -115,6 +143,9 @@ class Store:
         self.local = threading.local()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            # 0.8.0: redes por usuario (las bases anteriores no tienen la columna).
+            if "redes" not in {r["name"] for r in c.execute("PRAGMA table_info(usuarios)")}:
+                c.execute("ALTER TABLE usuarios ADD COLUMN redes TEXT")
 
     def conn(self) -> sqlite3.Connection:
         c = getattr(self.local, "conn", None)
@@ -127,14 +158,26 @@ class Store:
             self.local.conn = c
         return c
 
+    def close(self):
+        """Cierra la conexión de este hilo (cada pedido corre en un hilo que después termina)."""
+        c = getattr(self.local, "conn", None)
+        if c is not None:
+            c.close()
+            self.local.conn = None
+
     # usuarios
     def list_users(self):
-        return self.conn().execute("SELECT nombre, creado FROM usuarios ORDER BY nombre").fetchall()
+        return self.conn().execute("SELECT nombre, creado, redes FROM usuarios ORDER BY nombre").fetchall()
 
-    def add_user(self, name: str, password: str):
+    def add_user(self, name: str, password: str, redes=None):
+        """redes: None = todas (administra); lista de ids = solo esas."""
         self.conn().execute(
-            "INSERT INTO usuarios (nombre, clave, creado) VALUES (?, ?, ?)", (name, hash_password(password), iso(now()))
+            "INSERT INTO usuarios (nombre, clave, creado, redes) VALUES (?, ?, ?, ?)",
+            (name, hash_password(password), iso(now()), redes_texto(redes)),
         )
+
+    def set_redes(self, name: str, redes) -> bool:
+        return self.conn().execute("UPDATE usuarios SET redes = ? WHERE nombre = ?", (redes_texto(redes), name)).rowcount > 0
 
     def set_password(self, name: str, password: str) -> bool:
         cur = self.conn().execute("UPDATE usuarios SET clave = ? WHERE nombre = ?", (hash_password(password), name))
@@ -170,12 +213,12 @@ class Store:
         return token
 
     def session_user(self, token: str):
-        """Nombre del usuario de la sesión, o None. Renueva el vencimiento de vez en cuando."""
+        """El usuario de la sesión ({"nombre", "redes"}), o None. Renueva el vencimiento de vez en cuando."""
         if not token:
             return None
         h = self.token_hash(token)
         row = self.conn().execute(
-            "SELECT s.token_hash, s.visto, s.vence, u.nombre FROM sesiones s JOIN usuarios u ON u.id = s.usuario_id "
+            "SELECT s.token_hash, s.visto, s.vence, u.nombre, u.redes FROM sesiones s JOIN usuarios u ON u.id = s.usuario_id "
             "WHERE s.token_hash = ?",
             (h,),
         ).fetchone()
@@ -190,7 +233,7 @@ class Store:
                 "UPDATE sesiones SET visto = ?, vence = ? WHERE token_hash = ?",
                 (iso(t), iso(t + timedelta(days=SESSION_DAYS)), h),
             )
-        return row["nombre"]
+        return {"nombre": row["nombre"], "redes": redes_lista(row["redes"])}
 
     def delete_session(self, token: str):
         if token:
@@ -284,12 +327,25 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- rutas
     def do_GET(self):
+        try:
+            self.atender_get()
+        finally:
+            self.store.close()
+
+    def do_POST(self):
+        try:
+            self.atender_post()
+        finally:
+            self.store.close()
+
+    def atender_get(self):
         path = urlsplit(self.path).path
         if path == "/auth/check":
             user = self.store.session_user(self.cookie_token())
             if user:
                 self.send_response(HTTPStatus.OK)
-                self.send_header("X-Usuario", user)
+                self.send_header("X-Usuario", user["nombre"])
+                self.send_header("X-Redes", redes_cabecera(user["redes"]))
                 self.send_header("Content-Length", "0")
                 self.end_headers()
             else:
@@ -297,7 +353,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/auth/session":
             user = self.store.session_user(self.cookie_token())
             if user:
-                self.send_json(HTTPStatus.OK, {"usuario": user})
+                self.send_json(HTTPStatus.OK, {"usuario": user["nombre"], "administra": user["redes"] is None,
+                                               "redes": user["redes"]})
             else:
                 self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "sin sesión"})
         elif path == "/auth/health":
@@ -305,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "no existe"})
 
-    def do_POST(self):
+    def atender_post(self):
         path = urlsplit(self.path).path
         if path == "/auth/login":
             self.login()
@@ -391,14 +448,65 @@ def ask_password(prompt="Contraseña: ") -> str:
         print("No coinciden; de nuevo.", file=sys.stderr)
 
 
+class Redes:
+    """Las redes del visor (base red.db), para nombrarlas en el CLI. Sin la base, solo números."""
+
+    def __init__(self, ruta):
+        self.rows = []
+        if ruta and os.path.exists(ruta):
+            try:
+                c = sqlite3.connect(f"file:{ruta}?mode=ro", uri=True, timeout=5)
+                c.row_factory = sqlite3.Row
+                self.rows = c.execute("SELECT id, nombre FROM redes ORDER BY nombre COLLATE NOCASE").fetchall()
+                c.close()
+            except sqlite3.Error as err:
+                print(f"(no se pudo leer la base de la red {ruta}: {err}; las redes van por número)", file=sys.stderr)
+
+    def resolver(self, texto: str):
+        """'ALVATIC' o '1' -> id; None si no hay tal red."""
+        texto = texto.strip()
+        por_nombre = [r for r in self.rows if r["nombre"].strip().lower() == texto.lower()]
+        if len(por_nombre) == 1:
+            return por_nombre[0]["id"]
+        if texto.isdigit() and (not self.rows or any(r["id"] == int(texto) for r in self.rows)):
+            return int(texto)
+        return None
+
+    def nombre(self, red_id: int) -> str:
+        for r in self.rows:
+            if r["id"] == red_id:
+                return f"{r['nombre']} ({red_id})"
+        return f"red {red_id}"
+
+    def describir(self, redes) -> str:
+        if redes is None:
+            return "administra: todas las redes"
+        if not redes:
+            return "ninguna red"
+        return ", ".join(self.nombre(r) for r in redes)
+
+
 def users_cli(args) -> int:
     store = Store(args.db)
+    redes_db = Redes(args.redes_db if args.redes_db is not None else os.path.join(os.path.dirname(args.db), "red.db"))
+
+    def resolver_redes(textos):
+        ids = []
+        for t in textos:
+            red_id = redes_db.resolver(t)
+            if red_id is None:
+                disponibles = ", ".join(f"{r['nombre']} ({r['id']})" for r in redes_db.rows) or "ninguna todavía"
+                print(f"No hay una red «{t}». Redes: {disponibles}.", file=sys.stderr)
+                return None
+            ids.append(red_id)
+        return ids
+
     if args.accion == "listar":
         rows = store.list_users()
         if not rows:
             print("No hay usuarios.")
         for row in rows:
-            print(f"{row['nombre']}\t(creado {row['creado'][:10]})")
+            print(f"{row['nombre']}\t(creado {row['creado'][:10]})\t{redes_db.describir(redes_lista(row['redes']))}")
         return 0
     name = (args.nombre or "").strip()
     if not name:
@@ -408,12 +516,31 @@ def users_cli(args) -> int:
         if any(r["nombre"] == name for r in store.list_users()):
             print(f"El usuario {name} ya existe (para cambiarle la contraseña: clave {name}).", file=sys.stderr)
             return 1
+        redes = None
+        if args.red:
+            redes = resolver_redes(args.red)
+            if redes is None:
+                return 1
         password = ask_password(f"Contraseña para {name}: ")
         if len(password) < 8:
             print("La contraseña tiene que tener al menos 8 caracteres.", file=sys.stderr)
             return 1
-        store.add_user(name, password)
-        print(f"Usuario {name} creado.")
+        store.add_user(name, password, redes)
+        print(f"Usuario {name} creado: {redes_db.describir(redes)}.")
+    elif args.accion == "redes":
+        if args.todas:
+            redes = None
+        elif args.lista:
+            redes = resolver_redes(args.lista)
+            if redes is None:
+                return 1
+        else:
+            print(f"Indicá las redes de {name} (por nombre o número) o --todas para que administre.", file=sys.stderr)
+            return 2
+        if not store.set_redes(name, redes):
+            print(f"No existe el usuario {name}.", file=sys.stderr)
+            return 1
+        print(f"{name}: {redes_db.describir(redes)}.")
     elif args.accion == "clave":
         password = ask_password(f"Nueva contraseña para {name}: ")
         if len(password) < 8:
@@ -438,9 +565,14 @@ def main() -> int:
     s = sub.add_parser("serve", help="atender pedidos (detrás de nginx)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=int(os.environ.get("FTTH_AUTH_PORT", "8900")))
-    u = sub.add_parser("usuarios", help="administrar usuarios")
-    u.add_argument("accion", choices=["listar", "agregar", "clave", "quitar"])
+    u = sub.add_parser("usuarios", help="administrar usuarios",
+                       description="listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE | redes NOMBRE (RED … | --todas)")
+    u.add_argument("accion", choices=["listar", "agregar", "clave", "quitar", "redes"])
     u.add_argument("nombre", nargs="?")
+    u.add_argument("lista", nargs="*", help="redes: las redes del usuario, por nombre o número")
+    u.add_argument("--red", action="append", help="agregar: una red que va a ver (se puede repetir); sin esto, administra")
+    u.add_argument("--todas", action="store_true", help="redes: que administre (ve todas)")
+    u.add_argument("--redes-db", default=None, help=argparse.SUPPRESS)  # base de la red, para nombrar las redes
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)

@@ -840,7 +840,7 @@ install_auth() {
 
   cat > "$WORK/usuarios" <<WRAP
 #!/usr/bin/env bash
-# Administra los usuarios del login: listar | agregar NOMBRE | clave NOMBRE | quitar NOMBRE
+# Administra los usuarios del login: listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE | redes NOMBRE (RED … | --todas)
 [[ \$EUID -eq 0 ]] || { echo "Ejecutar con sudo." >&2; exit 1; }
 exec runuser -u $AUTH_USER -- /usr/bin/python3 -I $AUTH_PY --db $AUTH_DB usuarios "\$@"
 WRAP
@@ -960,11 +960,12 @@ app_block() {
     }
 
     # API de la red: solo con sesión. nginx le pasa al servicio quién es el
-    # usuario (lo dice el servicio de sesión) y, sin sesión, responde 401 en
-    # JSON en vez de mandar a la página de entrada.
+    # usuario y qué redes puede ver (lo dice el servicio de sesión) y, sin
+    # sesión, responde 401 en JSON en vez de mandar a la página de entrada.
     location /api/ {
         auth_request /auth/check;
         auth_request_set \$ftth_usuario \$upstream_http_x_usuario;
+        auth_request_set \$ftth_redes \$upstream_http_x_redes;
         error_page 401 = @api_sin_sesion;
         proxy_pass http://127.0.0.1:$API_PORT;
         proxy_set_header Host \$host;
@@ -972,6 +973,7 @@ app_block() {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Usuario \$ftth_usuario;
+        proxy_set_header X-Redes \$ftth_redes;
         # La clave que la API exige para saber que el pedido viene de nginx
         # (archivo legible solo por root).
         include $API_SECRET_INC;
@@ -985,6 +987,7 @@ app_block() {
         limit_except GET { deny all; }
         proxy_pass http://127.0.0.1:$API_PORT;
         proxy_set_header X-Usuario "";
+        proxy_set_header X-Redes "";
     }
 
     location @api_sin_sesion {
@@ -1389,7 +1392,7 @@ step "Listo"
 (( SKIP_NGINX )) && { info "Archivos en $ROOT. Falta publicarlos con un servidor web."; exit 0; }
 
 IP="$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)"
-info "Usuarios del login: sudo $ROOT/bin/usuarios listar | agregar NOMBRE | clave NOMBRE | quitar NOMBRE"
+info "Usuarios del login: sudo $ROOT/bin/usuarios listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE | redes NOMBRE (RED … | --todas)"
 info "Wispro y el panel de la OLT: sudo $ROOT/bin/integraciones ver | wispro RED | panel RED URL | probar RED"
 if (( TLS_ON )); then
   info "Abrí: https://$DOMAIN/"

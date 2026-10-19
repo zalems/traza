@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.7.1
+# Plataforma FTTH · kit 0.8.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -183,15 +183,25 @@ no están.
 
 ### Usuarios
 
-Todos los usuarios tienen los mismos permisos. Se administran desde el
-servidor; no hay registro desde la web.
+Un usuario administra (ve todas las redes, crea redes y les cambia el nombre)
+o ve solo las redes que se le asignaron: así una instalación puede alojar a
+varias empresas, cada una con su red y sus usuarios, sin que una vea a la
+otra. Dentro de su red, todos pueden cargar, editar y usar Wispro y el panel
+de la OLT por igual. Se administran desde el servidor; no hay registro desde
+la web.
 
 ```bash
 /srv/ftth/bin/usuarios listar
-/srv/ftth/bin/usuarios agregar NOMBRE     # pide la contraseña (mínimo 8 caracteres)
-/srv/ftth/bin/usuarios clave NOMBRE       # cambia la contraseña
-/srv/ftth/bin/usuarios quitar NOMBRE      # borra el usuario y cierra sus sesiones
+/srv/ftth/bin/usuarios agregar NOMBRE               # administra; pide la contraseña (mínimo 8 caracteres)
+/srv/ftth/bin/usuarios agregar NOMBRE --red CARCA   # ve solo esa red (--red se puede repetir)
+/srv/ftth/bin/usuarios redes NOMBRE CARCA GOYA      # cambia qué redes ve; con --todas pasa a administrar
+/srv/ftth/bin/usuarios clave NOMBRE                 # cambia la contraseña
+/srv/ftth/bin/usuarios quitar NOMBRE                # borra el usuario y cierra sus sesiones
 ```
+
+Las redes se nombran como en el visor o por su número. Los cambios de redes
+valen al instante, sin volver a entrar. Los usuarios que existían antes de
+0.8.0 quedan como administradores.
 
 La sesión dura 30 días desde el último uso, así que en el teléfono no hay que
 entrar cada vez. Tras 8 intentos fallidos en 15 minutos, la IP o el usuario
@@ -223,10 +233,10 @@ nuevo). Si el panel tiene varias OLT (por ejemplo la de otra empresa),
 `--olt N`): sin eso no se lee ninguna. Los clientes de una OLT que no está en
 el panel (por ejemplo una V-SOL) igual se pueden medir en vivo por Wispro.
 
-Todos los usuarios de una instalación tienen los mismos permisos: cualquiera
-ve los contratos de Wispro (nombres, direcciones, ONTs) de todas las redes
-conectadas y puede pedir mediciones en vivo. Por eso una instalación con
-Wispro conectado no se comparte entre empresas: cada una, la suya.
+Cualquier usuario de la red ve sus contratos de Wispro (nombres, direcciones,
+ONTs) y puede pedir mediciones en vivo; un usuario que no tiene asignada la
+red no ve nada de ella. Para alojar a varias empresas en una instalación, cada
+una va en su red, con sus usuarios asignados a esa red (ver Usuarios).
 
 Para ver cómo responden Wispro y el panel, sin guardar nada y sin mostrar
 claves ni datos de los clientes:
@@ -288,7 +298,7 @@ pasar por un usuario.
 
 ```
 /srv/ftth/
-  web -> releases/0.7.1-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
+  web -> releases/0.8.0-xxxxxxxx         visor en uso (enlace; se cambia de forma atómica)
   releases/                              versión en uso y la anterior
   config/config.local.js                 ajustes de esta instalación; el script nunca lo pisa
   tiles/argentina-AAAAMMDD-xxxx.pmtiles  mapa de calles (xxxx resume la zona)
@@ -325,25 +335,27 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.7.1 a
-0.7.0 alcanza con `git checkout 6be07f1` e instalar (misma base). De 0.7.0 a
-0.6.1 alcanza con `git checkout 8353557` e instalar: misma estructura de base
-(lo que se trajo de Wispro queda como cualquier otro elemento). De 0.6.1 a
-0.6.0 alcanza con `git checkout 5ea5b6d` e instalar (solo cambia el visor). De
-0.6.0 a 0.5.0 alcanza con `git checkout 59f7e0f` e instalar: misma estructura
-de base; la conexión con Wispro queda guardada sin usarse y los clientes
-agregados desde Wispro quedan como cualquier otro. La copia diaria de 0.5.0 no
-incluye `integraciones.json` (queda igual en `data/`), y `bin/integraciones`
-queda pero no anda con la API de 0.5.0: se puede borrar con
-`rm /srv/ftth/bin/integraciones`. De 0.5.0 a 0.4.0 alcanza con
-`git checkout 6006a67` e instalar: usan la misma estructura de base. Después
-hay que recargar la página en todos los dispositivos (una pestaña de 0.5.0 que
-quede abierta puede borrar cómo están acomodadas las cartas), y lo acomodado
-se pierde en cada carta la primera vez que se cambia un cable de lado en
-0.4.0. Para volver a una versión con una estructura de base anterior (por
-ejemplo de 0.4.0 a 0.3.0), se restaura la copia que el script hizo antes de
-actualizar y se instala la versión vieja; lo cargado después de esa copia se
-pierde:
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.8.0 a
+0.7.1 alcanza con `git checkout c3ffdc3` e instalar: la base de la red es la
+misma, y la de usuarios tiene una columna más que 0.7.1 no mira (todos vuelven
+a ver todas las redes). De 0.7.1 a 0.7.0 alcanza con `git checkout 6be07f1` e
+instalar (misma base). De 0.7.0 a 0.6.1 alcanza con `git checkout 8353557` e
+instalar: misma estructura de base (lo que se trajo de Wispro queda como
+cualquier otro elemento). De 0.6.1 a 0.6.0 alcanza con `git checkout 5ea5b6d`
+e instalar (solo cambia el visor). De 0.6.0 a 0.5.0 alcanza con
+`git checkout 59f7e0f` e instalar: misma estructura de base; la conexión con
+Wispro queda guardada sin usarse y los clientes agregados desde Wispro quedan
+como cualquier otro. La copia diaria de 0.5.0 no incluye `integraciones.json`
+(queda igual en `data/`), y `bin/integraciones` queda pero no anda con la API
+de 0.5.0: se puede borrar con `rm /srv/ftth/bin/integraciones`. De 0.5.0 a
+0.4.0 alcanza con `git checkout 6006a67` e instalar: usan la misma estructura
+de base. Después hay que recargar la página en todos los dispositivos (una
+pestaña de 0.5.0 que quede abierta puede borrar cómo están acomodadas las
+cartas), y lo acomodado se pierde en cada carta la primera vez que se cambia
+un cable de lado en 0.4.0. Para volver a una versión con una estructura de
+base anterior (por ejemplo de 0.4.0 a 0.3.0), se restaura la copia que el
+script hizo antes de actualizar y se instala la versión vieja; lo cargado
+después de esa copia se pierde:
 
 ```bash
 systemctl stop ftth-api
@@ -438,19 +450,20 @@ instalación normal sirve de referencia.
 
 ## Pruebas
 
-`python3 -m unittest discover -s pruebas` prueba la API (validaciones, cables
-pegados que siguen a los elementos, conflictos entre dos usuarios, historial,
-clave de nginx, cartas de empalme y su disposición) con una base temporal, y
-las integraciones contra un Wispro y un panel de la OLT falsos que responden
-como los reales (cajas, contratos y cómo se cruza cada uno con los clientes
-del mapa, ONTs por número de serie o por el número de contrato de su
-descripción, mediciones en vivo, fallas y plazos, agregar dos veces a la vez,
-traer toda la red de Wispro, deshacerlo y traerla dos veces a la vez, elegir
-sus OLT y quitar lo de la que no se usa, NAPs amontonadas, el comando
-`integraciones`). `node pruebas/fibras.test.mjs` prueba la lógica de fibras,
-colores, recorridos y potencias del visor, y
-`node pruebas/integracion.test.mjs` la medición virtual y la estabilidad (Node
-20.19 o más nuevo; el de Debian 13 sirve).
+`python3 -m unittest discover -s pruebas` prueba el servicio de sesión (login,
+lo que le dice a nginx de cada usuario, la migración de la base de usuarios) y
+la API (redes por usuario, validaciones, cables pegados que siguen a los
+elementos, conflictos entre dos usuarios, historial, clave de nginx, cartas de
+empalme y su disposición) con una base temporal, y las integraciones contra un
+Wispro y un panel de la OLT falsos que responden como los reales (cajas,
+contratos y cómo se cruza cada uno con los clientes del mapa, ONTs por número
+de serie o por el número de contrato de su descripción, mediciones en vivo,
+fallas y plazos, agregar dos veces a la vez, traer toda la red de Wispro,
+deshacerlo y traerla dos veces a la vez, elegir sus OLT y quitar lo de la que
+no se usa, NAPs amontonadas, el comando `integraciones`).
+`node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos
+y potencias del visor, y `node pruebas/integracion.test.mjs` la medición
+virtual y la estabilidad (Node 20.19 o más nuevo; el de Debian 13 sirve).
 
 ## Qué se probó y qué no
 
@@ -490,10 +503,13 @@ una revisión independiente: sus hallazgos quedaron corregidos (poder deshacer
 después de cerrar la pantalla, una caja dibujada a mano cerca de una de
 Wispro, una NAP que Wispro entrega dos veces, la misma cuenta en dos redes, el
 foco con el teclado). Con la red real, la vista previa dice qué va a agregar y
-qué no antes de cambiar nada. La 0.7.1 salió de traerla en la red real: 126
-NAPs de Wispro estaban en pares (la misma caja en la OLT vieja y en la nueva)
-y una caja dibujada a mano apartaba todas las de alrededor; se probó con un
-Wispro falso que repite esos casos.
+qué no antes de cambiar nada. Las redes por usuario (0.8.0) se probaron en la
+API, en el servicio de sesión y en Chromium con dos usuarios (uno que
+administra y uno con una sola red), más la actualización desde 0.7.1 con la
+base de usuarios real del sandbox. La 0.7.1 salió de traerla en la red real:
+126 NAPs de Wispro estaban en pares (la misma caja en la OLT vieja y en la
+nueva) y una caja dibujada a mano apartaba todas las de alrededor; se probó
+con un Wispro falso que repite esos casos.
 
 No se pudo probar, y hay que mirarlo en el uso real:
 
