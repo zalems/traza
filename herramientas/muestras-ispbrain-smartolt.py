@@ -229,7 +229,9 @@ def ispbrain(empresa, base=None):
         print("Rutas que menciona la página:", ", ".join(rutas_spec) or "ninguna con json/swagger")
     rutas_spec += ["/swagger/v1/swagger.json", "/swagger.json", "/swagger/swagger.json", "/swagger/v2/swagger.json",
                    "/api/v2/swagger.json", "/openapi.json", "/api-docs", "/api-docs/swagger.json", "/swagger/json",
-                   "/v2/api-docs", "/swagger/api-docs", "/api/v2/docs", "/api/v2/openapi.json", "/swagger/openapi.json"]
+                   "/v2/api-docs", "/swagger/api-docs", "/api/v2/docs", "/api/v2/openapi.json", "/swagger/openapi.json",
+                   "/swagger/api-docs.json", "/swagger/docs", "/swagger/docs.json", "/api/v2/swagger", "/api/v2/api-docs",
+                   "/swagger/api/v2", "/swagger/v2/api-docs", "/api/v2/docs.json", "/swagger/resources.json"]
     vistas = set()
     for ruta in rutas_spec:
         if ruta in vistas:
@@ -264,9 +266,12 @@ def ispbrain(empresa, base=None):
             titulo(f"GET {ruta}", estado, s)
         return estado, dato
 
-    for ruta in ("/api/v2/areas", "/api/v2/cities", "/api/v2/devices", "/api/v2/plans", "/api/v2/services", "/api/v2/branches",
-                 "/api/v2/nodes", "/api/v2/nodos", "/api/v2/boxes", "/api/v2/naps", "/api/v2/olts", "/api/v2/onus",
-                 "/api/v2/zones", "/api/v2/sold_services", "/api/v2/sold-services", "/api/v2/soldservices", "/api/v2/services_sold"):
+    # Los grupos que muestra el Swagger de ISPbrain: connections-points (¿las cajas?), customers_services, sucusales, extras…
+    for ruta in ("/api/v2/areas", "/api/v2/cities", "/api/v2/devices", "/api/v2/plans", "/api/v2/services", "/api/v2/sucusales",
+                 "/api/v2/cuits", "/api/v2/connections-points", "/api/v2/connections-points?page=1&limit=5",
+                 "/api/v2/connections_points", "/api/v2/customers_services", "/api/v2/customers_services?page=1&limit=5",
+                 "/api/v2/extras", "/api/v2/altwha", "/api/v2/payment-methods", "/api/v2/nodes", "/api/v2/naps",
+                 "/api/v2/olts", "/api/v2/onus", "/api/v2/zones"):
         estado, dato = get(ruta)
         filas = lista(dato)
         if filas:
