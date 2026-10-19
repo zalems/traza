@@ -232,6 +232,25 @@ def ispbrain(empresa, base=None):
                    "/v2/api-docs", "/swagger/api-docs", "/api/v2/docs", "/api/v2/openapi.json", "/swagger/openapi.json",
                    "/swagger/api-docs.json", "/swagger/docs", "/swagger/docs.json", "/api/v2/swagger", "/api/v2/api-docs",
                    "/swagger/api/v2", "/swagger/v2/api-docs", "/api/v2/docs.json", "/swagger/resources.json"]
+    # Lo que diga la documentación de cada lista: {ruta: [parámetros GET]} para armar las consultas.
+    parametros = {}
+
+    def parametros_12(declaracion, prefijo=""):
+        """Operaciones de una declaración Swagger 1.2: imprime y guarda los parámetros GET."""
+        for api in declaracion.get("apis") or []:
+            ruta_api = prefijo + str(api.get("path") or "")
+            for op in api.get("operations") or []:
+                params = [f"{q.get('name')}{'*' if q.get('required') else ''} ({q.get('paramType')})"
+                          for q in op.get("parameters") or []]
+                print(f"  {op.get('method')} {ruta_api} | {', '.join(params) or '-'}"
+                      + (f" | {op.get('summary')}" if op.get("summary") else ""))
+                if str(op.get("method")).upper() == "GET":
+                    parametros[ruta_api] = op.get("parameters") or []
+        for nombre, modelo in (declaracion.get("models") or {}).items():
+            props = (modelo or {}).get("properties") or {}
+            if props:
+                print(f"  modelo {nombre}: {', '.join(props)}")
+
     vistas = set()
     for ruta in rutas_spec:
         if ruta in vistas:
@@ -248,6 +267,8 @@ def ispbrain(empresa, base=None):
                     g = ops.get("get") or {}
                     for prm in g.get("parameters", []) if isinstance(g, dict) else []:
                         params.append(f"{prm.get('name')}{'*' if prm.get('required') else ''}")
+                    if isinstance(g, dict) and g:
+                        parametros[p] = g.get("parameters", [])
                     print(" ", ", ".join(m.upper() for m in ops if m in ("get", "post", "put", "delete")), p,
                           f"| GET: {', '.join(params)}" if params else "")
             esquemas = (spec.get("components") or {}).get("schemas") or (spec.get("definitions") or {})
@@ -256,9 +277,55 @@ def ispbrain(empresa, base=None):
                 if props:
                     print(f"  esquema {k}: {', '.join(props)}")
             break
+        if estado == 200 and isinstance(spec, dict) and isinstance(spec.get("apis"), list):
+            # Swagger 1.2: una lista de recursos, y cada recurso con sus operaciones en otra ruta.
+            titulo(f"Recursos del Swagger (1.2): GET {ruta}", estado, s)
+            print("basePath:", spec.get("basePath"), "| swaggerVersion:", spec.get("swaggerVersion"),
+                  "| recursos:", ", ".join(str(r.get("path")) for r in spec["apis"]))
+            if any(r.get("operations") for r in spec["apis"]):
+                parametros_12(spec)
+            for recurso in spec["apis"]:
+                camino = str(recurso.get("path") or "")
+                if not camino:
+                    continue
+                for candidata in (f"{url}{camino}", f"{url}/{camino.strip('/')}", f"{url}{camino}.json"):
+                    estado2, decl, s2 = pedir(candidata, cab)
+                    if estado2 == 200 and isinstance(decl, dict) and decl.get("apis"):
+                        print(f"\n-- {camino}: GET {candidata.replace(base, '')} -> 200 ({s2:.1f} s); basePath {decl.get('basePath')}")
+                        parametros_12(decl)
+                        break
+                else:
+                    print(f"-- {camino}: no encontré su declaración (probé {camino} debajo de {ruta})")
+            break
+        if estado == 200 and isinstance(spec, str):
+            print("   (respondió texto, no JSON:", spec[:120].replace("\n", " "), ")")
     else:
         print("El Swagger no entregó el JSON: abrí {base}/swagger en el navegador, tocá Explore y mirá en la pestaña Red "
               "de dónde carga el .json; pasame esa ruta.".replace("{base}", base))
+
+    def consulta_segun_doc(ruta):
+        """Una consulta GET con los parámetros que pide la documentación (los obligatorios con un valor probable)."""
+        params = parametros.get(ruta)
+        if params is None:
+            for k, v in parametros.items():
+                if k.rstrip("/").endswith(ruta) or ruta.endswith(k.rstrip("/")):
+                    params = v
+                    break
+        if not params:
+            return None
+        valores = {}
+        for q in params:
+            if str(q.get("paramType") or q.get("in") or "query") != "query":
+                continue
+            nombre = str(q.get("name") or "")
+            if re.search(r"^(page|pagina|p)$", nombre, re.I):
+                valores[nombre] = "1"
+            elif re.search(r"limit|per_page|page_size|size|cantidad|rows|count", nombre, re.I):
+                valores[nombre] = "5"
+            elif q.get("required"):
+                valores[nombre] = q.get("defaultValue") or q.get("default") or ""
+                print(f"   (parámetro obligatorio sin valor conocido: {nombre}; lo mando vacío)")
+        return "?" + urllib.parse.urlencode(valores) if valores else ""
 
     def get(ruta, mostrar=True):
         estado, dato, s = pedir(f"{base}{ruta}", cab)
@@ -287,8 +354,12 @@ def ispbrain(empresa, base=None):
                     "?pagina=1&cantidad=5", "?page=1&size=5", "?page=1&rows=5", "?page=1")
     paginacion = None
     primer_cliente = None
-    for nombre, ruta in (("clientes", "/api/v2/customers"), ("conexiones", "/api/v2/connections")):
-        for sufijo in ([paginacion] if paginacion else paginaciones):
+    for nombre, ruta in (("clientes", "/api/v2/customers"), ("conexiones", "/api/v2/connections"),
+                         ("puntos de conexión", "/api/v2/connections-points"), ("servicios de clientes", "/api/v2/customers_services")):
+        segun_doc = consulta_segun_doc(ruta.replace("/api/v2", ""))
+        if segun_doc is not None:
+            print(f"(según la documentación, {ruta} se pide con {segun_doc or 'sin parámetros'})")
+        for sufijo in ([segun_doc] if segun_doc is not None else []) + ([paginacion] if paginacion else list(paginaciones)):
             estado, dato = get(ruta + sufijo)
             if estado != 200:
                 print("  ", json.dumps(resumir(dato), ensure_ascii=False)[:200])
