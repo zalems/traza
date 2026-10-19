@@ -277,6 +277,8 @@ def ispbrain(empresa, base=None):
                 if props:
                     print(f"  esquema {k}: {', '.join(props)}")
             break
+        if estado == 200 and isinstance(spec, list) and spec and isinstance(spec[0], dict):
+            spec = {"apis": spec}  # algunos sirven la lista de recursos pelada
         if estado == 200 and isinstance(spec, dict) and isinstance(spec.get("apis"), list):
             # Swagger 1.2: una lista de recursos, y cada recurso con sus operaciones en otra ruta.
             titulo(f"Recursos del Swagger (1.2): GET {ruta}", estado, s)
@@ -288,7 +290,8 @@ def ispbrain(empresa, base=None):
                 camino = str(recurso.get("path") or "")
                 if not camino:
                     continue
-                for candidata in (f"{url}{camino}", f"{url}/{camino.strip('/')}", f"{url}{camino}.json"):
+                for candidata in (f"{url}{camino}", f"{url}/{camino.strip('/')}", f"{url}{camino}.json", f"{base}{camino}",
+                                  f"{base}/swagger{camino}", f"{base}/swagger/docs/{camino.strip('/')}"):
                     estado2, decl, s2 = pedir(candidata, cab)
                     if estado2 == 200 and isinstance(decl, dict) and decl.get("apis"):
                         print(f"\n-- {camino}: GET {candidata.replace(base, '')} -> 200 ({s2:.1f} s); basePath {decl.get('basePath')}")
@@ -298,7 +301,10 @@ def ispbrain(empresa, base=None):
                     print(f"-- {camino}: no encontré su declaración (probé {camino} debajo de {ruta})")
             break
         if estado == 200 and isinstance(spec, str):
-            print("   (respondió texto, no JSON:", spec[:120].replace("\n", " "), ")")
+            print("   (respondió texto, no JSON:", spec[:300].replace("\n", " "), ")")
+        elif estado == 200:
+            print("   (respondió 200 con algo que no reconozco; así empieza:)")
+            imprimir(resumir(spec, personal=False), limite=3000)
     else:
         print("El Swagger no entregó el JSON: abrí {base}/swagger en el navegador, tocá Explore y mirá en la pestaña Red "
               "de dónde carga el .json; pasame esa ruta.".replace("{base}", base))
