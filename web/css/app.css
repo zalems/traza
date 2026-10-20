@@ -1781,6 +1781,107 @@ button.integ-enlace:hover {
   line-height: 1.4;
 }
 
+/* --------------------------------------------------------- usuarios */
+
+.ficha-usuarios-acceso {
+  margin: 4px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.usuarios-lista {
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.usuarios-item {
+  padding: 10px 0 8px;
+  border-top: 1px solid var(--line);
+}
+
+.usuarios-item .ficha-sub {
+  margin: 0 0 2px;
+}
+
+.usuarios-acciones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+
+.usuarios-acciones button {
+  min-height: 36px;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.usuarios-acciones button:hover {
+  background: var(--paper-dim);
+}
+
+.usuarios-nombre {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 2px;
+  font-size: 15.5px;
+}
+
+.usuarios-ultimo {
+  font-size: 12.5px;
+}
+
+.usuarios-zona:not(:empty) {
+  margin: 8px 0 4px;
+  padding: 10px 12px 4px;
+  border-left: 3px solid var(--ink);
+  border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  background: var(--paper-dim);
+}
+
+.usuarios-form {
+  margin: 0;
+}
+
+.usuarios-nuevo {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.usuarios-nuevo h3 {
+  margin: 0 0 8px;
+  font-size: 15.5px;
+  font-weight: 750;
+}
+
+.usuarios-permisos {
+  margin: 0 0 12px;
+}
+
+.usuarios-permisos > .opcion,
+.usuarios-redes .opcion {
+  margin: 0 -8px;
+}
+
+.usuarios-redes {
+  margin: 0 0 0 22px;
+  padding: 0;
+  list-style: none;
+}
+
+.usuarios-redes .opcion {
+  min-height: 36px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
 /* ------------------------------------------------- traer de Wispro */
 
 .importar-acceso {

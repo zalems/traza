@@ -1,6 +1,27 @@
 # Cambios
 
-## 0.8.0 · 19/10/2026
+## 0.9.0 · 20/10/2026
+
+Usuarios desde el visor y todas las redes en un solo mapa.
+
+- Panel **Usuarios** para quien administra (en el panel de capas y al pie de
+  la lista de redes): lista con qué ve cada uno y cuándo entró por última vez;
+  crear usuario con contraseña y redes (o que administre), cambiarle las redes
+  o la contraseña (le cierra las sesiones) y quitarlo. Uno no se quita a sí
+  mismo ni se saca la administración. Los nombres no distinguen mayúsculas.
+- "Todas las redes" en la lista de redes, para quien administra: el mapa
+  muestra todas las redes juntas y cada ficha dice de qué red es; se puede
+  editar, mover y borrar lo que hay, pero no agregar ni cambiar trazados (para
+  eso se elige una red). Queda guardada como cualquier otra elección de red.
+- Pantalla de entrada con el nombre traza y una línea que dice qué es.
+- Servicio de sesión: `GET/POST /auth/usuarios`, `PUT/DELETE /auth/usuarios/NOMBRE`
+  (solo administra) y `POST /auth/clave` {actual, nueva} para cambiar la
+  propia. API: `GET /api/red?red=todas` y `GET /api/cambios?red=todas` (solo
+  administra) y el campo `red` en cada elemento, cable, equipo y unión.
+- Pruebas: del panel de usuarios y de la propia contraseña (`test_auth.py`),
+  de `red=todas` (`test_api.py`).
+
+## 0.8.0 · 19/10/2026 · commit 5db5afc
 
 Redes por usuario: una instalación puede alojar a varias empresas.
 

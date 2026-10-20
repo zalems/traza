@@ -1392,7 +1392,7 @@ step "Listo"
 (( SKIP_NGINX )) && { info "Archivos en $ROOT. Falta publicarlos con un servidor web."; exit 0; }
 
 IP="$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)"
-info "Usuarios del login: sudo $ROOT/bin/usuarios listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE | redes NOMBRE (RED … | --todas)"
+info "Usuarios del login: desde el visor (panel Usuarios, quien administra) o sudo $ROOT/bin/usuarios listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE | redes NOMBRE (RED … | --todas)"
 info "Wispro y el panel de la OLT: sudo $ROOT/bin/integraciones ver | wispro RED | panel RED URL | probar RED"
 if (( TLS_ON )); then
   info "Abrí: https://$DOMAIN/"

@@ -11,6 +11,9 @@ import { setupCarta } from './carta.js';
 import { recorrido } from './fibras.js';
 
 const RED_KEY = 'ftth.red';
+// Quien administra puede mirar todas las redes juntas en un solo mapa (ahí no se carga nada nuevo).
+const TODAS = 'todas';
+const RED_TODAS = { id: TODAS, nombre: 'Todas las redes', todas: true };
 const $ = (id) => document.getElementById(id);
 // En pantallas táctiles el dedo tapa lo que toca: se trabaja con una mira fija
 // en el centro del mapa y botones, además del toque directo.
@@ -235,6 +238,23 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
       ficha.redes({ lista: redes, actualId: redActual?.id ?? null, administra });
       toast(`La red ahora se llama ${res.red.nombre}`);
     },
+    // En «todas las redes» se mira y se corrige lo que hay, pero no se dibuja nada nuevo.
+    soloLectura: () => Boolean(redActual?.todas),
+    // El nombre de la red de un elemento, cuando hace falta aclararlo (todas las redes juntas).
+    nombreRed(id) {
+      if (!redActual?.todas) return null;
+      return redes.find((r) => r.id === id)?.nombre ?? `red ${id}`;
+    },
+
+    // --- usuarios (solo quien administra; el servicio de sesión los guarda)
+    usuarios: {
+      listar: () => api('auth/usuarios'),
+      crear: (datos) => api('auth/usuarios', { method: 'POST', body: datos }),
+      cambiar: (nombre, datos) => api(`auth/usuarios/${encodeURIComponent(nombre)}`, { method: 'PUT', body: datos }),
+      quitar: (nombre) => api(`auth/usuarios/${encodeURIComponent(nombre)}`, { method: 'DELETE' }),
+      cambiarMiClave: (actual, nueva) => api('auth/clave', { method: 'POST', body: { actual, nueva } }),
+      abrir: () => abrirUsuarios(),
+    },
 
     // --- carta de empalme y recorridos
     abrirCarta(feature, ext = null) {
@@ -371,7 +391,7 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   let integracionRed = { red: null, estado: null, fallo: 0 };
   function estadoIntegracion() {
     const redId = red.state.red;
-    if (!redId) return null;
+    if (!redId || redId === TODAS) return null;
     const repreguntar = integracionRed.red === redId && integracionRed.fallo
       && Date.now() - integracionRed.fallo > REPREGUNTAR_INTEGRACION_MS;
     if (integracionRed.red !== redId || repreguntar) {
@@ -509,7 +529,7 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
       const activo = item.modo === modo && (item.modo !== 'punto' || item.tipo === tipoPunto);
       item.b.setAttribute('aria-pressed', String(activo));
     }
-    barra.classList.toggle('sin-red', !redActual || !red.state.cargada);
+    barra.classList.toggle('sin-red', !redActual || !red.state.cargada || Boolean(redActual.todas));
   }
   red.on('cargada', () => pintarBarra());
 
@@ -522,6 +542,10 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     }
     if (!red.state.cargada && nuevo !== 'ver') {
       notify(`Todavía no llegó la red ${redActual.nombre} del servidor; se sigue intentando sola. Cuando aparezca, ya se puede cargar.`);
+      return;
+    }
+    if (redActual?.todas && (nuevo === 'punto' || nuevo === 'cable' || nuevo === 'trazado')) {
+      notify('Estás mirando todas las redes juntas: acá se puede ver, editar y mover lo que hay, pero para agregar elementos o cables elegí una red.');
       return;
     }
     if (nuevo === modo && tipo === tipoPunto && nuevo !== 'ver') {
@@ -1022,6 +1046,21 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     ficha.redes({ lista: redes, actualId: redActual?.id ?? null, administra });
   }
 
+  // El panel de usuarios: quién entra y qué redes ve. Solo para quien administra.
+  async function abrirUsuarios() {
+    if (!administra) return;
+    let usuarios;
+    try {
+      [usuarios, redes] = await Promise.all([api('auth/usuarios'), api('api/redes').then((r) => r.redes)]);
+    } catch (err) {
+      notify(err.message);
+      return;
+    }
+    if (modo !== 'ver') setModo('ver');
+    red.seleccionar(null);
+    ficha.usuarios({ lista: usuarios.usuarios, redes, yo: usuario });
+  }
+
   function pintarRed(r) {
     redActual = r;
     chipNombre.textContent = r ? r.nombre : 'Red';
@@ -1030,7 +1069,7 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   }
 
   async function elegirRed(id) {
-    const elegida = redes.find((r) => r.id === id);
+    const elegida = id === TODAS ? (administra ? RED_TODAS : null) : redes.find((r) => r.id === id);
     if (!elegida) return;
     carta.cerrar({ silencioso: true });
     setModo('ver');
@@ -1059,11 +1098,13 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     if (avisoInicio) $('notice').hidden = true;
     let guardada = null;
     try {
-      guardada = Number(localStorage.getItem(RED_KEY));
+      guardada = localStorage.getItem(RED_KEY);
     } catch {
       guardada = null;
     }
-    const inicial = redes.find((r) => r.id === guardada) ?? (redes.length === 1 ? redes[0] : null);
+    const inicial = guardada === TODAS && administra
+      ? RED_TODAS
+      : redes.find((r) => r.id === Number(guardada)) ?? (redes.length === 1 ? redes[0] : null);
     if (inicial) {
       try {
         await elegirRed(inicial.id);
@@ -1106,5 +1147,5 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   pista();
   iniciar();
 
-  return { red, ficha, carta, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed };
+  return { red, ficha, carta, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed, abrirUsuarios };
 }

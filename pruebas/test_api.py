@@ -171,7 +171,7 @@ class ApiTest(unittest.TestCase):
         borrado = self.ok("DELETE", f"/api/elementos/{p2['id']}")
         self.assertEqual(borrado["cables"][0]["properties"]["nodos"], [p1["id"], None, None, nap["id"]])
         cambios = self.ok("GET", f"/api/cambios?red={red}&desde={movido['version']}")
-        self.assertEqual(cambios["elementos"][0], {"id": p2["id"], "borrado": True, "modificado_por": "ana",
+        self.assertEqual(cambios["elementos"][0], {"id": p2["id"], "red": red, "borrado": True, "modificado_por": "ana",
                                                    "version": borrado["version"]})
         self.assertEqual(self.pedir("PUT", f"/api/elementos/{p2['id']}", {"nombre": "x"})[0], 404)
         red_actual = self.ok("GET", f"/api/red?red={red}")
@@ -710,6 +710,33 @@ class ApiTest(unittest.TestCase):
         poste = self.ok("POST", "/api/elementos", {"red": b, "tipo": "poste", "lon": -58.1, "lat": -26.1, "nombre": "P"}, status=201, headers=solo_b)["elemento"]
         self.ok("PUT", f"/api/elementos/{poste['id']}", {"notas": "mío", "version": poste["properties"]["version"]}, headers=solo_b)
         self.assertEqual(len(self.ok("GET", f"/api/red?red={b}", headers=solo_b)["elementos"]["features"]), 1)
+
+    def test_todas_las_redes_en_un_mapa(self):
+        """red=todas: quien administra ve todas las redes juntas, cada objeto con su red; solo para leer."""
+        x = self.armar("Todas A")
+        b = self.nueva_red("Todas B")
+        poste = self.ok("POST", "/api/elementos", {"red": b, "tipo": "poste", "lon": -58.3, "lat": -26.3, "nombre": "PB"}, status=201)["elemento"]
+        todo = self.ok("GET", "/api/red?red=todas")
+        self.assertEqual((todo["red"]["id"], todo["red"]["todas"]), ("todas", True))
+        self.assertIn("Todas B", [r["nombre"] for r in todo["red"]["redes"]])
+        redes_vistas = {f["properties"]["red"] for f in todo["elementos"]["features"]}
+        self.assertTrue({x["red"], b} <= redes_vistas)
+        self.assertEqual([f["properties"]["red"] for f in todo["elementos"]["features"] if f["id"] == poste["id"]], [b])
+        self.assertTrue(all("red" in c["properties"] for c in todo["cables"]["features"]))
+        self.assertTrue(all("red" in e for e in todo["equipos"] + todo["fusiones"]))
+        # Los cambios de cualquier red llegan, con su red (también las bajas).
+        v = todo["version"]
+        self.ok("DELETE", f"/api/elementos/{poste['id']}?version={poste['properties']['version']}")
+        cambios = self.ok("GET", f"/api/cambios?red=todas&desde={v}")
+        self.assertEqual([(c["id"], c["red"], c["borrado"]) for c in cambios["elementos"]], [(poste["id"], b, True)])
+        # Solo quien administra; y no sirve para cargar.
+        self.assertEqual(self.pedir("GET", "/api/red?red=todas", headers={"X-Redes": str(b)})[0], 403)
+        self.assertEqual(self.pedir("GET", "/api/cambios?red=TODAS&desde=0", headers={"X-Redes": f"{b},{x['red']}"})[0], 403)
+        estado, dato = self.pedir("POST", "/api/elementos", {"red": "todas", "tipo": "poste", "lon": -58.1, "lat": -26.1})
+        self.assertEqual(estado, 400)
+        self.assertIn("elegí una red", dato["error"])
+        self.assertEqual(self.pedir("GET", "/api/historial?red=todas")[0], 400)
+        self.assertEqual(self.pedir("GET", "/api/red?red=Todas")[0], 200)
 
     def test_salud_con_y_sin_clave(self):
         api.Handler.secreto = "k" * 40

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#16222c">
   <meta name="robots" content="noindex">
-  <title>Entrar · Mapa FTTH</title>
+  <title>Entrar · traza</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316222c'/%3E%3Cpath d='M6 22 13 11l6 7 7-9' fill='none' stroke='%23fbfcfb' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='13' cy='11' r='2.6' fill='%23e8590c'/%3E%3C/svg%3E">
   <style>
     @font-face {
@@ -54,13 +54,20 @@
       border-radius: 12px;
       box-shadow: var(--shadow);
     }
-    h1 {
-      margin: 0 0 4px;
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: 0.005em;
+    .marca {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 6px;
     }
-    .sub { margin: 0 0 22px; color: var(--muted); }
+    .marca svg { width: 34px; height: 34px; flex: none; }
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+    }
+    .sub { margin: 0 0 22px; color: var(--muted); line-height: 1.4; }
     label {
       display: block;
       margin: 0 0 14px;
@@ -105,8 +112,11 @@
 </head>
 <body>
   <form id="form" autocomplete="on">
-    <h1>Mapa FTTH</h1>
-    <p class="sub">Entrá con tu usuario para ver y cargar la red.</p>
+    <div class="marca" aria-hidden="true">
+      <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#16222c"/><path d="M6 22 13 11l6 7 7-9" fill="none" stroke="#fbfcfb" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="13" cy="11" r="2.6" fill="#e8590c"/></svg>
+      <h1>traza</h1>
+    </div>
+    <p class="sub">El mapa del despliegue FTTH: postes, cajas, NAP, botellas, cables y cartas de empalme, cargados desde la calle. Entrá con tu usuario.</p>
     <p id="error" class="error" role="alert" hidden></p>
     <label>Usuario
       <input id="usuario" name="usuario" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>

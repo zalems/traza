@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.8.0
+# Plataforma FTTH · kit 0.9.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -183,12 +183,30 @@ no están.
 
 ### Usuarios
 
-Un usuario administra (ve todas las redes, crea redes y les cambia el nombre)
-o ve solo las redes que se le asignaron: así una instalación puede alojar a
-varias empresas, cada una con su red y sus usuarios, sin que una vea a la
-otra. Dentro de su red, todos pueden cargar, editar y usar Wispro y el panel
-de la OLT por igual. Se administran desde el servidor; no hay registro desde
-la web.
+Un usuario administra (ve todas las redes, crea redes y les cambia el nombre,
+y maneja los usuarios) o ve solo las redes que se le asignaron: así una
+instalación puede alojar a varias empresas, cada una con su red y sus
+usuarios, sin que una vea a la otra. Dentro de su red, todos pueden cargar,
+editar y usar Wispro y el panel de la OLT por igual. No hay registro desde la
+web: los usuarios los crea quien administra.
+
+**Desde el visor.** Quien administra tiene el panel **Usuarios** (en el panel
+de capas, junto a "Salir", y al pie de la lista de redes): crea usuarios con
+su contraseña y sus redes (o que administren), les cambia las redes o la
+contraseña y los quita. Cambiar la contraseña de alguien le cierra las
+sesiones abiertas; uno no puede quitarse a sí mismo ni sacarse la
+administración. Cada usuario puede cambiar su propia contraseña con
+`POST /auth/clave` (todavía sin pantalla en el visor).
+
+**Todas las redes en un solo mapa.** En la lista de redes, quien administra
+tiene además la opción "Todas las redes": el mapa muestra los elementos y
+cables de todas las redes juntos y cada ficha dice de qué red es. Ahí se puede
+mirar, editar, mover y borrar lo que hay, pero no agregar elementos ni cables
+ni cambiar trazados: para eso se elige una red. La elección queda guardada en
+el navegador.
+
+**Desde el servidor.** El primer usuario se crea en la instalación; después,
+desde el visor o con estos comandos:
 
 ```bash
 /srv/ftth/bin/usuarios listar
@@ -335,7 +353,9 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.8.0 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.9.0 a
+0.8.0 alcanza con `git checkout db29936` e instalar (mismas bases; solo cambian
+el visor, la API y el servicio de sesión). De 0.8.0 a
 0.7.1 alcanza con `git checkout c3ffdc3` e instalar: la base de la red es la
 misma, y la de usuarios tiene una columna más que 0.7.1 no mira (todos vuelven
 a ver todas las redes). De 0.7.1 a 0.7.0 alcanza con `git checkout 6be07f1` e

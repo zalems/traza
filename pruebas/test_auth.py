@@ -76,6 +76,74 @@ class AuthTest(unittest.TestCase):
         except urllib.error.HTTPError as err:
             return err.code, dict(err.headers), json.loads(err.read() or b"null")
 
+    def mandar(self, opener, method, ruta, body=None):
+        datos = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{ruta}", data=datos, method=method,
+                                     headers={"Host": "traza.ejemplo", "Origin": "https://traza.ejemplo",
+                                              **({"Content-Type": "application/json"} if datos else {})})
+        try:
+            with opener.open(req, timeout=5) as res:
+                cuerpo = res.read()
+                return res.status, json.loads(cuerpo) if cuerpo else None
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read() or b"null")
+
+    def test_panel_de_usuarios(self):
+        admin = self.sesion("admin", "clave-admin-123")
+        tecnico = self.sesion("tecnico", "clave-tecnico-1")
+        # Solo quien administra.
+        self.assertEqual(self.mandar(tecnico, "GET", "/auth/usuarios")[0], 403)
+        self.assertEqual(self.mandar(urllib.request.build_opener(), "GET", "/auth/usuarios")[0], 401)
+        estado, dato = self.mandar(admin, "GET", "/auth/usuarios")
+        self.assertEqual(estado, 200)
+        por_nombre = {u["nombre"]: u for u in dato["usuarios"]}
+        self.assertTrue(por_nombre["admin"]["administra"])
+        self.assertEqual(por_nombre["tecnico"]["redes"], [1, 3])
+        self.assertIsNotNone(por_nombre["tecnico"]["ultimo_acceso"])
+        # Crear: validaciones y duplicados (sin distinguir mayúsculas).
+        self.assertEqual(self.mandar(admin, "POST", "/auth/usuarios", {"nombre": "con espacio", "clave": "12345678", "redes": [2]})[0], 400)
+        self.assertEqual(self.mandar(admin, "POST", "/auth/usuarios", {"nombre": "cuadrilla", "clave": "corta", "redes": [2]})[0], 400)
+        self.assertEqual(self.mandar(admin, "POST", "/auth/usuarios", {"nombre": "cuadrilla", "clave": "12345678", "redes": "2"})[0], 400)
+        self.assertEqual(self.mandar(admin, "POST", "/auth/usuarios", {"nombre": "Tecnico", "clave": "12345678", "redes": [2]})[0], 409)
+        estado, dato = self.mandar(admin, "POST", "/auth/usuarios", {"nombre": "cuadrilla", "clave": "calle-2026-ok", "redes": [2, "5"]})
+        self.assertEqual((estado, dato["usuario"]["redes"], dato["usuario"]["administra"]), (201, [2, 5], False))
+        cuadrilla = self.sesion("cuadrilla", "calle-2026-ok")
+        self.assertEqual(self.pedir(cuadrilla, "/auth/check")[1]["X-Redes"], "2,5")
+        # Cambiar redes (y pasar a administrar) vale para la sesión abierta.
+        self.assertEqual(self.mandar(admin, "PUT", "/auth/usuarios/cuadrilla", {"redes": [1]})[1]["usuario"]["redes"], [1])
+        self.assertEqual(self.pedir(cuadrilla, "/auth/check")[1]["X-Redes"], "1")
+        self.assertEqual(self.mandar(admin, "PUT", "/auth/usuarios/cuadrilla", {"redes": None})[1]["usuario"]["administra"], True)
+        self.assertEqual(self.pedir(cuadrilla, "/auth/check")[1]["X-Redes"], "*")
+        # Cambiar la contraseña cierra sus sesiones; con la nueva entra.
+        self.assertEqual(self.mandar(admin, "PUT", "/auth/usuarios/cuadrilla", {"clave": "otra-clave-2026"})[0], 200)
+        self.assertEqual(self.pedir(cuadrilla, "/auth/check")[0], 401)
+        self.sesion("cuadrilla", "otra-clave-2026")
+        # Uno no se quita a sí mismo ni se saca la administración.
+        self.assertEqual(self.mandar(admin, "DELETE", "/auth/usuarios/admin")[0], 400)
+        self.assertEqual(self.mandar(admin, "PUT", "/auth/usuarios/admin", {"redes": []})[0], 400)
+        self.assertEqual(self.mandar(admin, "PUT", "/auth/usuarios/cuadrilla", {})[0], 400)
+        self.assertEqual(self.mandar(admin, "DELETE", "/auth/usuarios/nadie-asi")[0], 404)
+        # Quitar.
+        self.assertEqual(self.mandar(admin, "DELETE", "/auth/usuarios/cuadrilla")[0], 200)
+        self.assertNotIn("cuadrilla", {u["nombre"] for u in self.mandar(admin, "GET", "/auth/usuarios")[1]["usuarios"]})
+        self.assertEqual(self.mandar(admin, "DELETE", "/auth/usuarios/cuadrilla")[0], 404)
+        # Sin el origen de la página no se escribe.
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/auth/usuarios", data=b'{"nombre":"x","clave":"12345678"}', method="POST",
+                                     headers={"Host": "traza.ejemplo", "Origin": "https://otro.sitio", "Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            admin.open(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_cambiar_la_propia_clave(self):
+        auth.Handler.store.add_user("propia", "clave-propia-1", [1])
+        sesion = self.sesion("propia", "clave-propia-1")
+        self.assertEqual(self.mandar(sesion, "POST", "/auth/clave", {"actual": "no-es-esa-1", "nueva": "clave-propia-2"})[0], 400)
+        self.assertEqual(self.mandar(sesion, "POST", "/auth/clave", {"actual": "clave-propia-1", "nueva": "corta"})[0], 400)
+        self.assertEqual(self.mandar(sesion, "POST", "/auth/clave", {"actual": "clave-propia-1", "nueva": "clave-propia-2"})[0], 200)
+        # Sigue conectada (la cookie se renovó) y entra con la nueva.
+        self.assertEqual(self.pedir(sesion, "/auth/check")[0], 200)
+        self.sesion("propia", "clave-propia-2")
+
     def test_migracion_y_quien_administra(self):
         # La columna se agregó y el usuario anterior administra.
         c = sqlite3.connect(self.db)

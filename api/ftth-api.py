@@ -16,8 +16,9 @@ usuario no puede ver responde 403.
   GET    /api/redes                    redes (una por cliente o despliegue) que el usuario puede ver
   POST   /api/redes                    {nombre} (solo quien administra)
   PUT    /api/redes/ID                 {nombre} (solo quien administra)
-  GET    /api/red?red=ID               toda la red (GeoJSON, equipos y uniones) y la versión actual
-  GET    /api/cambios?red=ID&desde=V   lo que cambió después de la versión V (incluye bajas)
+  GET    /api/red?red=ID               toda la red (GeoJSON, equipos y uniones) y la versión actual;
+                                       red=todas: todas juntas, cada objeto con su red (solo administra)
+  GET    /api/cambios?red=ID&desde=V   lo que cambió después de la versión V (incluye bajas); red=todas idem
   POST   /api/elementos                {red, tipo, nombre, estado, lon, lat, datos, notas}
   PUT    /api/elementos/ID             los mismos campos y carta, todos opcionales; mover = lon y lat.
                                        carta es la disposición de la carta de empalme y llega como
@@ -98,6 +99,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 MAX_BODY = 256 * 1024
 MAX_NOMBRE = 80
+TODAS = "todas"  # red=todas: todas las redes juntas, solo para leer y solo para quien administra
 MAX_NOTAS = 2000
 MAX_DATOS = 8 * 1024
 MAX_VERTICES = 2000
@@ -475,6 +477,7 @@ class Store:
             "geometry": {"type": "Point", "coordinates": [row["lon"], row["lat"]]},
             "properties": {
                 "id": row["id"],
+                "red": row["red_id"],
                 "tipo": row["tipo"],
                 "nombre": row["nombre"],
                 "estado": row["estado"],
@@ -497,6 +500,7 @@ class Store:
             "geometry": {"type": "LineString", "coordinates": json.loads(row["coords"])},
             "properties": {
                 "id": row["id"],
+                "red": row["red_id"],
                 "tipo": row["tipo"],
                 "nombre": row["nombre"],
                 "fibras": row["fibras"],
@@ -520,6 +524,7 @@ class Store:
     def equipo_json(row) -> dict:
         return {
             "id": row["id"],
+            "red": row["red_id"],
             "elemento": row["elemento_id"],
             "tipo": row["tipo"],
             "nombre": row["nombre"],
@@ -538,6 +543,7 @@ class Store:
     def fusion_json(row) -> dict:
         return {
             "id": row["id"],
+            "red": row["red_id"],
             "elemento": row["elemento_id"],
             "a": row["a"],
             "b": row["b"],
@@ -552,20 +558,22 @@ class Store:
 
     @staticmethod
     def tombstone(row) -> dict:
-        out = {"id": row["id"], "borrado": True, "modificado_por": row["modificado_por"], "version": row["version"]}
+        out = {"id": row["id"], "red": row["red_id"], "borrado": True, "modificado_por": row["modificado_por"], "version": row["version"]}
         if "elemento_id" in row.keys():
             out["elemento"] = row["elemento_id"]
         return out
 
-    def network(self, red_id: int) -> dict:
+    def network(self, red_id) -> dict:
+        """Toda una red; con red_id None, todas juntas (la vista de quien administra)."""
         c = self.conn()
+        filtro, params = ("red_id = ? AND", (red_id,)) if red_id is not None else ("", ())
         # Lectura consistente: todo de un mismo momento.
         c.execute("BEGIN")
         try:
             version = self.version()
             rows = {
                 tabla: c.execute(
-                    f"SELECT * FROM {tabla} WHERE red_id = ? AND borrado IS NULL ORDER BY id", (red_id,)
+                    f"SELECT * FROM {tabla} WHERE {filtro} borrado IS NULL ORDER BY id", params
                 ).fetchall()
                 for tabla in ("elementos", "cables", "equipos", "fusiones")
             }
@@ -579,14 +587,15 @@ class Store:
             "fusiones": [self.fusion_json(r) for r in rows["fusiones"]],
         }
 
-    def changes(self, red_id: int, since: int) -> dict:
+    def changes(self, red_id, since: int) -> dict:
         c = self.conn()
+        filtro, params = ("red_id = ? AND", (red_id, since)) if red_id is not None else ("", (since,))
         c.execute("BEGIN")
         try:
             version = self.version()
             rows = {
                 tabla: c.execute(
-                    f"SELECT * FROM {tabla} WHERE red_id = ? AND version > ? ORDER BY version, id", (red_id, since)
+                    f"SELECT * FROM {tabla} WHERE {filtro} version > ? ORDER BY version, id", params
                 ).fetchall()
                 for tabla in ("elementos", "cables", "equipos", "fusiones")
             }
@@ -3458,10 +3467,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def red_param(self, value) -> int:
+    def red_param(self, value, todas: bool = False):
+        """El número de red del pedido, comprobado y permitido. Con todas=True (solo las
+        lecturas) acepta red=todas para quien administra y devuelve None: todas juntas."""
+        if todas and str(value or "").strip().lower() == TODAS:
+            if not self.administra():
+                raise ApiError(HTTPStatus.FORBIDDEN, "Solo quien administra ve todas las redes juntas.")
+            return None
         try:
             red_id = int_value(value, "red")
         except ApiError:
+            if str(value or "").strip().lower() == TODAS:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Para cargar elementos elegí una red: en «todas las redes» solo se mira.")
             raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar la red.")
         if self.store.network_info(red_id) is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa red.")
@@ -3565,13 +3582,14 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.OK, {"red": store.rename_network(red_id, nombre, user)}
 
         if path == "/api/red" and method == "GET":
-            red_id = self.red_param(q("red"))
+            red_id = self.red_param(q("red"), todas=True)
             payload = store.network(red_id)
-            payload["red"] = store.network_info(red_id)
+            payload["red"] = store.network_info(red_id) if red_id is not None else {
+                "id": TODAS, "nombre": "Todas las redes", "todas": True, "redes": store.networks()}
             return HTTPStatus.OK, payload
 
         if path == "/api/cambios" and method == "GET":
-            red_id = self.red_param(q("red"))
+            red_id = self.red_param(q("red"), todas=True)
             since = int_value(q("desde", "0") or "0", "desde")
             return HTTPStatus.OK, store.changes(red_id, since)
 

@@ -986,6 +986,7 @@ export function setupFicha({ root, red, acciones }) {
 
     const viejos = Object.entries(CAMPOS_VIEJOS).map(([k, l]) => fila(l, datos[k]));
     const detalle = h('dl.ficha-datos', {},
+      fila('Red', acciones.nombreRed?.(props.red)),
       fila('Estado', ESTADOS[props.estado] ?? props.estado),
       ...(CAMPOS[props.tipo] ?? []).map((c) => filaDato(c, datos[c.k])),
       ...viejos,
@@ -1198,6 +1199,7 @@ export function setupFicha({ root, red, acciones }) {
     for (const lista of usos?.values() ?? []) for (const u of lista) uniones.add(u.fusion.id);
 
     const detalle = h('dl.ficha-datos', {},
+      fila('Red', acciones.nombreRed?.(props.red)),
       fila('Tipo', def.label),
       fila('Largo', largo),
       fila('Estado', ESTADOS[props.estado] ?? props.estado),
@@ -1226,7 +1228,8 @@ export function setupFicha({ root, red, acciones }) {
       firma(props),
       botones(
         boton('Editar', () => formCable({ feature }), { class: 'primario' }),
-        boton('Trazado', () => acciones.editarTrazado(feature), { title: 'Mover, agregar o quitar puntos del cable' }),
+        // El trazado se pega a los elementos de la red: con todas juntas no se edita.
+        acciones.soloLectura?.() ? null : boton('Trazado', () => acciones.editarTrazado(feature), { title: 'Mover, agregar o quitar puntos del cable' }),
         boton('Borrar', () => { confirmar.hidden = false; confirmar.scrollIntoView({ block: 'nearest' }); }),
       ),
       confirmar,
@@ -1334,6 +1337,17 @@ export function setupFicha({ root, red, acciones }) {
   // -------------------------------------------------------------- redes
 
   function redes({ lista, actualId, administra = true }) {
+    // Quien administra puede mirar todas las redes juntas en un solo mapa.
+    const todas = administra && lista.length > 1
+      ? h('li', {},
+        h('label.opcion', { for: 'red-todas' },
+          h('input', { type: 'radio', name: 'red', id: 'red-todas', value: 'todas', checked: actualId === 'todas',
+            onchange: () => acciones.elegirRed('todas') }),
+          h('span', {}, h('strong', { text: 'Todas las redes' }),
+            h('small', { text: `Las ${lista.length} redes en un solo mapa, para mirar y corregir; para agregar, elegí una red` })),
+        ),
+      )
+      : null;
     const items = lista.map((r) => {
       const id = `red-${r.id}`;
       return h('li', {},
@@ -1394,7 +1408,7 @@ export function setupFicha({ root, red, acciones }) {
     }
     abrir('redes', [
       h('p.ficha-sub', { text: intro }),
-      lista.length ? h('ul.ficha-opciones', {}, ...items) : null,
+      lista.length ? h('ul.ficha-opciones', {}, ...items, todas) : null,
       renombrar ? h('div.ficha-acciones.ficha-acciones-chicas', {},
         boton('Cambiar el nombre de esta red', () => {
           renombrar.hidden = !renombrar.hidden;
@@ -1403,8 +1417,136 @@ export function setupFicha({ root, red, acciones }) {
       renombrar,
       traer,
       crear,
+      administra && acciones.usuarios ? h('div.ficha-acciones.ficha-acciones-chicas.ficha-usuarios-acceso', {},
+        boton('Usuarios: quién entra y qué redes ve', () => acciones.usuarios.abrir(), { class: 'enlace' })) : null,
     ], { titulo: 'Redes', onCerrar: () => (lista.length ? acciones.cancelar() : null) });
     if (!lista.length && crear) input.focus({ preventScroll: true });
+  }
+
+  // ------------------------------------------------------------ usuarios
+
+  // Quién entra y qué redes ve. Lo guarda el servicio de sesión (auth/usuarios);
+  // solo quien administra llega acá. Cada cambio vuelve a pedir la lista.
+  function usuarios({ lista, redes: listaRedes, yo }) {
+    const nombreDe = (id) => listaRedes.find((r) => r.id === id)?.nombre ?? `red ${id}`;
+    const describir = (u) => {
+      if (u.administra) return 'Administra: ve todas las redes y maneja usuarios';
+      if (!u.redes.length) return 'Sin redes asignadas todavía';
+      return `Ve ${u.redes.map(nombreDe).join(', ')}`;
+    };
+    const ultimo = (u) => (u.ultimo_acceso ? `Entró por última vez el ${formatFecha(u.ultimo_acceso)}` : 'Todavía no entró');
+
+    async function refrescar() {
+      const res = await acciones.usuarios.listar();
+      usuarios({ lista: res.usuarios, redes: listaRedes, yo });
+    }
+
+    // Las redes de un usuario: administra (todas) o una lista para tildar.
+    function camposRedes(prefijo, u = null) {
+      const administra = h('input', { type: 'checkbox', name: 'administra', id: `${prefijo}-administra`, checked: u ? u.administra : false });
+      const casillas = listaRedes.map((r) => h('li', {},
+        h('label.opcion', { for: `${prefijo}-red-${r.id}` },
+          h('input', { type: 'checkbox', name: 'red', id: `${prefijo}-red-${r.id}`, value: String(r.id), checked: Boolean(u?.redes?.includes(r.id)) }),
+          h('span', {}, h('strong', { text: r.nombre })),
+        ),
+      ));
+      const listaCasillas = h('ul.ficha-opciones.usuarios-redes', { hidden: administra.checked }, ...casillas);
+      administra.addEventListener('change', () => { listaCasillas.hidden = administra.checked; });
+      const bloque = h('div.usuarios-permisos', {},
+        h('label.opcion', { for: `${prefijo}-administra` }, administra,
+          h('span', {}, h('strong', { text: 'Administra' }), h('small', { text: 'Ve todas las redes, crea redes y maneja los usuarios' }))),
+        listaRedes.length ? listaCasillas : h('p.ficha-sub', { text: 'Todavía no hay redes para asignar.' }),
+      );
+      const leer = () => (administra.checked ? null : casillas.map((li) => li.querySelector('input')).filter((i) => i.checked).map((i) => Number(i.value)));
+      return { bloque, leer };
+    }
+
+    const filas = lista.map((u) => {
+      const esYo = u.nombre === yo;
+      let abierto = null; // el formulario desplegado bajo este usuario
+      const zona = h('div.usuarios-zona');
+      const mostrar = (form) => {
+        abierto = abierto === form ? null : form;
+        zona.replaceChildren(...(abierto ? [abierto] : []));
+        if (abierto) abierto.querySelector('input:not([type=checkbox]), input')?.focus({ preventScroll: true });
+      };
+
+      // Redes
+      const permisos = camposRedes(`u-${u.nombre}`, u);
+      const formRedes = h('form.ficha-form.usuarios-form', { autocomplete: 'off', novalidate: true },
+        permisos.bloque,
+        botones(boton('Guardar redes', null, { type: 'submit', class: 'primario' }), boton('Cancelar', () => mostrar(formRedes))),
+      );
+      enviar(formRedes, async () => {
+        await acciones.usuarios.cambiar(u.nombre, { redes: permisos.leer() });
+        acciones.integracion.toast(`Redes de ${u.nombre} guardadas`);
+        await refrescar();
+      });
+
+      // Contraseña
+      const clave = h('input', { type: 'password', name: 'clave', autocomplete: 'new-password', minlength: 8, maxlength: 256 });
+      const formClave = h('form.ficha-form.usuarios-form', { autocomplete: 'off', novalidate: true },
+        h('label.campo', {}, h('span', { text: `Nueva contraseña de ${u.nombre} (8 caracteres o más)` }), clave),
+        h('p.ficha-sub', { text: esYo ? 'Seguís conectado en este navegador; en los demás hay que volver a entrar.' : 'Se le cierran las sesiones abiertas: entra de nuevo con la nueva.' }),
+        botones(boton('Cambiar contraseña', null, { type: 'submit', class: 'primario' }), boton('Cancelar', () => mostrar(formClave))),
+      );
+      enviar(formClave, async () => {
+        if (clave.value.length < 8) throw new Error('La contraseña tiene que tener al menos 8 caracteres.');
+        await acciones.usuarios.cambiar(u.nombre, { clave: clave.value });
+        acciones.integracion.toast(`Contraseña de ${u.nombre} cambiada`);
+        await refrescar();
+      });
+
+      // Quitar
+      const confirmar = confirmacion(`¿Quitar el usuario ${u.nombre}? Deja de poder entrar; lo que cargó queda en el mapa.`, async () => {
+        await acciones.usuarios.quitar(u.nombre);
+        acciones.integracion.toast(`Usuario ${u.nombre} quitado`);
+        await refrescar();
+      });
+      confirmar.querySelector('button.peligro').textContent = 'Sí, quitar';
+
+      return h('li.usuarios-item', {},
+        h('div.usuarios-nombre', {}, h('strong', { text: u.nombre }), esYo ? h('span.chip', { text: 'vos' }) : null),
+        h('p.ficha-sub', { text: describir(u) }),
+        h('p.ficha-sub.usuarios-ultimo', { text: ultimo(u) }),
+        h('div.usuarios-acciones', {},
+          esYo ? null : boton('Redes', () => mostrar(formRedes)),
+          boton('Contraseña', () => mostrar(formClave)),
+          esYo ? null : boton('Quitar', () => { mostrar(null); confirmar.hidden = false; confirmar.scrollIntoView({ block: 'nearest' }); }),
+        ),
+        zona,
+        confirmar,
+      );
+    });
+
+    // Nuevo usuario
+    const nombre = h('input', { type: 'text', name: 'nombre', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', maxlength: 64,
+      placeholder: 'cuadrilla1, juan.perez…' });
+    const claveNueva = h('input', { type: 'password', name: 'clave', autocomplete: 'new-password', minlength: 8, maxlength: 256 });
+    const permisosNuevo = camposRedes('nuevo');
+    const crear = h('form.ficha-form.usuarios-form.usuarios-nuevo', { autocomplete: 'off', novalidate: true },
+      h('h3', { text: 'Nuevo usuario' }),
+      h('label.campo', {}, h('span', { text: 'Usuario' }), nombre),
+      h('label.campo', {}, h('span', { text: 'Contraseña (8 caracteres o más)' }), claveNueva),
+      permisosNuevo.bloque,
+      botones(boton('Crear usuario', null, { type: 'submit', class: 'primario' })),
+    );
+    enviar(crear, async () => {
+      const n = nombre.value.trim();
+      if (!n) throw new Error('Poné el nombre de usuario.');
+      if (claveNueva.value.length < 8) throw new Error('La contraseña tiene que tener al menos 8 caracteres.');
+      const redes = permisosNuevo.leer();
+      if (redes && !redes.length && listaRedes.length) throw new Error('Tildá al menos una red, o que administre.');
+      await acciones.usuarios.crear({ nombre: n, clave: claveNueva.value, redes });
+      acciones.integracion.toast(`Usuario ${n} creado`);
+      await refrescar();
+    });
+
+    abrir('usuarios', [
+      h('p.ficha-sub', { text: 'Cada usuario entra con su nombre y contraseña y ve solo las redes que se le asignan. Quien administra ve todas y maneja esta lista.' }),
+      h('ul.usuarios-lista', {}, ...filas),
+      crear,
+    ], { titulo: 'Usuarios', chip: String(lista.length), id: 'usuarios' });
   }
 
   // --------------------------------------------------- traer de Wispro
@@ -1820,6 +1962,7 @@ export function setupFicha({ root, red, acciones }) {
     verCable,
     verRecorrido,
     redes,
+    usuarios,
     importarWispro,
   };
 }

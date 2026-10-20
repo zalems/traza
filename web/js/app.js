@@ -430,6 +430,14 @@ async function start() {
 
   const herramientas = user ? setupHerramientas({ map, maplibregl, usuario: user, administra: sesion.administra, notify: showNotice, toast }) : null;
   if (!user) $('herramientas').hidden = true;
+  // Quien administra maneja los usuarios desde acá (y desde la lista de redes).
+  if (herramientas && sesion.administra) {
+    $('usuarios').hidden = false;
+    $('usuarios').addEventListener('click', () => {
+      setMoreOpen(false);
+      herramientas.abrirUsuarios();
+    });
+  }
 
   setupSearch({ map, maplibregl, config, buscarEnRed: (texto) => herramientas?.buscarEnRed(texto) ?? [] });
 

@@ -11,17 +11,25 @@ usuarios y sesiones en SQLite y atiende en 127.0.0.1 detrás de nginx:
   POST /auth/login    usuario y contraseña (JSON) -> cookie de sesión.
   POST /auth/logout   cierra la sesión.
   GET  /auth/session  quién está conectado y si administra (para la interfaz).
+  POST /auth/clave    {actual, nueva}: el usuario conectado cambia su contraseña.
   GET  /auth/health   el servicio está vivo.
+
+  Solo para quien administra (el panel de usuarios del visor):
+  GET    /auth/usuarios          lista: nombre, redes, cuándo entró por última vez.
+  POST   /auth/usuarios          {nombre, clave, redes}: redes null = administra, [] = ninguna.
+  PUT    /auth/usuarios/NOMBRE   {clave} y/o {redes}: cambiar la contraseña (cierra sus sesiones) o las redes.
+  DELETE /auth/usuarios/NOMBRE   quitar el usuario (no el propio).
 
 Uso:
   ftth-auth.py serve  [--db RUTA] [--port 8900]
   ftth-auth.py usuarios listar | agregar NOMBRE [--red RED …] | clave NOMBRE | quitar NOMBRE
                | redes NOMBRE (RED … | --todas)                       [--db RUTA]
 
-Un usuario administra (ve todas las redes, crea redes y les cambia el nombre) o
-ve solo las redes que se le asignaron. Los que existían antes de 0.8.0 quedan
-como administradores. Las redes se nombran como en el visor o por su número
-(se leen de la base de la red, red.db, si está junto a la de usuarios).
+Un usuario administra (ve todas las redes, crea redes y les cambia el nombre, y
+maneja los usuarios) o ve solo las redes que se le asignaron. Los que existían
+antes de 0.8.0 quedan como administradores. Las redes se nombran como en el
+visor o por su número (se leen de la base de la red, red.db, si está junto a la
+de usuarios).
 """
 
 import argparse
@@ -32,6 +40,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -40,7 +49,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 COOKIE = "ftth_sesion"
 SESSION_DAYS = 30            # duración de una sesión sin uso
@@ -48,7 +57,9 @@ EXTEND_AFTER_HOURS = 6       # cada cuánto se renueva el vencimiento de una ses
 MAX_FAILURES = 8             # intentos fallidos por IP o por usuario…
 FAILURE_WINDOW_MIN = 15      # …en esta ventana, antes de bloquear por el mismo lapso
 FAILURE_DELAY_S = 0.4        # pausa tras un intento fallido, para frenar la fuerza bruta
-MAX_BODY = 4096
+MAX_BODY = 8192
+MIN_PASSWORD = 8
+NOMBRE_USUARIO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{1,63}$")  # sin espacios; 2 a 64 caracteres
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 
@@ -167,7 +178,21 @@ class Store:
 
     # usuarios
     def list_users(self):
-        return self.conn().execute("SELECT nombre, creado, redes FROM usuarios ORDER BY nombre").fetchall()
+        return self.conn().execute(
+            "SELECT u.nombre, u.creado, u.redes, "
+            "(SELECT MAX(s.visto) FROM sesiones s WHERE s.usuario_id = u.id AND s.vence > ?) AS ultimo_acceso, "
+            "(SELECT COUNT(*) FROM sesiones s WHERE s.usuario_id = u.id AND s.vence > ?) AS sesiones "
+            "FROM usuarios u ORDER BY u.nombre COLLATE NOCASE",
+            (iso(now()), iso(now())),
+        ).fetchall()
+
+    def get_user(self, name: str):
+        return self.conn().execute("SELECT id, nombre, creado, redes FROM usuarios WHERE nombre = ?", (name,)).fetchone()
+
+    def find_user_like(self, name: str):
+        """El nombre tal como está guardado, sin distinguir mayúsculas; None si no existe."""
+        row = self.conn().execute("SELECT nombre FROM usuarios WHERE lower(nombre) = lower(?)", (name,)).fetchone()
+        return row["nombre"] if row else None
 
     def add_user(self, name: str, password: str, redes=None):
         """redes: None = todas (administra); lista de ids = solo esas."""
@@ -188,7 +213,7 @@ class Store:
         return cur.rowcount > 0
 
     def remove_user(self, name: str) -> bool:
-        return self.conn().execute("DELETE FROM usuarios WHERE nombre = ?", (name,)).rowcount > 0
+        return self.conn().execute("DELETE FROM usuarios WHERE nombre = ?", (name,)).rowcount > 0  # sus sesiones caen con él
 
     def check_login(self, name: str, password: str):
         row = self.conn().execute("SELECT id, nombre, clave FROM usuarios WHERE nombre = ?", (name,)).fetchone()
@@ -218,7 +243,7 @@ class Store:
             return None
         h = self.token_hash(token)
         row = self.conn().execute(
-            "SELECT s.token_hash, s.visto, s.vence, u.nombre, u.redes FROM sesiones s JOIN usuarios u ON u.id = s.usuario_id "
+            "SELECT s.token_hash, s.visto, s.vence, u.id, u.nombre, u.redes FROM sesiones s JOIN usuarios u ON u.id = s.usuario_id "
             "WHERE s.token_hash = ?",
             (h,),
         ).fetchone()
@@ -233,7 +258,7 @@ class Store:
                 "UPDATE sesiones SET visto = ?, vence = ? WHERE token_hash = ?",
                 (iso(t), iso(t + timedelta(days=SESSION_DAYS)), h),
             )
-        return {"nombre": row["nombre"], "redes": redes_lista(row["redes"])}
+        return {"id": row["id"], "nombre": row["nombre"], "redes": redes_lista(row["redes"])}
 
     def delete_session(self, token: str):
         if token:
@@ -268,6 +293,15 @@ class Throttle:
 
 
 # ----------------------------------------------------------------------- HTTP
+
+class Rechazo(Exception):
+    """Un pedido que no corresponde: el estado HTTP y el mensaje para la interfaz."""
+
+    def __init__(self, status, mensaje):
+        super().__init__(mensaje)
+        self.status = status
+        self.mensaje = mensaje
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ftth-auth/1"
@@ -327,20 +361,30 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- rutas
     def do_GET(self):
-        try:
-            self.atender_get()
-        finally:
-            self.store.close()
+        self.atender("GET")
 
     def do_POST(self):
+        self.atender("POST")
+
+    def do_PUT(self):
+        self.atender("PUT")
+
+    def do_DELETE(self):
+        self.atender("DELETE")
+
+    def atender(self, method: str):
         try:
-            self.atender_post()
+            self.rutear(method, urlsplit(self.path).path)
+        except Rechazo as err:
+            self.send_json(err.status, {"error": err.mensaje})
+        except Exception:  # noqa: BLE001 - se informa y se sigue atendiendo
+            log.exception("error atendiendo %s %s", method, self.path)
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Error interno del servidor."})
         finally:
             self.store.close()
 
-    def atender_get(self):
-        path = urlsplit(self.path).path
-        if path == "/auth/check":
+    def rutear(self, method: str, path: str):
+        if method == "GET" and path == "/auth/check":
             user = self.store.session_user(self.cookie_token())
             if user:
                 self.send_response(HTTPStatus.OK)
@@ -350,28 +394,148 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "sin sesión"})
-        elif path == "/auth/session":
+        elif method == "GET" and path == "/auth/session":
             user = self.store.session_user(self.cookie_token())
             if user:
                 self.send_json(HTTPStatus.OK, {"usuario": user["nombre"], "administra": user["redes"] is None,
                                                "redes": user["redes"]})
             else:
                 self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "sin sesión"})
-        elif path == "/auth/health":
+        elif method == "GET" and path == "/auth/health":
             self.send_json(HTTPStatus.OK, {"ok": True})
-        else:
-            self.send_json(HTTPStatus.NOT_FOUND, {"error": "no existe"})
-
-    def atender_post(self):
-        path = urlsplit(self.path).path
-        if path == "/auth/login":
+        elif method == "POST" and path == "/auth/login":
             self.login()
-        elif path == "/auth/logout":
+        elif method == "POST" and path == "/auth/logout":
             token = self.cookie_token()
             self.store.delete_session(token)
             self.send_json(HTTPStatus.OK, {"ok": True}, [("Set-Cookie", self.cookie_header("", 0))])
+        elif method == "POST" and path == "/auth/clave":
+            self.cambiar_clave_propia()
+        elif path == "/auth/usuarios" and method in ("GET", "POST"):
+            self.usuarios(method, None)
+        elif path.startswith("/auth/usuarios/") and method in ("PUT", "DELETE"):
+            self.usuarios(method, unquote(path[len("/auth/usuarios/"):]))
         else:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "no existe"})
+
+    # --- quién pide
+    def sesion_actual(self) -> dict:
+        user = self.store.session_user(self.cookie_token())
+        if not user:
+            raise Rechazo(HTTPStatus.UNAUTHORIZED, "sin sesión")
+        return user
+
+    def administrador(self) -> dict:
+        user = self.sesion_actual()
+        if user["redes"] is not None:
+            raise Rechazo(HTTPStatus.FORBIDDEN, "Solo quien administra puede manejar los usuarios.")
+        return user
+
+    def cuerpo(self) -> dict:
+        if not self.same_origin():
+            raise Rechazo(HTTPStatus.FORBIDDEN, "origen no permitido")
+        data = self.read_json()
+        if not isinstance(data, dict):
+            raise Rechazo(HTTPStatus.BAD_REQUEST, "Se esperaba un objeto JSON.")
+        return data
+
+    # --- usuarios (panel del visor)
+    @staticmethod
+    def usuario_json(row) -> dict:
+        redes = redes_lista(row["redes"])
+        return {"nombre": row["nombre"], "creado": row["creado"], "redes": redes, "administra": redes is None,
+                "ultimo_acceso": row["ultimo_acceso"] if "ultimo_acceso" in row.keys() else None,
+                "sesiones": row["sesiones"] if "sesiones" in row.keys() else 0}
+
+    @staticmethod
+    def validar_clave(valor) -> str:
+        clave = str(valor if valor is not None else "")
+        if len(clave) < MIN_PASSWORD:
+            raise Rechazo(HTTPStatus.BAD_REQUEST, f"La contraseña tiene que tener al menos {MIN_PASSWORD} caracteres.")
+        if len(clave) > 256:
+            raise Rechazo(HTTPStatus.BAD_REQUEST, "La contraseña es demasiado larga.")
+        return clave
+
+    @staticmethod
+    def validar_redes(valor):
+        """null -> None (administra); lista de números -> esas redes ([] = ninguna)."""
+        if valor is None:
+            return None
+        if not isinstance(valor, list) or len(valor) > 500:
+            raise Rechazo(HTTPStatus.BAD_REQUEST, "redes tiene que ser null (administra) o una lista de redes.")
+        ids = []
+        for v in valor:
+            if isinstance(v, bool) or not isinstance(v, (int, str)) or not str(v).isdigit() or int(v) <= 0:
+                raise Rechazo(HTTPStatus.BAD_REQUEST, "Cada red va por su número.")
+            ids.append(int(v))
+        return ids
+
+    def usuarios(self, method: str, nombre):
+        actor = self.administrador()
+        store = self.store
+        if method == "GET":
+            self.send_json(HTTPStatus.OK, {"usuarios": [self.usuario_json(r) for r in store.list_users()]})
+            return
+        if method == "POST":
+            data = self.cuerpo()
+            nombre = str(data.get("nombre") or "").strip()
+            if not NOMBRE_USUARIO.match(nombre):
+                raise Rechazo(HTTPStatus.BAD_REQUEST,
+                              "El nombre de usuario lleva de 2 a 64 letras, números, puntos, guiones o @, sin espacios.")
+            clave = self.validar_clave(data.get("clave"))
+            redes = self.validar_redes(data.get("redes"))
+            if store.find_user_like(nombre):
+                raise Rechazo(HTTPStatus.CONFLICT, f"Ya existe el usuario {store.find_user_like(nombre)}.")
+            store.add_user(nombre, clave, redes)
+            log.info("usuarios: %s creó a %s (%s)", actor["nombre"], nombre, "administra" if redes is None else redes_cabecera(redes))
+            self.send_json(HTTPStatus.CREATED, {"usuario": self.usuario_json(store.get_user(nombre))})
+            return
+        row = store.get_user(nombre or "")
+        if row is None:
+            raise Rechazo(HTTPStatus.NOT_FOUND, "No existe ese usuario.")
+        if method == "DELETE":
+            if not self.same_origin():
+                raise Rechazo(HTTPStatus.FORBIDDEN, "origen no permitido")
+            if row["nombre"] == actor["nombre"]:
+                raise Rechazo(HTTPStatus.BAD_REQUEST, "No podés quitar tu propio usuario.")
+            store.remove_user(row["nombre"])
+            log.info("usuarios: %s quitó a %s", actor["nombre"], row["nombre"])
+            self.send_json(HTTPStatus.OK, {"ok": True})
+            return
+        data = self.cuerpo()  # PUT
+        if "clave" not in data and "redes" not in data:
+            raise Rechazo(HTTPStatus.BAD_REQUEST, "Indicá la contraseña nueva o las redes.")
+        if "redes" in data:
+            redes = self.validar_redes(data.get("redes"))
+            if row["nombre"] == actor["nombre"] and redes is not None:
+                raise Rechazo(HTTPStatus.BAD_REQUEST, "No podés quitarte a vos mismo la administración.")
+            store.set_redes(row["nombre"], redes)
+            log.info("usuarios: %s cambió las redes de %s (%s)", actor["nombre"], row["nombre"],
+                     "administra" if redes is None else redes_cabecera(redes))
+        if "clave" in data:
+            clave = self.validar_clave(data.get("clave"))
+            store.set_password(row["nombre"], clave)
+            log.info("usuarios: %s cambió la contraseña de %s", actor["nombre"], row["nombre"])
+            if row["nombre"] == actor["nombre"]:
+                # Cambiarse la propia cierra todas las sesiones: se abre una nueva para seguir.
+                token = store.create_session(row["id"], self.client_ip(), self.headers.get("User-Agent", ""))
+                self.send_json(HTTPStatus.OK, {"usuario": self.usuario_json(store.get_user(row["nombre"]))},
+                               [("Set-Cookie", self.cookie_header(token, SESSION_DAYS * 86400))])
+                return
+        self.send_json(HTTPStatus.OK, {"usuario": self.usuario_json(store.get_user(row["nombre"]))})
+
+    def cambiar_clave_propia(self):
+        user = self.sesion_actual()
+        data = self.cuerpo()
+        actual = str(data.get("actual") or "")
+        nueva = self.validar_clave(data.get("nueva"))
+        if self.store.check_login(user["nombre"], actual) is None:
+            time.sleep(FAILURE_DELAY_S)
+            raise Rechazo(HTTPStatus.BAD_REQUEST, "La contraseña actual no es esa.")
+        self.store.set_password(user["nombre"], nueva)
+        token = self.store.create_session(user["id"], self.client_ip(), self.headers.get("User-Agent", ""))
+        log.info("clave: %s cambió su contraseña", user["nombre"])
+        self.send_json(HTTPStatus.OK, {"ok": True}, [("Set-Cookie", self.cookie_header(token, SESSION_DAYS * 86400))])
 
     def login(self):
         if not self.same_origin():
