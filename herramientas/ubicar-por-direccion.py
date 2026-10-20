@@ -45,7 +45,11 @@ def numero(v):
         return None
 
 
+ULTIMA = {}  # cabeceras de la última respuesta, para explicar un error
+
+
 def pedir(url, cabeceras=None, datos=None, espera=120):
+    """(estado, dato). Si la respuesta no es JSON, dato es el texto (recortado) para poder mostrarlo."""
     cab = {"Accept": "application/json", **(cabeceras or {})}
     cuerpo = None
     if datos is not None:
@@ -54,42 +58,105 @@ def pedir(url, cabeceras=None, datos=None, espera=120):
     req = urllib.request.Request(url, data=cuerpo, headers=cab, method="POST" if cuerpo else "GET")
     try:
         with urllib.request.urlopen(req, timeout=espera) as r:
-            return r.status, json.loads(r.read() or b"null")
+            crudo, estado, cab_resp = r.read(), r.status, dict(r.headers)
     except urllib.error.HTTPError as e:
-        try:
-            return e.code, json.loads(e.read() or b"null")
-        except ValueError:
-            return e.code, None
+        crudo, estado, cab_resp = e.read(), e.code, dict(e.headers)
     except Exception as e:  # sin conexión, tiempo
         return None, f"{type(e).__name__}: {e}"
+    ULTIMA.clear()
+    ULTIMA.update({k: v for k, v in cab_resp.items()
+                   if k.lower() in ("server", "content-type", "retry-after", "date") or k.lower().startswith("x-ratelimit")})
+    try:
+        return estado, json.loads(crudo or b"null")
+    except ValueError:
+        texto = re.sub(r"<[^>]+>", " ", crudo[:2000].decode("utf-8", "replace"))
+        return estado, re.sub(r"\s+", " ", texto).strip()[:300] or "(respuesta vacía)"
+
+
+def explicar(estado, dato) -> str:
+    """Texto para entender una respuesta fallida de SmartOLT."""
+    if isinstance(dato, dict):
+        detalle = dato.get("error") or dato.get("response") or dato.get("message") or json.dumps(dato, ensure_ascii=False)
+    else:
+        detalle = str(dato)
+    cab = ", ".join(f"{k}: {v}" for k, v in ULTIMA.items())
+    return f"estado {estado}: {str(detalle)[:300]}" + (f"\n  cabeceras: {cab}" if cab else "")
+
+
+def pedir_smartolt(base, token, ruta, intentos=3):
+    """Pide con reintentos: espera lo que diga Retry-After ante 429 y unos segundos ante 5xx o corte."""
+    cab = {"X-Token": token}
+    estado, dato = None, None
+    for i in range(intentos):
+        estado, dato = pedir(f"{base}{ruta}", cab)
+        if estado == 200 and isinstance(dato, dict):
+            return estado, dato
+        if estado in (401, 403) or (estado is not None and 400 <= estado < 500 and estado != 429):
+            break  # no va a cambiar reintentando
+        if i + 1 < intentos:
+            try:
+                pausa = min(120, int(ULTIMA.get("Retry-After") or 0)) if estado == 429 else 3 * (i + 1)
+            except ValueError:
+                pausa = 30
+            print(f"  SmartOLT: {estado if estado else 'sin respuesta'} en {ruta.split('?')[0]}; reintento en {pausa} s.")
+            time.sleep(pausa)
+    return estado, dato
 
 
 def onus_de_smartolt(base, token):
-    cab = {"X-Token": token}
-    onus, pagina, total = [], 1, 1
-    while pagina <= total and pagina <= 50:
-        estado, dato = pedir(f"{base}/api/onu/get_all_onus_details?page={pagina}&page_size=100", cab)
-        if estado != 200 or not isinstance(dato, dict):
-            raise SystemExit(f"SmartOLT respondió {estado} en la página {pagina}: {str(dato)[:200]}")
-        if pagina == 1:
-            try:
-                total = int(dato.get("total_pages") or 1)
-            except (TypeError, ValueError):
-                total = 1
-        parte = dato.get("onus") or []
-        if not parte:
+    # Primero algo barato, para distinguir un token rechazado de un SmartOLT con problemas.
+    estado, dato = pedir_smartolt(base, token, "/api/system/get_olts", intentos=2)
+    if estado in (401, 403):
+        raise SystemExit("SmartOLT rechazó el token (" + explicar(estado, dato) + ").\n"
+                         "Generá o copiá el token en SmartOLT: Settings → API (es distinto de la clave de la web).")
+    if estado == 200 and isinstance(dato, dict):
+        print(f"SmartOLT: token aceptado; {len(dato.get('response') or [])} OLT.")
+    else:
+        print("SmartOLT: get_olts falló (" + explicar(estado, dato) + "); sigo igual con las ONU.")
+
+    # Las páginas de 100 ONU con todos los campos son pesadas; si el servidor falla (5xx), se prueba
+    # con páginas más chicas y, al final, pidiendo solo los campos que hacen falta.
+    campos = "sn,name,address,zone_name,odb_name,odb_port,latitude,longitude,status"
+    variantes = ((100, ""), (25, ""), (25, f"&fields={campos}"))
+    onus, ultimo, leido = [], (None, None), False
+    for tam, extra in variantes:
+        onus, pagina, total, falla = [], 1, 1, False
+        while pagina <= total and pagina <= 200:
+            estado, dato = pedir_smartolt(base, token, f"/api/onu/get_all_onus_details?page={pagina}&page_size={tam}{extra}")
+            if estado != 200 or not isinstance(dato, dict):
+                ultimo, falla = (estado, dato), True
+                break
+            if pagina == 1:
+                try:
+                    total = int(dato.get("total_pages") or 1)
+                except (TypeError, ValueError):
+                    total = 1
+            parte = dato.get("onus") or []
+            if not parte:
+                break
+            onus += [o for o in parte if isinstance(o, dict)]
+            pagina += 1
+        if not falla:
+            leido = True
             break
-        onus += [o for o in parte if isinstance(o, dict)]
-        pagina += 1
-    estado, dato = pedir(f"{base}/api/system/get_odbs", cab)
+        print(f"  No pude leer las ONU de a {tam}{' (campos justos)' if extra else ''}: " + explicar(*ultimo))
+        if ultimo[0] in (401, 403):
+            break
+    if not leido:
+        raise SystemExit("SmartOLT no entregó la lista de ONU (" + explicar(*ultimo) + ").\n"
+                         "Si el estado es 5xx, el error es del lado de SmartOLT: probá de nuevo en unos minutos; "
+                         "si persiste, pasame el texto de arriba.")
+    estado, dato = pedir_smartolt(base, token, "/api/system/get_odbs")
     odbs = [o for o in (dato.get("response") or []) if isinstance(o, dict)] if estado == 200 and isinstance(dato, dict) else []
+    if estado != 200:
+        print("  No pude leer las cajas (ODB): " + explicar(estado, dato))
     return onus, odbs
 
 
 def limpiar_direccion(texto: str) -> str:
     """'Av. San Martín 1234 dpto 2 (frente a la plaza)' -> 'Av. San Martín 1234'."""
     s = re.sub(r"\(.*?\)", " ", str(texto or ""))
-    s = re.split(r"\b(dpto|depto|departamento|piso|local|casa|lote|mz|manzana|entre|esq|esquina|barrio|b°|bº)\b", s, 1, flags=re.I)[0]
+    s = re.split(r"\b(dpto|depto|departamento|piso|local|casa|lote|mz|manzana|entre|esq|esquina|barrio|b°|bº)\b", s, maxsplit=1, flags=re.I)[0]
     s = re.sub(r"\s+", " ", s).strip(" ,.-")
     return s[:120]
 
