@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.9.0 · 20/10/2026
+## 0.9.0 · 20/10/2026 · commit edb9098
 
 Usuarios desde el visor y todas las redes en un solo mapa.
 
