@@ -31,6 +31,16 @@ const state = {
 };
 const fus = (id, elemento, a, b, tipo = 'fusion') => state.fusiones.set(id, { id, elemento, a, b, tipo, version: 1 });
 
+// Puertos de la OLT: por dentro de 1 a N; se muestran desde 1 o, en Huawei, desde 0.
+const olt0 = { id: 22, elemento: 1, tipo: 'olt', nombre: 'HUAWEI', entradas: 0, salidas: 16, datos: { desde: 0 }, version: 1 };
+assert.equal(F.etiquetaPuerto(state.equipos.get(20), 's', 1), 'OLT-1 PON 1');
+assert.equal(F.etiquetaPuerto(olt0, 's', 1), 'HUAWEI PON 0');
+assert.equal(F.etiquetaPuerto(olt0, 's', 16), 'HUAWEI PON 15');
+assert.equal(F.numeroPuerto(olt0, 3), 2);
+assert.equal(F.numeroPuerto(state.equipos.get(20), 3), 3);
+assert.equal(F.describirEquipo(olt0), '16 PON (0 a 15)');
+assert.equal(F.describirEquipo(state.equipos.get(20)), '16 PON (1 a 16)');
+
 // Estructura y colores
 assert.deepEqual(F.estructura({ fibras: 48, por_tubo: 0 }).tubos, 4);
 assert.equal(F.estructura({ fibras: 6, por_tubo: 0 }).porTubo, 6);

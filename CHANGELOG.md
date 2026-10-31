@@ -1,5 +1,14 @@
 # Cambios
 
+## 0.9.1 · 31/10/2026
+
+- La OLT puede numerar sus puertos PON desde 0 (Huawei: placas de 0 a 15) o
+  desde 1 (ZTE, V-SOL, Fiberhome…): se elige al cargarla o editarla, y para
+  una OLT nueva se propone 0 si el equipo anotado en el nodo o el nombre dicen
+  Huawei. Solo cambia cómo se muestran los números en la carta, las fichas y
+  los recorridos; por dentro siguen de 1 a N, así que las uniones hechas no
+  se tocan. API: `datos.desde` (0 o 1) en los equipos tipo OLT.
+
 ## 0.9.0 · 20/10/2026 · commit edb9098
 
 Usuarios desde el visor y todas las redes en un solo mapa.

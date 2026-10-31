@@ -415,7 +415,13 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(fbt["equipos"][0]["datos"]["relacion"], "10/90")
         olt = equipo(nodo, tipo="olt", nombre="OLT-1", salidas=16, datos={"potencia": 4.5})["equipos"][0]
         self.assertEqual((olt["entradas"], olt["salidas"]), (0, 16))
+        # Puertos numerados desde 0 (Huawei): solo cambia cómo se muestran; por dentro siguen de 1 a N.
+        huawei = equipo(nodo, tipo="olt", nombre="HUAWEI", salidas=16, datos={"desde": 0})["equipos"][0]
+        self.assertEqual(huawei["datos"], {"desde": 0})
         malos = [
+            (nodo, {"tipo": "olt", "salidas": 16, "datos": {"desde": 2}}),
+            (nodo, {"tipo": "olt", "salidas": 16, "datos": {"desde": "0"}}),
+            (nodo, {"tipo": "olt", "salidas": 16, "datos": {"desde": False}}),
             (nap, {"tipo": "splitter", "entradas": 1, "salidas": 3}),
             (nap, {"tipo": "splitter", "entradas": 3, "salidas": 8}),
             (nap, {"tipo": "splitter", "entradas": 1, "salidas": 2, "datos": {"modo": "fbt", "relacion": "10/80"}}),
@@ -451,7 +457,7 @@ class ApiTest(unittest.TestCase):
         res = self.ok("DELETE", f"/api/equipos/{spl['id']}?version={grande['version']}")
         self.assertEqual(sorted(f["id"] for f in res["fusiones"]), sorted(u["id"] for u in uniones))
         red = self.ok("GET", f"/api/red?red={x['red']}")
-        self.assertEqual(sorted(e["id"] for e in red["equipos"]), sorted([fbt["equipos"][0]["id"], olt["id"]]))
+        self.assertEqual(sorted(e["id"] for e in red["equipos"]), sorted([fbt["equipos"][0]["id"], olt["id"], huawei["id"]]))
         self.assertEqual(red["fusiones"], [])
 
     def test_fusiones_y_cambios_en_los_cables(self):

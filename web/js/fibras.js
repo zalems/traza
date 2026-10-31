@@ -336,8 +336,16 @@ export function ladosDeCarta(state, elemento, lista) {
 
 // --------------------------------------------------------------- equipos
 
+// Los puertos PON se numeran desde 1 o, en las OLT Huawei, desde 0 (placas de 0 a 15).
+// Por dentro siempre van de 1 a N (`qID:s:N`): esto es solo cómo se muestran.
+export const primerPuerto = (eq) => (eq?.tipo === 'olt' && eq.datos?.desde === 0 ? 0 : 1);
+export const numeroPuerto = (eq, n) => n - 1 + primerPuerto(eq);
+
 export function describirEquipo(eq) {
-  if (eq.tipo === 'olt') return `${eq.salidas} PON`;
+  if (eq.tipo === 'olt') {
+    const desde = primerPuerto(eq);
+    return `${eq.salidas} PON (${desde} a ${desde + eq.salidas - 1})`;
+  }
   const datos = eq.datos ?? {};
   if (datos.modo === 'fbt') return `Desbalanceado ${datos.relacion ?? ''}`.trim();
   return `PLC ${eq.entradas}x${eq.salidas}`;
@@ -345,7 +353,7 @@ export function describirEquipo(eq) {
 
 export function etiquetaPuerto(eq, lado, n) {
   const nombre = eq.nombre || (eq.tipo === 'olt' ? 'OLT' : 'Splitter');
-  if (eq.tipo === 'olt') return `${nombre} PON ${n}`;
+  if (eq.tipo === 'olt') return `${nombre} PON ${numeroPuerto(eq, n)}`;
   if (lado === 'e') return eq.entradas > 1 ? `${nombre} entrada ${n}` : `${nombre} entrada`;
   if (eq.datos?.modo === 'fbt') {
     const [x, y] = String(eq.datos.relacion ?? '').split('/');

@@ -343,7 +343,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (!p) return ext;
     if (p.tipo === 'c') return `F${p.n}`;
     const eq = state().equipos.get(p.id);
-    if (eq?.tipo === 'olt') return `PON ${p.n}`;
+    if (eq?.tipo === 'olt') return `PON ${F.numeroPuerto(eq, p.n)}`;
     return p.lado === 'e' ? `E${p.n}` : `S${p.n}`;
   }
 
@@ -701,7 +701,7 @@ export function setupCarta({ root, red, acciones, toast }) {
         const fin = F.destino(state(), elementoId, ext);
         if (fin?.motivo === 'cliente') detalle = state().elementos.get(fin.elemento)?.properties.nombre ?? '';
       }
-      const texto = eq.tipo === 'olt' ? `PON ${n}` : lado === 'e' ? (eq.entradas > 1 ? `E${n}` : 'E') : String(n);
+      const texto = eq.tipo === 'olt' ? `PON ${F.numeroPuerto(eq, n)}` : lado === 'e' ? (eq.entradas > 1 ? `E${n}` : 'E') : String(n);
       return h(`button.puerto.${estado}${marcada ? '.elegida' : ''}`, {
         type: 'button',
         'data-ext': ext,
@@ -2050,11 +2050,22 @@ export function setupCarta({ root, red, acciones, toast }) {
         value: String(equipo?.salidas ?? (Number(d.elemento.properties.datos?.puertos_pon) || 16)) });
       const potencia = h('input', { type: 'text', name: 'potencia', autocomplete: 'off', placeholder: '4,5',
         value: datosEq.potencia !== undefined ? String(datosEq.potencia).replace('.', ',') : '' });
-      campos = [campo('Nombre', nombre), campo('Puertos PON', puertos), campo('Potencia de salida (dBm)', potencia), campo('Notas', notas)];
+      // Huawei numera los puertos de cada placa desde 0; las demás marcas, desde 1.
+      // Para una OLT nueva se adivina por el equipo anotado en el nodo o por el nombre.
+      const huawei = /huawei|ma58|ea58/i;
+      const desdeActual = equipo
+        ? (datosEq.desde === 0 ? '0' : '1')
+        : (huawei.test(String(d.elemento.properties.datos?.equipo ?? '')) || huawei.test(nombre.value) ? '0' : '1');
+      const desde = h('select', { name: 'desde' },
+        h('option', { value: '1', text: 'Del 1 en adelante (ZTE, V-SOL, Fiberhome…)', selected: desdeActual === '1' }),
+        h('option', { value: '0', text: 'Del 0 en adelante (Huawei: 0 a 15)', selected: desdeActual === '0' }));
+      campos = [campo('Nombre', nombre), campo('Puertos PON', puertos), campo('Numeración de los puertos', desde),
+        campo('Potencia de salida (dBm)', potencia), campo('Notas', notas)];
       leer = () => {
         const salidas = Number(puertos.value.trim());
         if (!Number.isInteger(salidas) || salidas < 1 || salidas > 256) throw new Error('Puertos PON: de 1 a 256.');
         const datosNuevos = {};
+        if (desde.value === '0') datosNuevos.desde = 0;
         const pot = potencia.value.trim().replace(',', '.');
         if (pot) {
           const v = Number(pot);

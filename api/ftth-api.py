@@ -28,6 +28,7 @@ usuario no puede ver responde 403.
   PUT    /api/cables/ID
   DELETE /api/cables/ID?version=V      también quita las uniones de sus fibras
   POST   /api/equipos                  {elemento, tipo, nombre, entradas, salidas, datos, notas}: splitter u OLT
+                                       (OLT: datos.desde 0 o 1, cómo se numeran los puertos al mostrarlos)
   PUT    /api/equipos/ID
   DELETE /api/equipos/ID?version=V     también quita las uniones de sus puertos
   POST   /api/fusiones                 {elemento, pares: [{a, b}], tipo}: une fibras y puertos en un elemento
@@ -1269,6 +1270,9 @@ class Store:
             potencia = datos.get("potencia")
             if potencia is not None and (isinstance(potencia, (bool, str)) or not -10 <= potencia <= 15):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "La potencia de la OLT va de -10 a 15 dBm.")
+            # desde: cómo se numeran los puertos al mostrarlos (0 en Huawei, 1 en las demás); por dentro van de 1 a N.
+            if "desde" in datos and (isinstance(datos["desde"], bool) or datos["desde"] not in (0, 1)):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Los puertos de la OLT se numeran desde 0 o desde 1.")
             return
         modo = datos.get("modo", "plc")
         if modo not in MODOS_SPLITTER:

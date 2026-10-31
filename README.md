@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.9.0
+# Plataforma FTTH · kit 0.9.1
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -57,8 +57,9 @@ se consultan recién cuando alguien las elige.
   que pasa por el elemento (sangría), las fibras que no se tocan siguen de
   largo; al unir una, queda cortada ahí. Splitters PLC (1x2 a 1x128, también
   2xN) o desbalanceados (1/99 a 50/50), con salidas fusionadas o con
-  conector; en el nodo, la OLT con sus puertos PON. "Ver lista" la muestra
-  como tabla y "Copiar" la deja como texto para mandar por mensaje. Si un
+  conector; en el nodo, la OLT con sus puertos PON, numerados desde 1 o,
+  como en Huawei, desde 0 (se elige al cargarla; se propone 0 si el nodo o la
+  OLT dicen Huawei). "Ver lista" la muestra como tabla y "Copiar" la deja como texto para mandar por mensaje. Si un
   cable termina cerca sin quedar pegado, la carta ofrece pegarlo.
 - **Acomodar la carta.** En "Columnas", cada cable y equipo se sube, se baja
   o se pasa de lado arrastrándolo desde su asa (los seis puntos), con los
@@ -353,7 +354,8 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.9.0 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.9.1 a
+0.9.0 alcanza con `git checkout 0903002` e instalar (mismas bases). De 0.9.0 a
 0.8.0 alcanza con `git checkout db29936` e instalar (mismas bases; solo cambian
 el visor, la API y el servicio de sesión). De 0.8.0 a
 0.7.1 alcanza con `git checkout c3ffdc3` e instalar: la base de la red es la
