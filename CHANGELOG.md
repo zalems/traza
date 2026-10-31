@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.10.0 · 31/10/2026
+## 0.10.0 · 31/10/2026 · commit 4236289
 
 Señal: qué fibras tienen luz, hacia dónde va y si hay tráfico.
 
