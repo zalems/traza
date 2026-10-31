@@ -343,6 +343,46 @@ class IntegracionesTest(unittest.TestCase):
         dl = self.ok("GET", f"/api/integracion/cliente?elemento={lejos['id']}")
         self.assertIsNone(dl["contrato"])
 
+    def test_estados_de_los_clientes(self):
+        """Vista de señal: el estado de la ONT de cada cliente del mapa, de una red o de todas."""
+        red, _ = self.red_con_caja("Estados A")
+        self.configurar(red)
+        a = self.cliente(red, "Ana", -58.17, -26.17, ont="HG8145V5 · 48575443-90BCF28A")  # por la ONT anotada
+        c = self.cliente(red, "Carmen", -58.18, -26.18, contrato="#405")  # por el contrato: su ONT está caída
+        nadie = self.cliente(red, "Nadie", -58.30, -26.30)
+        data = self.ok("GET", f"/api/integracion/estados?red={red}")
+        self.assertEqual(data["errores"], [])
+        self.assertEqual(data["conectadas"], 1)
+        self.assertEqual(data["leido"], "2026-10-14T13:00:00Z")
+        self.assertEqual(data["clientes"][str(a["id"])], {"estado": "online", "rx": -21.3, "cuando": "2026-10-14T13:00:00Z",
+                                                          "causa": None})
+        self.assertEqual((data["clientes"][str(c["id"])]["estado"], data["clientes"][str(c["id"])]["causa"]), ("offline", "LOS"))
+        self.assertNotIn(str(nadie["id"]), data["clientes"])
+        # Solo con el panel: sin Wispro, por la ONT anotada.
+        otra, _ = self.red_con_caja("Estados B")
+        self.configurar(otra, wispro=False)
+        b = self.cliente(otra, "Ana otra vez", -58.17, -26.17, ont="48575443D87F4EB6")
+        sin_panel, _ = self.red_con_caja("Estados C")
+        self.configurar(sin_panel, panel=False)
+        self.assertEqual(self.ok("GET", f"/api/integracion/estados?red={sin_panel}"),
+                         {"clientes": {}, "errores": [], "leido": None, "conectadas": 0})
+        # Todas juntas: las conectadas al panel.
+        todas = self.ok("GET", "/api/integracion/estados?red=todas")
+        self.assertGreaterEqual(todas["conectadas"], 2)
+        self.assertEqual(todas["clientes"][str(b["id"])]["estado"], "online")
+        self.assertEqual(todas["clientes"][str(a["id"])]["estado"], "online")
+        # Un usuario que no administra no pide todas, ni una red ajena.
+        h = {"Host": "traza.ejemplo", "X-Usuario": "ana", "X-Redes": str(otra)}
+        for ruta, esperado in (("/api/integracion/estados?red=todas", 403), (f"/api/integracion/estados?red={red}", 403),
+                               (f"/api/integracion/estados?red={otra}", 200)):
+            req = urllib.request.Request(f"http://127.0.0.1:{self.port}{ruta}", headers=h)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as res:
+                    codigo = res.status
+            except urllib.error.HTTPError as err:
+                codigo = err.code
+            self.assertEqual(codigo, esperado, ruta)
+
     def test_cache_y_refresco(self):
         red, nap = self.red_con_caja("Caché")
         self.configurar(red)

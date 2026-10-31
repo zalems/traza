@@ -1,5 +1,37 @@
 # Cambios
 
+## 0.10.0 · 31/10/2026
+
+Señal: qué fibras tienen luz, hacia dónde va y si hay tráfico.
+
+- Botón de la señal en el mapa. Lo que tiene luz según las cartas de empalme
+  (desde cada puerto PON unido de cada OLT, por las uniones, de largo por
+  donde las fibras pasan sin cortar y abriéndose en los splitters) se pinta
+  con flechas en el sentido de la señal: verde con rayas que avanzan si hay
+  clientes abajo con la ONT en línea, naranja si tiene luz sin más datos,
+  rojo si tiene luz y sus clientes están sin señal. Los cables sin luz
+  muestran el sentido de la red, del nodo hacia afuera. Los cables de siempre
+  quedan atenuados mientras la señal está prendida; la elección se recuerda.
+- Leyenda con las cuentas (cables con luz, clientes a los que llega, en línea
+  y sin señal, clientes en línea sin luz en el mapa, cuándo se leyó la OLT) y
+  los errores de las cartas (splitter al revés, luz por dos caminos, de una
+  OLT a otra) con un toque para ir al lugar; en el teléfono arranca plegada.
+- Carta de empalme: fibras, puertos PON y salidas de splitter con luz, con un
+  anillo del color de su estado, la potencia estimada y, en la OLT, cuántos
+  clientes en línea tiene cada PON; las uniones y lo que pasa de largo con luz
+  brillan. "Ver lista" y "Copiar" dicen lo que tiene luz.
+- Ficha del cable: cuántas fibras llevan luz, en qué sentido y con cuántos
+  clientes abajo; cada fibra con luz marcada y, al tocarla, de qué OLT y PON
+  viene y con cuánto llega. Ficha de cajas, NAP, botellas y nodos: de dónde
+  les llega la luz.
+- API: `GET /api/integracion/estados?red=N|todas`, el estado de la ONT de
+  cada cliente del mapa según el panel de la OLT (con el mismo cruce que la
+  ficha de la NAP). Visor: `fibras.iluminacion`, `segmentosConLuz` y
+  `sentidoDeRed` (en una red de 1000 clientes se calcula en unos 30 ms).
+- Pruebas: la luz, los sentidos, las potencias (iguales a las del recorrido),
+  los clientes abajo y un splitter al revés (`fibras.test.mjs`); el estado de
+  las ONT por red y de todas (`test_integraciones.py`).
+
 ## 0.9.1 · 31/10/2026 · commit 77c9c12
 
 - La OLT puede numerar sus puertos PON desde 0 (Huawei: placas de 0 a 15) o

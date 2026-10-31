@@ -417,16 +417,27 @@ function porCable(state, idx, cable, elementoId, lado, n) {
   const coords = cable.geometry.coordinates;
   const posiciones = idx.posiciones.get(cable.id) ?? new Map();
   const pos = posiciones.get(elementoId) ?? [];
-  const tramo = { tipo: 'tramo', cable: cable.id, fibra: n, desde: elementoId, hasta: null, metros: 0, coords: [], pasaPor: [] };
+  // ini y fin: los índices de los puntos del cable donde empieza y termina el tramo
+  // (de ini a fin es el sentido en que se recorrió). pasaPorM: a cuántos metros de
+  // su comienzo pasa por cada elemento de pasaPor.
+  const tramo = {
+    tipo: 'tramo', cable: cable.id, fibra: n, desde: elementoId, hasta: null, metros: 0, coords: [], pasaPor: [], pasaPorM: [],
+    ini: null, fin: null,
+  };
   // El cable ya no pasa por acá (una unión vieja que quedó colgada): no hay por dónde seguir.
   if (!pos.length) return { tramo, fin: { motivo: 'sin-union', elemento: elementoId } };
   const paso = lado === 'b' ? 1 : -1;
   let j = lado === 'b' ? pos[pos.length - 1] : pos[0];
+  tramo.ini = j;
   tramo.coords.push(coords[j]);
   const llegada = otroLado(lado);
+  const listo = (r) => {
+    tramo.fin = j;
+    return { tramo, ...r };
+  };
   for (;;) {
     const k = j + paso;
-    if (k < 0 || k >= nodos.length) return { tramo, fin: { motivo: 'suelto' } };
+    if (k < 0 || k >= nodos.length) return listo({ fin: { motivo: 'suelto' } });
     tramo.metros += distancia(coords[j], coords[k]);
     tramo.coords.push(coords[k]);
     j = k;
@@ -438,7 +449,7 @@ function porCable(state, idx, cable, elementoId, lado, n) {
     const f = idx.usado.get(`${id}|${ext}`);
     if (f) {
       tramo.hasta = id;
-      return { tramo, siguiente: { elemento: id, ext, fusion: f } };
+      return listo({ siguiente: { elemento: id, ext, fusion: f } });
     }
     const lados = new Set();
     if (apariciones[0] > 0) lados.add('a');
@@ -446,14 +457,17 @@ function porCable(state, idx, cable, elementoId, lado, n) {
     if (!lados.has(lado)) {
       tramo.hasta = id;
       const tipo = state.elementos.get(id).properties.tipo;
-      return { tramo, fin: { motivo: tipo === 'cliente' ? 'cliente' : 'sin-union', elemento: id } };
+      return listo({ fin: { motivo: tipo === 'cliente' ? 'cliente' : 'sin-union', elemento: id } });
     }
     if (idx.usado.get(`${id}|${extremoCable(cable.id, lado, n)}`)) {
       tramo.hasta = id;
-      return { tramo, fin: { motivo: 'cortada', elemento: id } };
+      return listo({ fin: { motivo: 'cortada', elemento: id } });
     }
     // En paso: la fibra sigue de largo por este elemento (los postes no se nombran).
-    if (CON_CARTA.has(state.elementos.get(id).properties.tipo)) tramo.pasaPor.push(id);
+    if (CON_CARTA.has(state.elementos.get(id).properties.tipo)) {
+      tramo.pasaPor.push(id);
+      tramo.pasaPorM.push(tramo.metros);
+    }
     const salida = lado === 'b' ? apariciones[apariciones.length - 1] : apariciones[0];
     for (let s = j + paso; lado === 'b' ? s <= salida : s >= salida; s += paso) tramo.coords.push(coords[s]);
     j = salida;
@@ -529,7 +543,16 @@ function seguir(state, idx, elementoId, ext, direccion, vistos) {
 
 function invertir(paso) {
   if (paso.tipo === 'tramo') {
-    return { ...paso, desde: paso.hasta, hasta: paso.desde, coords: paso.coords.slice().reverse(), pasaPor: paso.pasaPor.slice().reverse() };
+    return {
+      ...paso,
+      desde: paso.hasta,
+      hasta: paso.desde,
+      coords: paso.coords.slice().reverse(),
+      pasaPor: paso.pasaPor.slice().reverse(),
+      pasaPorM: (paso.pasaPorM ?? []).slice().reverse().map((m) => paso.metros - m),
+      ini: paso.fin,
+      fin: paso.ini,
+    };
   }
   if (paso.tipo === 'union' || paso.tipo === 'equipo') return { ...paso, de: paso.a, a: paso.de };
   return paso;
@@ -669,3 +692,290 @@ export const nombreElemento = (state, id) => {
   if (!e) return 'un elemento borrado';
   return e.properties.nombre || ELEMENTOS[e.properties.tipo]?.nombre || e.properties.tipo;
 };
+
+// ---------------------------------------------------------------- señal
+
+// Qué tiene luz según las cartas de empalme. Desde cada puerto PON unido de cada
+// OLT, la luz cruza las uniones, sigue por las fibras (de largo por donde pasan sin
+// cortar) y se abre en las salidas de los splitters. De cada tramo de fibra con luz
+// se sabe hacia dónde va (de `ini` a `fin`, los puntos del cable), la pérdida y la
+// potencia estimadas al entrar y al llegar, de qué OLT y puerto viene y qué clientes
+// quedan abajo. Se calcula una vez por estado de la red.
+//
+//   tramos     [{ cable, fibra, desde, hasta, ini, fin, metros, coords, perdida,
+//                 perdidaFin, potencia, potenciaFin, raiz, clientes, termina }]
+//   extremos   `${elemento}|${extremo}` -> { sentido: sale | llega | entra | paso,
+//                 perdida, potencia, raiz, clientes, incompleta }
+//   clientes   cliente -> { perdida, potencia, raiz } (con el conector de la ONT)
+//   puertos    `${equipo}:${n}` -> el puerto PON (raíz): { olt, puerto, potencia0, clientes }
+//   porCable   cable -> [tramos]
+//   porElemento elemento -> [extremos con luz en ese elemento]
+//   conflictos [{ elemento, ext, motivo }]: dos-fuentes | otra-olt | contramano
+export function iluminacion(state) {
+  const idx = indice(state);
+  if (idx.luz) return idx.luz;
+  const km = PERDIDAS.fibraKm / 1000;
+  const tramos = [];
+  const extremos = new Map();
+  const clientes = new Map();
+  const puertos = new Map();
+  const porCableLuz = new Map();
+  const porElemento = new Map();
+  const conflictos = [];
+  const anotar = (reg) => {
+    if (!porElemento.has(reg.elemento)) porElemento.set(reg.elemento, []);
+    porElemento.get(reg.elemento).push(reg);
+  };
+  const cola = [];
+  const conPotencia = (raiz, perdida) => (raiz.potencia0 === null ? null : raiz.potencia0 - perdida);
+
+  // Un extremo con luz; null si ya tenía (de otra fuente o por un lazo): por ahí no se sigue.
+  function marcar(elemento, ext, sentido, perdida, padre, raiz, incompleta = false) {
+    const clave = `${elemento}|${ext}`;
+    const previo = extremos.get(clave);
+    if (previo) {
+      if (previo.raiz !== raiz) conflictos.push({ elemento, ext, motivo: 'dos-fuentes' });
+      return null;
+    }
+    const reg = {
+      tipo: 'extremo', elemento, ext, sentido, perdida, potencia: conPotencia(raiz, perdida), padre, raiz,
+      // Lo que pasa de largo tiene abajo lo mismo que su tramo.
+      clientes: sentido === 'paso' ? padre.clientes : new Set(),
+      incompleta: incompleta || Boolean(padre?.incompleta),
+    };
+    extremos.set(clave, reg);
+    anotar(reg);
+    return reg;
+  }
+
+  for (const eq of [...state.equipos.values()].sort((a, b) => a.id - b.id)) {
+    if (eq.tipo !== 'olt' || !state.elementos.has(eq.elemento)) continue;
+    const potencia0 = Number.isFinite(eq.datos?.potencia) ? eq.datos.potencia : null;
+    for (let n = 1; n <= eq.salidas; n += 1) {
+      const ext = extremoEquipo(eq.id, 's', n);
+      if (!idx.usado.has(`${eq.elemento}|${ext}`)) continue;
+      const raiz = {
+        tipo: 'extremo', elemento: eq.elemento, ext, sentido: 'sale', perdida: 0, potencia: potencia0, padre: null,
+        olt: eq.id, puerto: n, potencia0, clientes: new Set(), incompleta: false,
+      };
+      raiz.raiz = raiz;
+      extremos.set(`${eq.elemento}|${ext}`, raiz);
+      anotar(raiz);
+      puertos.set(`${eq.id}:${n}`, raiz);
+      cola.push({ elemento: eq.elemento, ext, direccion: 'union', reg: raiz });
+    }
+  }
+
+  for (let i = 0; i < cola.length; i += 1) {
+    const { elemento, ext, direccion, reg } = cola[i];
+    const { raiz } = reg;
+    if (direccion === 'union') {
+      const f = idx.usado.get(`${elemento}|${ext}`);
+      if (!f) continue;
+      const otro = f.a === ext ? f.b : f.a;
+      const p = parseExtremo(otro);
+      const perdida = reg.perdida + (f.tipo === 'conector' ? PERDIDAS.conector : PERDIDAS.fusion);
+      const sentido = p?.tipo === 'c' ? 'sale' : 'entra';
+      const siguiente = marcar(elemento, otro, sentido, perdida, reg, raiz);
+      if (siguiente) cola.push({ elemento, ext: otro, direccion: 'adentro', reg: siguiente });
+      continue;
+    }
+    const p = parseExtremo(ext);
+    if (p?.tipo === 'c') {
+      const cable = state.cables.get(p.id);
+      if (!cable) continue;
+      const r = porCable(state, idx, cable, elemento, p.lado, p.n);
+      const t = r.tramo;
+      const perdidaFin = reg.perdida + t.metros * km;
+      const tramo = {
+        tipo: 'tramo', cable: p.id, fibra: p.n, desde: elemento, hasta: t.hasta, ini: t.ini, fin: t.fin, metros: t.metros,
+        coords: t.coords, pasaPor: t.pasaPor, perdida: reg.perdida, perdidaFin, potencia: reg.potencia,
+        potenciaFin: conPotencia(raiz, perdidaFin), padre: reg, raiz, clientes: new Set(), incompleta: reg.incompleta,
+        termina: r.siguiente ? 'union' : r.fin?.motivo ?? null,
+      };
+      tramos.push(tramo);
+      if (!porCableLuz.has(p.id)) porCableLuz.set(p.id, []);
+      porCableLuz.get(p.id).push(tramo);
+      const llegada = otroLado(p.lado);
+      t.pasaPor.forEach((x, k) => {
+        const perdida = reg.perdida + t.pasaPorM[k] * km;
+        marcar(x, extremoCable(p.id, llegada, p.n), 'paso', perdida, tramo, raiz);
+        marcar(x, extremoCable(p.id, p.lado, p.n), 'paso', perdida, tramo, raiz);
+      });
+      if (r.siguiente) {
+        const llega = marcar(r.siguiente.elemento, r.siguiente.ext, 'llega', perdidaFin, tramo, raiz);
+        if (llega) cola.push({ elemento: r.siguiente.elemento, ext: r.siguiente.ext, direccion: 'union', reg: llega });
+      } else if (r.fin?.motivo === 'cliente') {
+        const cliente = r.fin.elemento;
+        if (clientes.has(cliente)) {
+          conflictos.push({ elemento: cliente, ext: null, motivo: 'dos-fuentes' });
+        } else {
+          const perdida = perdidaFin + PERDIDAS.conector;
+          clientes.set(cliente, {
+            tipo: 'cliente', elemento: cliente, perdida, potencia: conPotencia(raiz, perdida), padre: tramo, raiz, incompleta: tramo.incompleta,
+          });
+        }
+      } else if (t.hasta !== null) {
+        // La luz llega hasta acá y no sigue: la fibra no está unida (o está cortada de este lado).
+        marcar(t.hasta, extremoCable(p.id, llegada, p.n), 'llega', perdidaFin, tramo, raiz);
+      }
+      continue;
+    }
+    const eq = p ? state.equipos.get(p.id) : null;
+    if (!eq) continue;
+    if (eq.tipo === 'olt') {
+      conflictos.push({ elemento, ext, motivo: 'otra-olt' });
+      continue;
+    }
+    if (p.lado === 's') {
+      // Entra luz por una salida: el splitter está al revés (o la luz llega de dos lados).
+      conflictos.push({ elemento, ext, motivo: 'contramano' });
+      continue;
+    }
+    for (let s = 1; s <= eq.salidas; s += 1) {
+      const l = perdidaSplitter(eq, s);
+      const salida = extremoEquipo(eq.id, 's', s);
+      const r = marcar(elemento, salida, 'sale', reg.perdida + (l ?? 0), reg, raiz, l === null);
+      if (r && idx.usado.has(`${elemento}|${salida}`)) cola.push({ elemento, ext: salida, direccion: 'union', reg: r });
+    }
+  }
+
+  // Cada cliente cuenta para todo lo que tiene arriba, hasta su puerto PON.
+  for (const llegada of clientes.values()) {
+    for (let x = llegada.padre; x; x = x.padre) x.clientes.add(llegada.elemento);
+  }
+
+  const out = { rev: state.rev, tramos, extremos, clientes, puertos, porCable: porCableLuz, porElemento, conflictos, segmentos: null };
+  idx.luz = out;
+  return out;
+}
+
+// Los tramos con luz partidos en segmentos (de un elemento con carta o un cliente al
+// siguiente), para dibujarlos: cada segmento con sus puntos (desde, hasta), su
+// sentido (1: en el orden de los puntos del cable; -1: al revés), las fibras con luz
+// que van en ese sentido y los clientes que quedan abajo.
+export function segmentosConLuz(state) {
+  const luz = iluminacion(state);
+  if (luz.segmentos) return luz.segmentos;
+  const cortesDe = new Map();
+  const cortes = (cable) => {
+    if (!cortesDe.has(cable.id)) {
+      const nodos = cable.properties.nodos ?? [];
+      const out = [0];
+      for (let i = 1; i < nodos.length - 1; i += 1) {
+        const tipo = nodos[i] === null ? null : state.elementos.get(nodos[i])?.properties.tipo;
+        if (CON_CARTA.has(tipo) || tipo === 'cliente') out.push(i);
+      }
+      if (nodos.length > 1) out.push(nodos.length - 1);
+      cortesDe.set(cable.id, out);
+    }
+    return cortesDe.get(cable.id);
+  };
+  const porClave = new Map();
+  for (const t of luz.tramos) {
+    const cable = state.cables.get(t.cable);
+    if (!cable || t.ini === null || t.fin === null || t.ini === t.fin) continue;
+    const c = cortes(cable);
+    const sentido = t.fin > t.ini ? 1 : -1;
+    const lo = Math.min(t.ini, t.fin);
+    const hi = Math.max(t.ini, t.fin);
+    for (let s = 0; s < c.length - 1; s += 1) {
+      if (c[s] < lo || c[s + 1] > hi) continue;
+      const clave = `${t.cable}:${s}:${sentido}`;
+      let seg = porClave.get(clave);
+      if (!seg) {
+        seg = { cable: t.cable, segmento: s, desde: c[s], hasta: c[s + 1], sentido, fibras: new Set(), clientes: new Set(), tramos: [] };
+        porClave.set(clave, seg);
+      }
+      seg.fibras.add(t.fibra);
+      for (const x of t.clientes) seg.clientes.add(x);
+      seg.tramos.push(t);
+    }
+  }
+  luz.segmentos = [...porClave.values()];
+  return luz.segmentos;
+}
+
+// El sentido de la red en los cables sin luz: del nodo hacia afuera, según la
+// distancia por los cables (cada tramo entre dos elementos va del más cercano a un
+// nodo al más lejano). Tramos seguidos en el mismo sentido van juntos. Lo que no
+// llega a ningún nodo, y las puntas sueltas, quedan sin sentido.
+export function sentidoDeRed(state) {
+  const luz = iluminacion(state);
+  const dist = distanciasANodos(state);
+  const out = [];
+  for (const c of state.cables.values()) {
+    if (luz.porCable.has(c.id)) continue;
+    const nodos = c.properties.nodos ?? [];
+    const marcas = [];
+    nodos.forEach((id, i) => {
+      if (id !== null && dist.has(id)) marcas.push(i);
+    });
+    let tramo = null;
+    for (let k = 1; k < marcas.length; k += 1) {
+      const a = marcas[k - 1];
+      const b = marcas[k];
+      const da = dist.get(nodos[a]);
+      const db = dist.get(nodos[b]);
+      const sentido = db > da ? 1 : db < da ? -1 : 0;
+      if (tramo && tramo.sentido === sentido && tramo.hasta === a) {
+        tramo.hasta = b;
+      } else {
+        if (tramo?.sentido) out.push(tramo);
+        tramo = { cable: c.id, desde: a, hasta: b, sentido };
+      }
+    }
+    if (tramo?.sentido) out.push(tramo);
+  }
+  return out;
+}
+
+// Cómo está lo que queda abajo de un punto con luz, según el estado de las ONT de
+// sus clientes (estados: cliente -> { estado }): con tráfico (alguna en línea),
+// caída (ninguna en línea y alguna sin señal) o solo con luz (sin datos).
+export function estadoAbajo(clientes, estados) {
+  let enLinea = 0;
+  let caidos = 0;
+  for (const id of clientes ?? []) {
+    const e = estados?.get(id)?.estado;
+    if (!e) continue;
+    if (e === 'online') enLinea += 1;
+    else caidos += 1;
+  }
+  const total = clientes?.size ?? 0;
+  return {
+    estado: enLinea ? 'trafico' : caidos ? 'caida' : 'luz',
+    clientes: total,
+    enLinea,
+    caidos,
+    sinDato: total - enLinea - caidos,
+  };
+}
+
+const numeroComa = (x) => Math.abs(x).toFixed(1).replace('.', ',');
+
+// "≈ −14,2 dBm" si la OLT tiene cargada su potencia; si no, lo que se perdió desde ella.
+export function textoPotencia(reg) {
+  if (!reg) return '';
+  const aprox = reg.incompleta ? ' (falta la pérdida de un splitter)' : '';
+  if (Number.isFinite(reg.potencia)) return `≈ ${reg.potencia < -0.05 ? '−' : ''}${numeroComa(reg.potencia)} dBm${aprox}`;
+  return `${numeroComa(reg.perdida)} dB perdidos desde la OLT${aprox}`;
+}
+
+// "OLT-1 PON 3": de dónde viene la luz de un punto.
+export function origenLuz(state, reg) {
+  const raiz = reg?.raiz;
+  const eq = raiz ? state.equipos.get(raiz.olt) : null;
+  return eq ? etiquetaPuerto(eq, 's', raiz.puerto) : 'una OLT';
+}
+
+// "8 clientes abajo, 7 en línea"
+export function textoAbajo(abajo) {
+  if (!abajo?.clientes) return 'sin clientes abajo';
+  const partes = [`${abajo.clientes} cliente${abajo.clientes === 1 ? '' : 's'} abajo`];
+  if (abajo.enLinea || abajo.caidos) {
+    partes.push(`${abajo.enLinea} en línea`);
+    if (abajo.caidos) partes.push(`${abajo.caidos} sin señal`);
+  }
+  return partes.join(', ');
+}

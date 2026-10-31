@@ -121,6 +121,14 @@ function partir([p0, p1, p2, p3]) {
 // fibras, y así se dibujan rápido.
 function pintarFondo(specs) {
   const g = svgEl('g', { class: 'lineas-fondo' });
+  // Debajo de todo, el brillo de lo que pasa con luz (del color de su estado).
+  const brillos = new Map();
+  for (const spec of specs) {
+    if (spec.tipo !== 'paso' || !spec.luz) continue;
+    if (!brillos.has(spec.luz)) brillos.set(spec.luz, []);
+    brillos.get(spec.luz).push(dCurva(controles(spec.a, spec.b)));
+  }
+  for (const [estado, ds] of brillos) g.append(svgEl('path', { d: ds.join(''), class: `senal-brillo luz-${estado}` }));
   for (const tipo of ['banda', 'paso']) {
     const bordes = [];
     const porColor = new Map();
@@ -149,6 +157,7 @@ function trazar(spec) {
   const d = dCurva(c);
   const { m, angulo, h1, h2 } = partir(c);
   if (spec.marcada) g.append(svgEl('path', { d, class: 'hebra-marca' }));
+  if (spec.luz) g.append(svgEl('path', { d, class: `senal-brillo luz-${spec.luz}` }));
   g.append(
     svgEl('path', { d, class: 'hebra-borde' }),
     svgEl('path', { d: dCurva(h1), class: 'hebra', style: `--c:${spec.colorA}` }),
@@ -263,8 +272,24 @@ export function setupCarta({ root, red, acciones, toast }) {
       s, elemento, carta, puntas, rotos, repetidos, fusiones, equipos, usado,
       lados: F.ladosDeCarta(s, conCarta, puntas),
       libre: modoLocal() === 'libre',
+      luz: F.iluminacion(s),
+      estados: acciones.senal?.estados() ?? null,
     };
   }
+
+  // La señal en un extremo de este elemento: de dónde viene la luz, la potencia
+  // estimada y cómo está lo que queda abajo (según las ONT, si se conocen).
+  function senalEn(d, ext) {
+    const reg = d.luz.extremos.get(`${elementoId}|${ext}`);
+    if (!reg) return null;
+    const abajo = F.estadoAbajo(reg.clientes, d.estados);
+    return { reg, abajo, estado: abajo.estado };
+  }
+
+  const textoSenal = (d, x) => `Con luz de ${F.origenLuz(d.s, x.reg)} · ${F.textoPotencia(x.reg)} · ${F.textoAbajo(x.abajo)}`;
+  const dbmCorto = (reg) => (Number.isFinite(reg.potencia)
+    ? `${reg.potencia < -0.05 ? '−' : ''}${Math.abs(reg.potencia).toFixed(1).replace('.', ',')}`
+    : null);
 
   const otro = (lado) => (lado === 'a' ? 'b' : 'a');
 
@@ -308,6 +333,10 @@ export function setupCarta({ root, red, acciones, toast }) {
     for (const e of d.equipos) partes.push(`q${e.id}:${e.version}`);
     for (const c of [...d.rotos, ...d.repetidos]) partes.push(`r${c.id}`);
     for (const c of cercanos(d)) partes.push(`p${c.cable.id}:${c.cable.properties.version}`);
+    for (const reg of d.luz.porElemento.get(elementoId) ?? []) {
+      const ab = F.estadoAbajo(reg.clientes, d.estados);
+      partes.push(`L${reg.ext}:${ab.estado}:${ab.clientes}:${ab.enLinea}:${ab.caidos}:${reg.perdida.toFixed(1)}:${reg.potencia ?? ''}`);
+    }
     return partes.join('|');
   }
 
@@ -636,7 +665,7 @@ export function setupCarta({ root, red, acciones, toast }) {
       const hasta = Math.min(t * est.porTubo, est.fibras);
       const abierto = tuboAbierto(d, p, t, est);
       const colorTubo = est.codigo.tubo(t);
-      const cuenta = { unida: 0, paso: 0, libre: 0, cortada: 0 };
+      const cuenta = { unida: 0, paso: 0, libre: 0, cortada: 0, luz: 0 };
       const filas = [];
       for (let n = desde; n <= hasta; n += 1) {
         const estado = estadoFibra(d, p, n);
@@ -649,18 +678,25 @@ export function setupCarta({ root, red, acciones, toast }) {
           : estado === 'paso' ? 'en paso (sigue de largo)'
             : estado === 'cortada' ? 'cortada, este lado libre' : 'libre';
         const marcada = ext === elegido || ext === movido;
-        filas.push(h('li', {}, h(`button.fibra.${estado}${marcada ? '.elegida' : ''}`, {
+        const senal = senalEn(d, ext);
+        if (senal) cuenta.luz += 1;
+        filas.push(h('li', {}, h(`button.fibra.${estado}${marcada ? '.elegida' : ''}${senal ? `.luz.luz-${senal.estado}` : ''}`, {
           type: 'button',
           'data-ext': ext,
-          'aria-label': `Fibra ${n}, ${F.nombreColor(info.color)}${est.tubos > 1 ? `, tubo ${t} ${F.nombreColor(colorTubo)}` : ''}: ${nota}`,
+          'aria-label': `Fibra ${n}, ${F.nombreColor(info.color)}${est.tubos > 1 ? `, tubo ${t} ${F.nombreColor(colorTubo)}` : ''}: ${nota}`
+            + (senal ? `. ${textoSenal(d, senal)}` : ''),
+          title: senal ? textoSenal(d, senal) : null,
           'aria-pressed': marcada ? 'true' : null,
-        }, h('span.num', { text: String(n) }), h('span.color-nombre', { text: F.nombreColor(info.color) }), punto(info.color))));
+        }, h('span.num', { text: String(n) }), h('span.color-nombre', { text: F.nombreColor(info.color) }),
+        senal ? h('span.luz-dato', { text: dbmCorto(senal.reg) ?? 'luz', 'aria-hidden': 'true' }) : null,
+        punto(info.color))));
       }
       const resumen = [
         cuenta.unida && `${cuenta.unida} unida${cuenta.unida > 1 ? 's' : ''}`,
         cuenta.paso && `${cuenta.paso} en paso`,
         cuenta.cortada && `${cuenta.cortada} cortada${cuenta.cortada > 1 ? 's' : ''}`,
         cuenta.libre && `${cuenta.libre} libre${cuenta.libre > 1 ? 's' : ''}`,
+        cuenta.luz && `${cuenta.luz} con luz`,
       ].filter(Boolean).join(' · ');
       const estiloTubo = `--c:${colorTubo.hex};--m:${colorTubo.marca};--t:${textoSobre(colorTubo.hex)}`;
       const cabTubo = est.tubos > 1
@@ -702,13 +738,23 @@ export function setupCarta({ root, red, acciones, toast }) {
         if (fin?.motivo === 'cliente') detalle = state().elementos.get(fin.elemento)?.properties.nombre ?? '';
       }
       const texto = eq.tipo === 'olt' ? `PON ${F.numeroPuerto(eq, n)}` : lado === 'e' ? (eq.entradas > 1 ? `E${n}` : 'E') : String(n);
-      return h(`button.puerto.${estado}${marcada ? '.elegida' : ''}`, {
+      const senal = senalEn(d, ext);
+      const etiquetaPto = F.etiquetaPuerto(eq, lado, n);
+      // En la OLT, cuántos clientes tiene abajo cada puerto (y cuántos en línea, si se sabe).
+      let cuenta = null;
+      if (senal && eq.tipo === 'olt' && senal.abajo.clientes) {
+        cuenta = senal.abajo.enLinea || senal.abajo.caidos ? `${senal.abajo.enLinea}/${senal.abajo.clientes}` : `${senal.abajo.clientes} cli`;
+      }
+      const titulo = [detalle ? `${etiquetaPto}: ${detalle}` : etiquetaPto, senal ? textoSenal(d, senal) : null].filter(Boolean).join(' · ');
+      return h(`button.puerto.${estado}${marcada ? '.elegida' : ''}${senal ? `.luz.luz-${senal.estado}` : ''}`, {
         type: 'button',
         'data-ext': ext,
-        title: detalle ? `${F.etiquetaPuerto(eq, lado, n)}: ${detalle}` : F.etiquetaPuerto(eq, lado, n),
-        'aria-label': `${F.etiquetaPuerto(eq, lado, n)}: ${f ? `unida con ${etiqueta(f.a === ext ? f.b : f.a)}` : 'libre'}`,
+        title: titulo,
+        'aria-label': `${etiquetaPto}: ${f ? `unida con ${etiqueta(f.a === ext ? f.b : f.a)}` : 'libre'}${senal ? `. ${textoSenal(d, senal)}` : ''}`,
         'aria-pressed': marcada ? 'true' : null,
-      }, punto(null), h('span.puerto-num', { text: texto }), detalle ? h('small', { text: detalle }) : null);
+      }, punto(null), h('span.puerto-num', { text: texto }),
+      cuenta ? h('span.luz-dato', { text: cuenta, 'aria-hidden': 'true' }) : null,
+      detalle ? h('small', { text: detalle }) : null);
     };
     const entradas = [];
     for (let n = 1; n <= eq.entradas; n += 1) entradas.push(puerto('e', n));
@@ -1057,7 +1103,8 @@ export function setupCarta({ root, red, acciones, toast }) {
           if (estadoFibra(d, p, n) !== 'paso') continue;
           const a = lugar(F.extremoCable(p.cable.id, 'a', n));
           const b = lugar(F.extremoCable(p.cable.id, 'b', n));
-          if (a && b) specs.push({ tipo: 'paso', a, b, colorA: F.infoFibra(props, n).color.hex });
+          const senal = senalEn(d, F.extremoCable(p.cable.id, 'a', n));
+          if (a && b) specs.push({ tipo: 'paso', a, b, colorA: F.infoFibra(props, n).color.hex, luz: senal?.estado ?? null });
         }
       }
     }
@@ -1071,11 +1118,13 @@ export function setupCarta({ root, red, acciones, toast }) {
       const ca = colorExtremo(f.a);
       const cb = colorExtremo(f.b);
       const marcada = ((foco?.tipo === 'union' || foco?.tipo === 'mover-elegir') && foco.fusion === f.id) || mover?.fusion === f.id;
+      const senal = senalEn(d, f.a) ?? senalEn(d, f.b);
       const spec = {
         tipo: 'union', a, b, marcada,
         colorA: ca ?? cb ?? CORDON,
         colorB: cb ?? ca ?? CORDON,
         adaptador: f.tipo === 'conector' ? adaptador : null,
+        luz: senal?.estado ?? null,
       };
       (marcada ? marcadas : specs).push(spec);
     }
@@ -1149,6 +1198,11 @@ export function setupCarta({ root, red, acciones, toast }) {
       out.push(h('h3', { text: 'En paso (sin cortar)' }));
       out.push(h('ul.carta-lista', {}, ...enPaso.map((t) => h('li', { text: t }))));
     }
+    const conLuz = textoLuz(d);
+    if (conLuz.length) {
+      out.push(h('h3', { text: `Con luz (${conLuz.length})` }));
+      out.push(h('ul.carta-lista', {}, ...conLuz.map((t) => h('li', { text: t }))));
+    }
     if (d.equipos.length) {
       out.push(h('h3', { text: 'Equipos' }));
       out.push(h('ul.carta-lista', {}, ...d.equipos.map((e) => h('li', {},
@@ -1158,6 +1212,20 @@ export function setupCarta({ root, red, acciones, toast }) {
     const cerca = cercanos(d);
     if (cerca.length) out.push(bloqueCercanos(d, cerca));
     return out;
+  }
+
+  // Lo que tiene luz en este elemento, para la lista y el texto copiado:
+  // "T-001 F1 (llega): OLT-1 PON 0 · ≈ −12,1 dBm · 8 clientes abajo, 7 en línea".
+  function textoLuz(d) {
+    const out = [];
+    for (const reg of d.luz.porElemento.get(elementoId) ?? []) {
+      const p = F.parseExtremo(reg.ext);
+      if (p?.tipo !== 'c' || (reg.sentido === 'paso' && p.lado === 'b')) continue; // lo que pasa, una vez
+      const como = reg.sentido === 'llega' ? 'llega' : reg.sentido === 'sale' ? 'sale' : 'pasa';
+      const abajo = F.estadoAbajo(reg.clientes, d.estados);
+      out.push(`${nombreCorto(d, reg.ext)} (${como}): ${F.origenLuz(d.s, reg)} · ${F.textoPotencia(reg)} · ${F.textoAbajo(abajo)}`);
+    }
+    return out.sort((x, y) => x.localeCompare(y, 'es', { numeric: true }));
   }
 
   // "F1–F36, F41–F48" por cable que pasa.
@@ -1206,6 +1274,11 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (enPaso.length) {
       lineasTexto.push('', 'En paso:');
       for (const t of enPaso) lineasTexto.push(`- ${t}`);
+    }
+    const conLuz = textoLuz(d);
+    if (conLuz.length) {
+      lineasTexto.push('', 'Con luz:');
+      for (const t of conLuz) lineasTexto.push(`- ${t}`);
     }
     return lineasTexto.join('\n');
   }
@@ -2197,6 +2270,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     root.hidden = false;
     document.body.classList.add('con-carta');
     render();
+    acciones.senal?.pedir();
     // Al volver de un recorrido, se ve el extremo de donde se partió.
     if (ext) {
       const el = cuerpo.querySelector(`[data-ext="${ext}"]`);
@@ -2242,6 +2316,12 @@ export function setupCarta({ root, red, acciones, toast }) {
     const d = datos();
     if (d && firma(d) === ultimaFirma) return;
     render();
+  });
+
+  acciones.senal?.on(() => {
+    if (!abierta() || propio || silencio || gesto) return;
+    const d = datos();
+    if (d && firma(d) !== ultimaFirma) render();
   });
 
   document.addEventListener('keydown', () => { teclaReciente = performance.now(); }, true);

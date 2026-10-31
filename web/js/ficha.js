@@ -987,6 +987,7 @@ export function setupFicha({ root, red, acciones }) {
     const viejos = Object.entries(CAMPOS_VIEJOS).map(([k, l]) => fila(l, datos[k]));
     const detalle = h('dl.ficha-datos', {},
       fila('Red', acciones.nombreRed?.(props.red)),
+      props.tipo === 'cliente' ? null : fila('Señal', senalDeElemento(feature)),
       fila('Estado', ESTADOS[props.estado] ?? props.estado),
       ...(CAMPOS[props.tipo] ?? []).map((c) => filaDato(c, datos[c.k])),
       ...viejos,
@@ -1130,6 +1131,12 @@ export function setupFicha({ root, red, acciones }) {
     const s = red.state;
     const est = F.estructura(props);
     const usos = F.indice(s).porCable.get(feature.id) ?? new Map();
+    const luzPorFibra = new Map();
+    for (const t of F.iluminacion(s).porCable.get(feature.id) ?? []) {
+      if (!luzPorFibra.has(t.fibra)) luzPorFibra.set(t.fibra, []);
+      luzPorFibra.get(t.fibra).push(t);
+    }
+    const estados = acciones.senal?.estados() ?? null;
     const detalle = h('div.fibras-detalle', { hidden: true });
     let elegida = null;
     const filas = [];
@@ -1148,8 +1155,15 @@ export function setupFicha({ root, red, acciones }) {
         const otroExt = u.fusion.a === ext ? u.fusion.b : u.fusion.a;
         return h('li', { text: `${F.nombreElemento(s, u.elemento)}: unida con ${F.etiquetaExtremo(s, otroExt)}` });
       });
+      const luces = (luzPorFibra.get(n) ?? []).map((t) => h('p.ficha-sub.fibra-luz', {
+        text: `Con luz de ${F.origenLuz(s, t)}: de ${F.nombreElemento(s, t.desde)} hacia `
+          + `${t.hasta !== null ? F.nombreElemento(s, t.hasta) : 'la punta suelta'} · `
+          + `${F.textoPotencia({ ...t, potencia: t.potenciaFin, perdida: t.perdidaFin })} al llegar · `
+          + `${F.textoAbajo(F.estadoAbajo(t.clientes, estados))}`,
+      }));
       detalle.replaceChildren(...[
         h('p', {}, h('strong', { text: F.etiquetaFibra(props, n) })),
+        ...luces,
         items.length ? h('ul', {}, ...items) : h('p.ficha-sub', { text: 'Sin uniones: va de punta a punta del cable sin cortar.' }),
         lista.length ? botones(boton('Ver recorrido', () => acciones.verRecorrido(lista[0].elemento, F.extremoCable(feature.id, lista[0].lado, n)))) : null,
       ].filter(Boolean));
@@ -1161,10 +1175,17 @@ export function setupFicha({ root, red, acciones }) {
       for (let n = (t - 1) * est.porTubo + 1; n <= Math.min(t * est.porTubo, est.fibras); n += 1) {
         const info = F.infoFibra(props, n);
         const usada = usos.has(n);
-        const b = h(`button.fibra-chip${usada ? '.usada' : ''}`, {
+        const tramosLuz = luzPorFibra.get(n);
+        let luz = null;
+        if (tramosLuz) {
+          const abajo = new Set();
+          for (const t of tramosLuz) for (const c of t.clientes) abajo.add(c);
+          luz = F.estadoAbajo(abajo, estados).estado;
+        }
+        const b = h(`button.fibra-chip${usada ? '.usada' : ''}${luz ? `.luz.luz-${luz}` : ''}`, {
           type: 'button',
-          title: `${F.etiquetaFibra(props, n)}${usada ? ' · con uniones' : ''}`,
-          'aria-label': `${F.etiquetaFibra(props, n)}${usada ? ', con uniones' : ', sin uniones'}`,
+          title: `${F.etiquetaFibra(props, n)}${usada ? ' · con uniones' : ''}${luz ? ' · con luz' : ''}`,
+          'aria-label': `${F.etiquetaFibra(props, n)}${usada ? ', con uniones' : ', sin uniones'}${luz ? ', con luz' : ''}`,
           'aria-pressed': 'false',
         }, h(`span.punto${marcasClase(info.color)}`, { style: estiloColor(info.color) }), h('span', { text: String(n) }));
         b.addEventListener('click', () => mostrarFibra(n, b));
@@ -1181,6 +1202,44 @@ export function setupFicha({ root, red, acciones }) {
         + ` · ${usadas ? `${plural(usadas, 'fibra', 'fibras')} con uniones` : 'sin uniones todavía'}` }),
       ...filas,
       detalle);
+  }
+
+  // "4 de 12 fibras con luz, de NODO hacia NAP-3 · 8 clientes abajo, 7 en línea"
+  function senalDeCable(feature) {
+    const s = red.state;
+    const tramos = F.iluminacion(s).porCable.get(feature.id) ?? [];
+    if (!tramos.length) return null;
+    const fibras = new Set(tramos.map((t) => t.fibra));
+    const sentidos = new Set(tramos.map((t) => `${t.desde}>${t.hasta}`));
+    let hacia = '';
+    if (sentidos.size === 1) {
+      const t = tramos[0];
+      hacia = `, de ${F.nombreElemento(s, t.desde)} hacia ${t.hasta !== null ? F.nombreElemento(s, t.hasta) : 'la punta suelta'}`;
+    }
+    const abajo = new Set();
+    for (const t of tramos) for (const c of t.clientes) abajo.add(c);
+    const estado = F.estadoAbajo(abajo, acciones.senal?.estados() ?? null);
+    return `${fibras.size} de ${feature.properties.fibras} fibras con luz${hacia} · ${F.textoAbajo(estado)}`;
+  }
+
+  // Lo que llega con luz a un elemento: "OLT-1 PON 1 (≈ −10,2 dBm)".
+  function senalDeElemento(feature) {
+    const s = red.state;
+    const regs = F.iluminacion(s).porElemento.get(feature.id) ?? [];
+    if (!regs.length) return null;
+    if (feature.properties.tipo === 'nodo') {
+      const puertos = regs.filter((r) => r.padre === null);
+      if (puertos.length) return `Sale luz por ${puertos.length} puerto${puertos.length === 1 ? '' : 's'} PON`;
+    }
+    const llegan = regs.filter((r) => r.sentido === 'llega' || r.sentido === 'paso');
+    const porOrigen = new Map();
+    for (const r of llegan) {
+      const origen = F.origenLuz(s, r);
+      const previo = porOrigen.get(origen);
+      if (!previo || r.perdida < previo.perdida) porOrigen.set(origen, r);
+    }
+    if (!porOrigen.size) return null;
+    return `Llega luz de ${[...porOrigen].map(([origen, r]) => `${origen} (${F.textoPotencia(r)})`).join(', ')}`;
   }
 
   function verCable(feature) {
@@ -1200,6 +1259,7 @@ export function setupFicha({ root, red, acciones }) {
 
     const detalle = h('dl.ficha-datos', {},
       fila('Red', acciones.nombreRed?.(props.red)),
+      fila('Señal', senalDeCable(feature)),
       fila('Tipo', def.label),
       fila('Largo', largo),
       fila('Estado', ESTADOS[props.estado] ?? props.estado),

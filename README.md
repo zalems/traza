@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.9.1
+# Plataforma FTTH · kit 0.10.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -86,6 +86,30 @@ se consultan recién cuando alguien las elige.
   ONT (3 dB o más por debajo es para revisar). Se estima con 0,3 dB/km,
   0,1 dB por fusión, 0,5 dB por conector y la pérdida típica de cada splitter
   (PLC 1x8: 10,5 dB; desbalanceado: según el porcentaje de cada salida).
+- **Señal: luz, sentido y tráfico.** El botón de la señal (debajo del de la
+  ubicación) pinta sobre el mapa lo que tiene luz según las cartas de
+  empalme: desde cada puerto PON unido de cada OLT, la luz cruza las uniones,
+  sigue por las fibras (de largo por donde pasan sin cortar) y se abre en los
+  splitters. Cada tramo con luz lleva flechas hacia donde va la señal y se
+  pinta según lo que tiene abajo: **verde con rayas que avanzan** si alguno de
+  sus clientes tiene la ONT en línea (tráfico), **naranja** si tiene luz y no
+  se sabe más (sin clientes abajo o sin datos de la OLT), **rojo** si tiene
+  luz y sus clientes están sin señal (un corte probable). Los cables sin luz
+  muestran en gris el sentido de la red, del nodo hacia afuera. La leyenda
+  cuenta cuántos cables tienen luz, a cuántos clientes llega y cuántos están
+  en línea, avisa de los clientes en línea a los que la luz todavía no llega
+  en el mapa (falta completar su recorrido en las cartas) y de los errores de
+  las cartas (un splitter al revés, luz que llega por dos caminos), con un
+  toque para ir al lugar. En la carta, cada fibra y puerto con luz tiene un
+  anillo del color de su estado y la potencia estimada (si la OLT tiene
+  cargada su potencia); los puertos PON de la OLT dicen cuántos clientes
+  tienen abajo y cuántos en línea, y "Ver lista" y "Copiar" incluyen lo que
+  tiene luz. La ficha de cada cable dice cuántas fibras llevan luz, en qué
+  sentido y con cuántos clientes abajo; la de cada caja, de qué OLT y PON le
+  llega la luz y con cuánto. El tráfico sale del estado de cada ONT en el
+  panel de la OLT (se pide una vez por minuto); los Mbps de cada fibra no,
+  porque el panel no los mide por ONT. En el teléfono la leyenda arranca
+  plegada en una línea; se despliega tocándola.
 - **Wispro y la OLT.** Si la red está conectada (ver más abajo), la ficha de
   cada NAP la busca en Wispro por el nombre ("P5-C4" y "P5C4" son la misma);
   si no la encuentra, ofrece las NAPs de Wispro más cercanas para elegir.
@@ -354,7 +378,8 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.9.1 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.10.0 a
+0.9.1 alcanza con `git checkout e76e818` e instalar (mismas bases). De 0.9.1 a
 0.9.0 alcanza con `git checkout 0903002` e instalar (mismas bases). De 0.9.0 a
 0.8.0 alcanza con `git checkout db29936` e instalar (mismas bases; solo cambian
 el visor, la API y el servicio de sesión). De 0.8.0 a
@@ -482,9 +507,10 @@ contratos y cómo se cruza cada uno con los clientes del mapa, ONTs por número
 de serie o por el número de contrato de su descripción, mediciones en vivo,
 fallas y plazos, agregar dos veces a la vez, traer toda la red de Wispro,
 deshacerlo y traerla dos veces a la vez, elegir sus OLT y quitar lo de la que
-no se usa, NAPs amontonadas, el comando `integraciones`).
-`node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos
-y potencias del visor, y `node pruebas/integracion.test.mjs` la medición
+no se usa, NAPs amontonadas, el estado de las ONT para la señal, el comando
+`integraciones`).
+`node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos,
+potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo) del visor, y `node pruebas/integracion.test.mjs` la medición
 virtual y la estabilidad (Node 20.19 o más nuevo; el de Debian 13 sirve).
 
 ## Qué se probó y qué no

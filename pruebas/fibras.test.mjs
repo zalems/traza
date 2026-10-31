@@ -149,4 +149,78 @@ assert.equal(segT.tubo.nombre, 'azul'); // T tiene 2 tubos: lleva el color del t
 assert.equal(r.segmentos[r.segmentos.length - 1].tubo, null); // la bajada de 1 fibra no tiene tubos
 assert.deepEqual(F.coloresDeTramo(state, { cable: 999, fibra: 1 }), { color: null, tubo: null });
 
+// 0.10.0: señal. Con T F3 cortada en BOT (unida a R F1), la luz de PON 1 va por T hasta
+// BOT y por R hasta NAP-2, donde la fibra no está unida: no llega al cliente.
+let luz = F.iluminacion(state);
+assert.equal(F.iluminacion(state), luz); // se calcula una vez por estado
+assert.deepEqual([...luz.puertos.keys()], ['20:1']);
+assert.deepEqual(luz.tramos.map((t) => [t.cable, t.fibra, t.desde, t.hasta, t.ini, t.fin, t.termina]),
+  [[10, 3, 1, 2, 0, 1, 'union'], [11, 1, 2, 6, 0, 1, 'sin-union']]);
+assert.equal(luz.extremos.get('1|q20:s:1').sentido, 'sale');
+assert.equal(luz.extremos.get('1|c10:b:3').sentido, 'sale');
+assert.equal(luz.extremos.get('2|c10:a:3').sentido, 'llega');
+assert.equal(luz.extremos.get('2|c11:b:1').sentido, 'sale');
+assert.equal(luz.extremos.get('6|c11:a:1').sentido, 'llega'); // llega luz a una fibra sin unir
+assert.equal(luz.extremos.has('3|c10:a:3'), false); // después del corte, a oscuras
+assert.equal(luz.clientes.size, 0);
+assert.deepEqual(luz.conflictos, []);
+// Sin el corte: T F3 pasa de largo por BOT, entra al splitter de la NAP y por la salida 2 y D llega al cliente.
+state.fusiones.delete(33);
+state.rev += 1;
+luz = F.iluminacion(state);
+const t3 = luz.tramos.find((t) => t.cable === 10 && t.fibra === 3);
+assert.deepEqual([t3.desde, t3.hasta, t3.ini, t3.fin, t3.pasaPor], [1, 3, 0, 3, [2]]);
+assert.equal(luz.extremos.get('2|c10:a:3').sentido, 'paso');
+assert.equal(luz.extremos.get('2|c10:b:3').sentido, 'paso');
+assert.equal(luz.extremos.get('3|c10:a:3').sentido, 'llega');
+assert.equal(luz.extremos.get('3|q21:e:1').sentido, 'entra');
+assert.equal([...luz.extremos.keys()].filter((k) => k.startsWith('3|q21:s:')).length, 8); // las 8 salidas con luz
+assert.equal(luz.extremos.get('3|c12:b:1').sentido, 'sale');
+assert.deepEqual([...luz.clientes.keys()], [4]);
+for (const clave of ['1|q20:s:1', '1|c10:b:3', '2|c10:a:3', '3|q21:e:1', '3|q21:s:2', '3|c12:b:1']) {
+  assert.deepEqual([...luz.extremos.get(clave).clientes], [4], `clientes abajo de ${clave}`);
+}
+assert.deepEqual([...luz.extremos.get('3|q21:s:3').clientes], []); // salida con luz sin nada abajo
+assert.deepEqual([...t3.clientes], [4]);
+assert.deepEqual(luz.porElemento.get(2).map((x) => x.ext).sort(), ['c10:a:3', 'c10:b:3']); // lo que tiene luz en BOT
+// La potencia que llega al cliente es la misma que da el recorrido.
+const rLuz = F.recorrido(state, 4, 'c12:a:1');
+cerca(luz.clientes.get(4).potencia, F.potencias(state, rLuz).llega, 'potencia en el cliente');
+cerca(luz.extremos.get('1|c10:b:3').potencia, 4 - F.PERDIDAS.fusion, 'potencia al salir de la OLT');
+assert.ok(luz.extremos.get('2|c10:b:3').potencia < luz.extremos.get('1|c10:b:3').potencia); // en BOT, menos
+assert.match(F.textoPotencia(luz.clientes.get(4)), /^≈ −\d+,\d dBm$/);
+assert.equal(F.origenLuz(state, luz.clientes.get(4)), 'OLT-1 PON 1');
+// Segmentos para el mapa: T de NODO a BOT y de BOT a NAP (el poste no corta), D de NAP al cliente.
+const segs = F.segmentosConLuz(state);
+assert.deepEqual(segs.map((x) => [x.cable, x.desde, x.hasta, x.sentido, [...x.fibras], [...x.clientes]]),
+  [[10, 0, 1, 1, [3], [4]], [10, 1, 3, 1, [3], [4]], [12, 0, 1, 1, [1], [4]]]);
+// Estado de lo que queda abajo, según las ONT.
+assert.deepEqual(F.estadoAbajo(new Set([4]), new Map([[4, { estado: 'online' }]])),
+  { estado: 'trafico', clientes: 1, enLinea: 1, caidos: 0, sinDato: 0 });
+assert.equal(F.estadoAbajo(new Set([4]), new Map([[4, { estado: 'offline' }]])).estado, 'caida');
+assert.equal(F.estadoAbajo(new Set([4]), null).estado, 'luz');
+assert.equal(F.textoAbajo(F.estadoAbajo(new Set([4, 9]), new Map([[4, { estado: 'online' }], [9, { estado: 'offline' }]]))),
+  '2 clientes abajo, 1 en línea, 1 sin señal');
+// R quedó sin luz: el sentido de la red va de BOT (más cerca del nodo) a NAP-2.
+assert.deepEqual(F.sentidoDeRed(state), [{ cable: 11, desde: 0, hasta: 1, sentido: 1 }]);
+// Un cable dibujado al revés (del cliente a la NAP): la luz va contra el orden de sus puntos.
+const D2 = cab(13, 'D2', 'bajada', 1, [cli, nap]);
+state.cables.set(13, D2);
+fus(35, 3, 'q21:s:3', 'c13:a:1', 'conector');
+state.rev += 1;
+const segD2 = F.segmentosConLuz(state).find((x) => x.cable === 13);
+assert.deepEqual([segD2.desde, segD2.hasta, segD2.sentido], [0, 1, -1]);
+assert.equal(F.iluminacion(state).tramos.find((t) => t.cable === 13).termina, 'cliente');
+state.cables.delete(13);
+state.fusiones.delete(35);
+// Un splitter al revés (luz que entra por una salida) se avisa y no sigue.
+fus(33, 2, 'c10:a:3', 'c11:b:1');
+state.equipos.set(22, { id: 22, elemento: 6, tipo: 'splitter', nombre: 'SPL-2', entradas: 1, salidas: 4, datos: { modo: 'plc' }, version: 1 });
+fus(34, 6, 'c11:a:1', 'q22:s:1');
+state.rev += 1;
+assert.deepEqual(F.iluminacion(state).conflictos, [{ elemento: 6, ext: 'q22:s:1', motivo: 'contramano' }]);
+state.fusiones.delete(34);
+state.equipos.delete(22);
+state.rev += 1;
+
 console.log('fibras: TODO OK');

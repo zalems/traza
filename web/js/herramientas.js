@@ -8,6 +8,7 @@ import { svgIcono } from './iconos.js';
 import { setupRed } from './red.js';
 import { setupFicha } from './ficha.js';
 import { setupCarta } from './carta.js';
+import { setupSenal } from './senal.js';
 import { recorrido } from './fibras.js';
 
 const RED_KEY = 'ftth.red';
@@ -409,8 +410,29 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     return integracionRed.estado;
   }
 
+  // La señal: luz, sentido y tráfico (botón del mapa; la carta y las fichas usan sus datos).
+  const senal = setupSenal({
+    map,
+    red,
+    irA: (id) => {
+      const f = red.state.elementos.get(id);
+      if (!f) return;
+      if (carta.abierta()) carta.cerrar({ silencioso: true });
+      map.jumpTo({ center: f.geometry.coordinates, zoom: Math.max(map.getZoom(), 18) });
+      acciones.seleccionar('elemento', id);
+    },
+  });
+  acciones.senal = { estados: () => senal.estados(), pedir: () => senal.pedirEstados(), on: (fn) => senal.on(fn) };
+
   const ficha = setupFicha({ root: $('ficha'), red, acciones });
   const carta = setupCarta({ root: $('carta'), red, acciones, toast });
+  // Cuando llega el estado de las ONT, la ficha abierta se rehace (cuentas de tráfico).
+  senal.on(() => {
+    const sel = red.seleccionado();
+    if (!sel) return;
+    if (ficha.modo() === 'cable' && sel.clase === 'cable') ficha.verCable(sel.feature);
+    else if (ficha.modo() === 'elemento' && sel.clase === 'elemento') ficha.verElemento(sel.feature);
+  });
 
   // Muestra en el mapa un conjunto de puntos, sin que lo tape la ficha.
   function encuadrar(puntos, respaldo) {
@@ -1147,5 +1169,5 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   pista();
   iniciar();
 
-  return { red, ficha, carta, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed, abrirUsuarios };
+  return { red, ficha, carta, senal, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed, abrirUsuarios };
 }

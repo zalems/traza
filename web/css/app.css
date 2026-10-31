@@ -640,6 +640,208 @@ svg {
   padding: 12px 14px;
 }
 
+/* ---------------------------------------------------------------- señal */
+
+/* Colores de la señal (los mismos que en el mapa): con tráfico, con luz, con
+   luz y los clientes sin señal, y el sentido de la red en los cables sin luz. */
+:root {
+  --senal-trafico: #0b9d58;
+  --senal-luz: #ef9a00;
+  --senal-caida: #dc2b25;
+  --senal-red: #3d4852;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --senal-red: #9aa7b0;
+  }
+}
+
+.senal-ctrl {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  /* la leyenda tiene ancho propio: el control no la achica al ancho del botón */
+  pointer-events: none;
+}
+
+.senal-ctrl > * {
+  pointer-events: auto;
+}
+
+.senal-boton svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* prendida: tinta, también con el puntero encima (MapLibre aclara los botones al pasar) */
+.maplibregl-ctrl-group button.senal-boton[aria-pressed='true'],
+.maplibregl-ctrl-group button.senal-boton[aria-pressed='true']:not(:disabled):hover {
+  background-color: var(--ink);
+}
+
+.senal-boton[aria-pressed='true'] svg {
+  stroke: var(--paper);
+}
+
+.senal-leyenda {
+  width: min(260px, calc(100vw - 2 * var(--edge) - 70px - var(--safe-left) - var(--safe-right)));
+  padding: 10px 12px 9px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font: 500 12.5px/1.35 var(--font);
+  text-align: left;
+}
+
+.senal-titulo {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.senal-titulo small {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* chevron: abajo para desplegar, arriba para plegar */
+.senal-plegar {
+  flex: none;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  margin: 0 2px 0 4px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.senal-titulo[aria-expanded='true'] .senal-plegar {
+  transform: translateY(2px) rotate(-135deg);
+}
+
+.senal-leyenda.plegada {
+  padding: 8px 10px;
+}
+
+.senal-leyenda.plegada .senal-titulo {
+  margin: 0;
+}
+
+.senal-titulo strong {
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+
+.senal-claves {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.senal-claves li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.senal-muestra {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--c);
+  box-shadow: 0 0 0 1.5px #ffffff, 0 0 0 2.5px rgb(22 34 44 / 0.18);
+}
+
+.senal-muestra svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.senal-muestra.senal-trafico { --c: var(--senal-trafico); }
+.senal-muestra.senal-luz { --c: var(--senal-luz); }
+.senal-muestra.senal-caida { --c: var(--senal-caida); }
+
+/* sin luz: solo la flecha, sobre el cable atenuado */
+.senal-muestra.senal-red {
+  background: color-mix(in srgb, var(--senal-red) 28%, transparent);
+  box-shadow: none;
+}
+
+.senal-muestra.senal-red svg {
+  stroke: var(--senal-red);
+}
+
+.senal-cuentas {
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.senal-cuentas p {
+  margin: 0 0 3px;
+  text-wrap: pretty;
+}
+
+.senal-nota {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.senal-alerta {
+  color: var(--signal);
+  font-weight: 650;
+}
+
+.senal-conflictos {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.senal-conflicto {
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in srgb, var(--senal-caida) 55%, transparent);
+  border-radius: var(--radius-inner);
+  background: color-mix(in srgb, var(--senal-caida) 9%, transparent);
+  color: var(--ink);
+  font: 600 11.5px/1.3 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
 /* ------------------------------------------------------------- teléfono */
 
 @media (max-width: 640px) {
@@ -2268,6 +2470,50 @@ button.integ-enlace:hover {
   stroke: var(--signal);
   stroke-width: 12;
   opacity: 0.5;
+}
+
+/* lo que lleva luz: un brillo del color de su estado debajo de la fibra */
+.carta-lineas .senal-brillo {
+  fill: none;
+  stroke: var(--luz-c);
+  stroke-width: 9;
+  stroke-linecap: round;
+  opacity: 0.42;
+}
+
+.luz-trafico { --luz-c: var(--senal-trafico); }
+.luz-luz { --luz-c: var(--senal-luz); }
+.luz-caida { --luz-c: var(--senal-caida); }
+
+/* fibras y puertos con luz: anillo del color de su estado y la potencia estimada */
+.fibra.luz .punto,
+.puerto.luz .punto,
+.fibra-chip.luz .punto {
+  box-shadow: 0 0 0 1.5px var(--paper), 0 0 0 3.5px var(--luz-c), 0 0 7px 3px color-mix(in srgb, var(--luz-c) 55%, transparent);
+}
+
+.luz-dato {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--luz-c) 16%, transparent);
+  color: color-mix(in srgb, var(--luz-c) 72%, var(--ink));
+  font-size: 11px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.fibras-detalle .fibra-luz {
+  padding-left: 8px;
+  border-left: 3px solid var(--luz-c, var(--senal-luz));
+  color: var(--ink);
+}
+
+.equipo.olt .luz-dato {
+  background: color-mix(in srgb, var(--luz-c) 30%, transparent);
+  color: #ffffff;
 }
 
 /* protector de empalme: tubo transparente con su varilla de acero */

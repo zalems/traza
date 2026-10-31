@@ -43,6 +43,9 @@ Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
                                        cada uno y la potencia de su ONT (refrescar=1 vuelve a leer;
                                        candidatas=1 suma las NAPs de Wispro con que se puede vincular)
   GET    /api/integracion/cliente?elemento=ID   el contrato de un cliente y su ONT
+  GET    /api/integracion/estados?red=ID|todas  el estado de la ONT de cada cliente del mapa, según el
+                                       panel de la OLT (para la vista de señal): {clientes: {ID: {estado,
+                                       rx, cuando, causa}}, leido, conectadas, errores}
   POST   /api/integracion/nap/medir    {elemento}: potencia en vivo de las ONTs de la NAP, por Wispro
   POST   /api/integracion/cliente/medir  {elemento}
   POST   /api/integracion/nap/importar {elemento, contratos}: agrega al mapa los clientes que faltan
@@ -2986,6 +2989,66 @@ class Integraciones:
                     out["errores"].append(f"Panel de la OLT: {err}.")
         return out
 
+    def estados(self, store, red_ids) -> dict:
+        """El estado de la ONT de cada cliente del mapa, para la vista de señal: en
+        línea o no, cuánto recibe y cuándo lo leyó el panel. Cada cliente se cruza con
+        su contrato de Wispro igual que en la ficha (y, si no, por la ONT anotada).
+        Varias redes (todas juntas) se leen a la vez; cuentan las que tienen el panel
+        conectado. leido: la lectura del panel más vieja de las que se usaron."""
+        out = {"clientes": {}, "errores": [], "leido": None, "conectadas": 0}
+        ids = [r for r in red_ids if self.panel(r) is not None]
+        out["conectadas"] = len(ids)
+        tareas = {}
+        for r in ids:
+            if self.wispro(r) is not None:
+                tareas[("wispro", r)] = _HILOS.submit(self.datos_wispro, r)
+            tareas[("panel", r)] = _HILOS.submit(self.datos_panel, r)
+        wait(list(tareas.values()), timeout=PLAZO_DATOS)
+        nombres = {n["id"]: n["nombre"] for n in store.networks()} if len(ids) > 1 else {}
+        for r in ids:
+            prefijo = f"{nombres[r]}: " if r in nombres else ""
+            leidos = {}
+            for clave, etiqueta in (("wispro", "Wispro"), ("panel", "Panel de la OLT")):
+                tarea = tareas.get((clave, r))
+                leidos[clave] = None
+                if tarea is None:
+                    continue
+                if not tarea.done():
+                    leidos[clave] = self._ultimo((clave, r))
+                    if leidos[clave] is None:
+                        out["errores"].append(f"{prefijo}{etiqueta}: está tardando en responder.")
+                    continue
+                try:
+                    valor, falla = tarea.result()
+                except IntegracionError as err:
+                    out["errores"].append(f"{prefijo}{etiqueta}: {err}.")
+                    continue
+                if falla:
+                    out["errores"].append(f"{prefijo}{etiqueta}: {falla}; se usa lo leído {hace_texto(valor.cuando)}.")
+                leidos[clave] = valor
+            dw, dp = leidos["wispro"], leidos["panel"]
+            if dp is None:
+                continue
+            if dp.leido and (out["leido"] is None or dp.leido < out["leido"]):
+                out["leido"] = dp.leido
+            rows = store.clientes_red(r)
+            cruce = Cruce(dw, rows) if dw is not None else None
+            for row in rows:
+                sn, numero = None, None
+                hit = cruce.de_cliente.get(row["id"]) if cruce else None
+                if hit:
+                    item = cruce.items[hit[0]]
+                    sn, numero = item["sn"], item["numero"]
+                if not sn:
+                    sn = next(iter(sns_en_texto(datos_de(row).get("ont"))), None)
+                if not sn and numero is None:
+                    continue
+                medida = dp.ont(sn, None if sn else numero, dw.por_sn if dw is not None else ())[0]
+                if medida:
+                    out["clientes"][str(row["id"])] = {"estado": medida["estado"], "rx": medida["rx"],
+                                                       "cuando": medida["cuando"], "causa": medida["causa"]}
+        return out
+
     def _wispro_o_error(self, red_id: int):
         """Wispro para una acción (medir, agregar, vincular): la última lectura si es de
         hace menos de VIVE_ACCION (es lo que el usuario está viendo); si no, se lee con
@@ -3723,6 +3786,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/integracion/cliente" and method == "GET":
             return HTTPStatus.OK, integ.cliente(self.store, self.element_of_type(q("elemento"), "cliente"),
                                                q("refrescar") == "1")
+        if path == "/api/integracion/estados" and method == "GET":
+            red_id = self.red_param(q("red"), todas=True)
+            ids = [r["id"] for r in self.store.networks()] if red_id is None else [red_id]
+            return HTTPStatus.OK, integ.estados(self.store, ids)
         if method == "POST" and path in ("/api/integracion/nap/medir", "/api/integracion/cliente/medir",
                                          "/api/integracion/nap/importar", "/api/integracion/vincular",
                                          "/api/integracion/desvincular"):
