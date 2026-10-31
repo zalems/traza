@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.9.1 · 31/10/2026
+## 0.9.1 · 31/10/2026 · commit 77c9c12
 
 - La OLT puede numerar sus puertos PON desde 0 (Huawei: placas de 0 a 15) o
   desde 1 (ZTE, V-SOL, Fiberhome…): se elige al cargarla o editarla, y para
