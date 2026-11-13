@@ -1967,6 +1967,10 @@ _HILOS = ThreadPoolExecutor(max_workers=24, thread_name_prefix="integracion")
 _HILOS_WISPRO = ThreadPoolExecutor(max_workers=8, thread_name_prefix="integracion-wispro")
 
 
+# Las OLT que se leen directo: una lectura puede tardar minutos y no tiene que ocupar los hilos de arriba.
+_HILOS_OLT = ThreadPoolExecutor(max_workers=8, thread_name_prefix="lector-olt")
+
+
 class IntegracionError(Exception):
     """Una falla al leer Wispro o el panel, con un mensaje para el usuario."""
 
@@ -3217,9 +3221,10 @@ class Snmp:
                     return out
                 if tipo not in (0x05, 0x80, 0x81):
                     out.append((oid[len(prefijo):], contenido if crudo else snmp_valor(tipo, contenido)))
-            if filas[-1][0] == actual:
-                break  # no avanza
-            actual = filas[-1][0]
+            ultimo = filas[-1][0]
+            if tuple(int(x) for x in ultimo.split(".")) <= tuple(int(x) for x in actual.split(".")):
+                break  # no avanza (o da vueltas)
+            actual = ultimo
         return out
 
 
@@ -3531,6 +3536,10 @@ def placas_de_lectura(lectura: dict) -> list:
     for ifindex, p in sorted(lectura["puertos"].items()):
         if p["marco"] != 0:
             continue
+        # La OLT lista los puertos de un slot aunque no tenga la placa puesta (la de control de
+        # reserva): si se sabe qué placas hay y ahí no hay ninguna, no se inventa una.
+        if por_slot and p["slot"] not in por_slot and p.get("estado_n") != 1:
+            continue
         placa = por_slot.setdefault(p["slot"], {"slot": p["slot"], "nombre": None, "estado": "normal", "detalle": None,
                                                 "rol": "pon" if p["tipo"] == "pon" else "uplink", "puertos": []})
         puerto = {"puerto": p["puerto"], "tipo": p["tipo"], "nombre": p["nombre"],
@@ -3552,14 +3561,15 @@ def placas_de_panel(chasis, interfaces) -> list:
     entero = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
     roles = {"pon": "pon", "control": "control", "power": "energia", "uplink": "uplink", "gpio": "interfaz",
              "interface": "interfaz", "fan": "ventilador"}
-    por_slot = {}
+    por_slot, vacios = {}, set()
     for b in (chasis.get("boards") if isinstance(chasis, dict) else None) or []:
         if not isinstance(b, dict) or not entero(b.get("slot_id")):
             continue
         nombre = texto_corto(b.get("board_name"), 20)
         puertos = [p for p in b.get("ports") or [] if isinstance(p, dict) and entero(p.get("port"))]
         if not nombre and not puertos:
-            continue  # un slot vacío
+            vacios.add(b["slot_id"])  # un slot vacío
+            continue
         slot = b["slot_id"]
         rol = roles.get(str(b.get("role") or "").lower()) or rol_placa(nombre)
         por_slot[slot] = {"slot": slot, "nombre": nombre, "estado": estado_placa(b.get("status")),
@@ -3574,6 +3584,8 @@ def placas_de_panel(chasis, interfaces) -> list:
         if p is None or p[1] != 0:
             continue
         tipo, _, slot, numero_puerto = p
+        if slot in vacios and str(i.get("oper_status") or "").lower() != "up":
+            continue  # los puertos de un slot sin placa (la de control de reserva): no se inventa una
         placa = por_slot.setdefault(slot, {"slot": slot, "nombre": None, "estado": "normal", "detalle": None,
                                            "rol": "pon" if tipo == "pon" else "uplink", "puertos": []})
         puerto = next((x for x in placa["puertos"] if x["tipo"] == tipo and x["puerto"] == numero_puerto), None)
@@ -4035,7 +4047,7 @@ class Integraciones:
                     if e["leyendo"] or (e["intento"] is not None and ahora - e["intento"] < minimo):
                         continue
                     e["leyendo"], e["intento"] = True, ahora
-                tareas.append((r, _HILOS.submit(self._leer_directa, eq, e, vinculado)))
+                tareas.append((r, _HILOS_OLT.submit(self._leer_directa, eq, e, vinculado)))
         with self._candado:
             for clave in [k for k in self._lecturas if k[0] in red_ids and k not in vivos]:
                 del self._lecturas[clave]

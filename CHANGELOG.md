@@ -1,5 +1,61 @@
 # Cambios
 
+## 0.12.0 · 13/11/2026
+
+Las OLT se cargan desde el visor, traza las lee por su cuenta (SNMP) y cada
+una se ve dibujada como es: el chasis con sus placas y sus puertos.
+
+- Pestaña *Equipos* en el tablero de la OLT. Cada OLT de la red dibujada como
+  es de frente, con la disposición de slots de la descripción de hardware de
+  Huawei (MA5800 y EA5800): X17 y X15 con las placas paradas, los
+  ventiladores arriba y, a la izquierda, las dos placas de energía sobre la
+  interfaz universal; X7 y X2 con las placas acostadas y los ventiladores a
+  la derecha (en la X2: control 3 y 4 y energía 0 arriba, servicio 1 y 2
+  abajo). Los slots vacíos se ven vacíos. Cada puerto PON lleva el color de
+  cómo están sus ONT (bien, señal al límite, la mitad o más sin señal, caído,
+  sin ONT) y cada puerto de subida, si tiene enlace. Tocando una placa se ve
+  cuál es, su estado y sus puertos; tocando un puerto, sus ONT, la potencia
+  que reciben, lo que emite el módulo del puerto (potencia, temperatura,
+  tensión y corriente, cuando se lee de la OLT), el tráfico de ahora y su
+  historia (ONT en línea, potencia y tráfico), con el salto a sus ONT.
+- Cargar una OLT desde el visor (quien administra): nombre, dirección (IP o
+  nombre; la IP pública si está en otra red), modelo, puerto y comunidad de
+  SNMP, consola (SSH o Telnet, puerto, usuario y clave) y la zona de su
+  reloj. "Probar la conexión" dice si la OLT responde por SNMP y qué entrega
+  (nombre, placas, chasis, puertos PON, ONT, potencias) y si se puede entrar
+  por la consola; si algo no anda, qué revisar (la comunidad, el permiso en
+  la OLT para la dirección del servidor, el puerto). La comunidad y la clave
+  quedan en el servidor (`integraciones.json`, que solo lee el servicio) y no
+  vuelven a salir: al cambiar una OLT se escriben solo si cambian. Se puede
+  dejar en pausa o quitar.
+- Lectura directa: traza lee por SNMP v2c (solo GET y GETBULK) las OLT
+  cargadas: cada minuto, el estado de cada ONT, por qué cayó y cuándo, y el
+  tráfico de cada puerto; cada cinco, la potencia que recibe cada ONT, la
+  distancia, las placas y lo que emite cada puerto PON. Con eso funciona todo
+  lo que ya había (resumen y novedades, puertos, ONT, cajas, la señal en el
+  mapa, las fichas) en una red sin panel. "Actualizar" la lee en el momento.
+  Si la OLT deja de contestar, se muestra lo último leído, con el aviso.
+- Una OLT que ya está en el panel puede tener cargada su conexión: sus ONT
+  las sigue dando el panel y de la OLT se lee lo que el panel no informa (lo
+  que emite el módulo de cada puerto PON).
+- Tráfico: bajada y subida de cada puerto PON y de cada puerto de subida,
+  ahora (en *Equipos* y en una columna de *Puertos PON*) y en el tiempo
+  (traza lo anota cada 5 minutos, venga del panel o de la OLT).
+- Historia de cada ONT de una OLT leída directo: traza anota su potencia cada
+  15 minutos (a los ocho días queda una lectura cada seis horas) y sus caídas.
+  Cada ONT dice también cuánta fibra hay hasta la OLT.
+- El aviso de una red sin OLT ofrece agregarla (a quien administra). El
+  comando `integraciones ver` lista también las OLT cargadas (sin su
+  comunidad ni su clave) y `probar` las lee.
+- API: `GET /api/olt` suma `equipos` (con `placas` y `puertos`) y
+  `administra`, y a cada puerto PON `entra`, `sale` y `tx`;
+  `GET /api/olt/ont?red=N&sn=SERIE`, `GET /api/olt/trafico?red=N&olt=&puerto=`,
+  y, solo para quien administra, `POST /api/olt/equipos`,
+  `PUT|DELETE /api/olt/equipos/ID` y `POST /api/olt/equipos/probar`.
+- En `data/olt.db`, dos tablas nuevas (`lecturas` y `trafico`); se crean
+  solas. Volver a 0.11.0: `git checkout 19f6503` y `./instalar.sh` (las OLT
+  cargadas quedan guardadas, sin usarse).
+
 ## 0.11.0 · 13/11/2026 · commit 0e4602e
 
 La OLT de cada red, dentro de traza: tablero con resumen y novedades, puertos

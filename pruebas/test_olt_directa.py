@@ -381,6 +381,7 @@ class OltDirectaTest(unittest.TestCase):
         p["/api/olts/1/chassis"] = lambda q, h: (200, {"olt_id": 1, "boards": (
             [{"slot_id": s, "board_name": None, "status": None, "role": None, "ports": []} for s in range(0, 9)]
             + [{"slot_id": 9, "board_name": "H903MPLA", "status": "Active_normal", "role": "control", "technology": None, "ports": []},
+               {"slot_id": 10, "board_name": None, "status": None, "role": None, "ports": []},
                {"slot_id": 18, "board_name": "H901GPHF", "status": "Normal", "role": "pon", "technology": "gpon",
                 "ports": [{"slot": 18, "port": n, "total": 1 if n == 0 else 0, "online": 1 if n == 0 else 0, "critical": 0, "warning": 0}
                           for n in range(16)]},
@@ -389,6 +390,9 @@ class OltDirectaTest(unittest.TestCase):
             {"id": 40, "if_index": 234954816, "if_name": "ethernet0/9/0", "slot": 9, "port": 0, "speed_mbps": 10000,
              "oper_status": "up", "is_uplink": True, "in_bps": 909000000.0, "out_bps": 54000000.0},
             {"id": 41, "if_index": 234954880, "if_name": "ethernet0/9/1", "slot": 9, "port": 1, "speed_mbps": 0,
+             "oper_status": "notPresent", "is_uplink": True, "in_bps": None, "out_bps": None},
+            # El slot 10 (la placa de control de reserva) está vacío, pero la OLT lista igual sus puertos.
+            {"id": 44, "if_index": 234963008, "if_name": "ethernet0/10/0", "slot": 10, "port": 0, "speed_mbps": 0,
              "oper_status": "notPresent", "is_uplink": True, "in_bps": None, "out_bps": None},
             {"id": 50, "if_index": 4194451456, "if_name": "GPON 0/18/0", "slot": 18, "port": 0, "speed_mbps": 2500,
              "oper_status": "up", "is_uplink": False, "in_bps": 9500000.0, "out_bps": 172000000.0}])
