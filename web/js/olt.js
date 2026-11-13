@@ -207,11 +207,12 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   function detalleOnt(o) {
     const clave = `${redVista}|${o.panel_id}|${horas}`;
     const hay = detalles.get(clave);
-    if (hay) return hay;
-    const entrada = { pidiendo: true };
+    // Lo leído vale cinco minutos (como en el servidor); mientras se vuelve a pedir, se ve lo anterior.
+    if (hay && (hay.pidiendo || hay.error || Date.now() - hay.cuando < 5 * SONDEO_MS)) return hay;
+    const entrada = { ...(hay ?? {}), pidiendo: true };
     detalles.set(clave, entrada);
     api(`api/olt/ont?red=${redVista}&ont=${o.panel_id}&horas=${horas}`, { espera: 40000 }).then(
-      (res) => detalles.set(clave, { datos: res }),
+      (res) => detalles.set(clave, { datos: res, cuando: Date.now() }),
       (err) => {
         detalles.set(clave, { error: err.message });
         setTimeout(() => detalles.delete(clave), 15000); // se puede volver a intentar
@@ -286,11 +287,18 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
       puertos: datos.pon.length, onts: datos.resumen.onts,
     } : {};
     const totalCajas = senal.cajas().resumenes.size;
+    // La cabecera se rehace con cada lectura: el foco queda en el mismo control.
+    const conFoco = cab.contains(document.activeElement) ? document.activeElement : null;
+    const mismo = !conFoco ? null : conFoco.dataset.pestana ? `[data-pestana="${conFoco.dataset.pestana}"]`
+      : conFoco.tagName === 'SELECT' ? 'select' : conFoco.classList.contains('olt-actualizar') ? '.olt-actualizar' : '.ficha-cerrar';
     cab.replaceChildren(
       h('div.olt-titulo', {}, h('small', { text: elegir ? 'OLT de la red' : `OLT · ${nombreRed}` }), elegir, h('strong', { text: titulo })),
       h('div.olt-acciones', {},
         leido ? h(`span.olt-leido${viejo(leido) ? '.alerta' : ''}`, { text: `leída ${haceCuanto(leido)}` }) : null,
-        boton(pidiendo ? 'Leyendo…' : 'Actualizar', () => pedir({ forzar: true }), { class: 'olt-actualizar', disabled: pidiendo }),
+        // Mientras lee no se deshabilita (perdería el foco): avisa que está leyendo y no vuelve a pedir.
+        boton(pidiendo ? 'Leyendo…' : 'Actualizar', () => {
+          if (!pidiendo) pedir({ forzar: true });
+        }, { class: 'olt-actualizar', 'aria-disabled': pidiendo ? 'true' : null }),
         cerrarBtn),
       h('div.olt-pestanas', { role: 'tablist', 'aria-label': 'Partes del tablero', onkeydown: teclaPestana },
         ...PESTANAS.map(([k, texto]) => {
@@ -301,6 +309,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
           }, texto, n ? h('span.olt-cuenta', { text: n }) : null);
         })),
     );
+    if (mismo) cab.querySelector(mismo)?.focus({ preventScroll: true });
   }
 
   function teclaPestana(event) {
@@ -349,12 +358,20 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     else if (pestana === 'resumen') partes.push(...pintarResumen());
     else if (pestana === 'puertos') partes.push(...pintarPuertos());
     else partes.push(...pintarOnts());
+    // Al rehacer por una lectura nueva, el foco queda en el mismo botón (si sigue estando).
+    const enfocables = 'button, select, input, textarea';
+    const conFoco = conservar && cuerpo.contains(document.activeElement) ? document.activeElement : null;
+    const lugar = conFoco ? [...cuerpo.querySelectorAll(enfocables)].indexOf(conFoco) : -1;
     cuerpo.replaceChildren(...partes.filter(Boolean));
     if (pestana === 'onts' && listos && datos.onts) {
       pintarFiltros();
       pintarLista();
     }
     cuerpo.scrollTop = arriba;
+    if (lugar >= 0) {
+      const mismo = cuerpo.querySelectorAll(enfocables)[lugar];
+      if (mismo && mismo.tagName === conFoco.tagName && mismo.textContent === conFoco.textContent) mismo.focus({ preventScroll: true });
+    }
   }
 
   function sinPanel() {
@@ -639,7 +656,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     )];
     if (o.panel_id !== null) {
       const d = detalleOnt(o);
-      if (d.pidiendo) partes.push(h('p.olt-nota', { text: 'Leyendo su historia…' }));
+      if (d.pidiendo && !d.datos) partes.push(h('p.olt-nota', { text: 'Leyendo su historia…' }));
       else if (d.error) partes.push(h('p.olt-nota.alerta', { text: `No se pudo leer su historia: ${d.error}` }));
       else {
         const puntos = d.datos.puntos ?? [];

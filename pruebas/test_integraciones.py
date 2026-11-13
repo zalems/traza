@@ -1276,6 +1276,9 @@ class IntegracionesTest(unittest.TestCase):
         self.assertEqual((por_tipo["senal-critica"][0]["onts"], por_tipo["senal-critica"][0]["clientes"]), ([2], [902]))
         self.assertIn("1 ONT recibe −28,0 dBm o menos", por_tipo["senal-critica"][0]["texto"])
         self.assertEqual([n["nivel"] for n in nov], sorted((n["nivel"] for n in nov), key=["grave", "atencion"].index))
+        # Dentro de lo grave, lo más reciente primero: el PON caído hace 10 minutos, antes que lo de hace una hora.
+        self.assertEqual([(n["tipo"], n.get("interfaz")) for n in nov if n["nivel"] == "grave"],
+                         [("pon-caido", "0/1/1"), ("caida-grupal", "0/1/2"), ("caja-caida", None)])
         # Una lectura vieja del panel va primero.
         nov = api.novedades_olt(onts, pon, nombres, api.iso_de(ahora - 7200), api.UMBRALES)
         self.assertEqual((nov[0]["tipo"], nov[0]["texto"]),

@@ -52,7 +52,7 @@ def forma(texto):
 
 
 def resumir(v, nivel=0):
-    """Una respuesta, achicada: de las listas, el primero y el último; sin secretos ni datos de personas."""
+    """Una respuesta, achicada: de las listas, el primero; sin secretos ni datos de personas."""
     if isinstance(v, dict):
         out = {}
         for k, x in v.items():
@@ -70,15 +70,15 @@ def resumir(v, nivel=0):
                 out[k] = resumir(x, nivel + 1)
         return out
     if isinstance(v, list):
-        if len(v) <= 2:
+        if len(v) <= 1:
             return [resumir(x, nivel + 1) for x in v]
-        return [resumir(v[0], nivel + 1), f"... {len(v)} en total; el último:", resumir(v[-1], nivel + 1)]
+        return [resumir(v[0], nivel + 1), f"... {len(v)} en total"]
     if isinstance(v, str) and len(v) > 80:
         return v[:80] + "…"
     return v
 
 
-def imprimir(dato, limite=1800):
+def imprimir(dato, limite=1300):
     texto = json.dumps(dato, ensure_ascii=False, indent=1, default=str)
     print(texto if len(texto) <= limite else texto[:limite] + "\n…(cortado)")
 

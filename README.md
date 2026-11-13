@@ -562,6 +562,9 @@ potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo, y
 dónde se juntan los recorridos de varios clientes) del visor, y
 `node pruebas/integracion.test.mjs` la medición virtual, la estabilidad y el
 resumen de cada caja (Node 20.19 o más nuevo; el de Debian 13 sirve).
+Las pruebas en navegador (Chromium con Playwright, contra una instalación de
+prueba con un Wispro y un panel falsos) están en `pruebas/navegador/`, con su
+`LEEME.md`: no son para la instalación en uso.
 
 ## Qué se probó y qué no
 

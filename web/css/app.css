@@ -3615,7 +3615,7 @@ button.integ-enlace:hover {
   background: var(--paper-dim);
 }
 
-.olt-actualizar:disabled {
+.olt-actualizar[aria-disabled='true'] {
   border-color: var(--line);
   color: var(--muted);
   cursor: default;

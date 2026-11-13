@@ -2853,7 +2853,7 @@ def resumen_onts(onts: list) -> dict:
 
 
 def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, historia=None, red_id=None) -> list:
-    """Lo que hay para mirar ahora, de lo más grave a lo menos: la lectura vieja del
+    """Lo que hay para mirar ahora, de lo más grave a lo menos y de lo más nuevo a lo más viejo: la lectura vieja del
     panel, un PON sin ninguna ONT en línea, ONT de un PON que cayeron juntas, una
     caja con todos sus clientes sin señal, ONT con señal crítica y un PON que
     perdió potencia respecto de antes (con el historial propio)."""
@@ -2948,8 +2948,9 @@ def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, his
                                 "texto": f"PON {p['interfaz']}: la potencia promedio bajó {db_texto(rx_antes - p['rx_prom'])} dB "
                                          f"{cuando} (de {db_texto(rx_antes)} a {db_texto(p['rx_prom'])} dBm)"})
                 break
+    # Primero lo grave y, dentro de cada grupo, lo más reciente (la lectura vieja, antes que todo).
     orden = {"grave": 0, "atencion": 1}
-    out.sort(key=lambda n: orden.get(n["nivel"], 2))
+    out.sort(key=lambda n: (orden.get(n["nivel"], 2), n["tipo"] != "lectura-vieja", -(momento(n.get("desde")) or 0)))
     return out
 
 

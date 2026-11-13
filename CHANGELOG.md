@@ -45,6 +45,8 @@ PON, ONT, cajas con potencia promedio y bocas libres, e historial propio.
   muestra la forma de cada respuesta de lectura (sin llamar nada que cambie
   algo ni que lea la OLT en el momento), para sumar lo que falta: potencia de
   salida de cada puerto (SFP), placas, uplinks y tráfico.
+- Las pruebas en navegador quedan en el repositorio (`pruebas/navegador/`),
+  con el Wispro y el panel falsos y los datos de prueba.
 
 ## 0.10.0 · 31/10/2026 · commit 4236289
 
