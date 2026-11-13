@@ -105,6 +105,15 @@ export function grafico({ series, desde, hasta, umbrales = [], formato = String,
     h('div.grafico-eje', { 'aria-hidden': 'true' }, ...eje));
 }
 
+// Cómo llama el panel a lo que le pasa a una ONT, en castellano (lo que no se reconoce va como viene).
+function nombreEvento(tipo) {
+  const t = String(tipo ?? '').toLowerCase();
+  if (t === 'appeared') return 'apareció en la OLT';
+  if (/offline|down|\blos\b|lost|gasp|fail|ca[ií]da/.test(t)) return 'se cayó';
+  if (/online|\bup\b|recover|volvi/.test(t)) return 'volvió';
+  return tipo;
+}
+
 function leerPestana() {
   try {
     const v = localStorage.getItem(CLAVE_PESTANA);
@@ -131,6 +140,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   let filtro = { texto: '', estado: 'todas', pon: '', orden: 'puerto', grupo: null, mostradas: PAGINA };
   let filtroCajas = { ver: 'todas', orden: 'nombre' };
   let textoCopia = null;
+  let apagados = []; // lo que queda detrás del tablero mientras está abierto (sin foco ni toques)
 
   const cab = h('header.olt-cab');
   const cuerpo = h('div.olt-cuerpo', { tabindex: '-1' });
@@ -617,8 +627,10 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     const caja = o.caja !== undefined ? elemento(o.caja) : null;
     const partes = [h('dl.olt-datos', {},
       dato('Estado', o.nivel === 'caida' ? `sin señal${o.ultima_caida ? ` desde el ${fechaHora(tiempo(o.ultima_caida))}` : ''}${o.causa ? ` · la OLT dice: ${o.causa}` : ''}` : 'en línea'),
-      dato('Recibe', o.rx === null ? null : `${dbTexto(o.rx, 2)} dBm · ${NIVEL_ONT[o.nivel] ?? ''}`),
-      dato('Emite', o.tx === null ? null : `${dbTexto(o.tx, 2)} dBm`),
+      // Una ONT caída puede conservar lo último que se le leyó: no es lo que recibe ahora.
+      o.nivel === 'caida' ? dato('Recibía', o.rx === null ? null : `${dbTexto(o.rx, 2)} dBm (lo último que se leyó)`)
+        : dato('Recibe', o.rx === null ? null : `${dbTexto(o.rx, 2)} dBm · ${NIVEL_ONT[o.nivel] ?? ''}`),
+      dato('Emite', o.tx === null || o.nivel === 'caida' ? null : `${dbTexto(o.tx, 2)} dBm`),
       dato('Puerto', `${o.interfaz ?? '?'}, ONT ${o.ont_id ?? '?'}${datos.olts.length > 1 ? ` · ${o.olt}` : ''}`),
       dato('N.º de serie', o.sn),
       dato('Contrato', o.contrato !== undefined && o.contrato !== null ? `#${o.contrato}${o.titular ? ` · ${o.titular}` : ''}` : null),
@@ -649,7 +661,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
         if (eventos.length) {
           partes.push(h('h4', { text: 'Lo último que le pasó' }), h('ul.olt-eventos', {}, ...eventos.map((e) => h('li', {},
             h('time', { text: tiempo(e.cuando) === null ? '' : fechaHora(tiempo(e.cuando)) }),
-            h('span', { text: [{ offline: 'se cayó', online: 'volvió', appeared: 'apareció en la OLT' }[e.tipo] ?? e.tipo, e.causa].filter(Boolean).join(' · ') })))));
+            h('span', { text: [nombreEvento(e.tipo), e.causa].filter(Boolean).join(' · ') })))));
         }
       }
     }
@@ -780,7 +792,10 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   function abrir(cual = null) {
     const lista = redes();
     const actual = acciones.redActual();
-    if (!actual) return;
+    if (!actual) {
+      toast?.('Primero elegí una red');
+      return;
+    }
     volverA = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (cual && PESTANAS.some(([k]) => k === cual)) pestana = cual;
     const nueva = actual.todas ? (lista.some((r) => r.id === redVista) ? redVista : lista[0]?.id ?? null) : actual.id;
@@ -796,6 +811,8 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     textoCopia = null;
     root.hidden = false;
     document.body.classList.add('con-olt');
+    apagados = [...document.body.children].filter((el) => el !== root && el.id !== 'toast' && !el.inert && el.tagName !== 'SCRIPT');
+    for (const el of apagados) el.inert = true;
     pintar();
     pedir();
     clearInterval(sondeo);
@@ -814,6 +831,8 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     turno += 1;
     pidiendo = false;
     cuerpo.replaceChildren();
+    for (const el of apagados) el.inert = false;
+    apagados = [];
     if (devolverFoco && volverA?.isConnected) volverA.focus({ preventScroll: true });
     volverA = null;
   }

@@ -109,7 +109,40 @@ se consultan recién cuando alguien las elige.
   llega la luz y con cuánto. El tráfico sale del estado de cada ONT en el
   panel de la OLT (se pide una vez por minuto); los Mbps de cada fibra no,
   porque el panel no los mide por ONT. En el teléfono la leyenda arranca
-  plegada en una línea; se despliega tocándola.
+  plegada en una línea; se despliega tocándola. Con la señal prendida, cada
+  NAP lleva un anillo del color de cómo reciben sus clientes (verde: bien;
+  naranja: para mirar; rojo: señal baja; rojo oscuro: toda la caja sin señal)
+  y, de cerca, la potencia promedio y las bocas libres ("−21,3 · 5 libres").
+- **La OLT.** El botón de debajo del de la señal abre el tablero de la OLT de
+  la red, con lo que el panel leyó de ella (solo lee; no cambia nada en la
+  OLT). *Resumen*: cuántas ONT hay, cuántas en línea, cuántas sin señal y por
+  qué (sin luz o sin energía), cuántas con señal baja y cuántas no tienen su
+  cliente en el mapa; "Para mirar ahora" avisa un puerto PON sin ninguna ONT
+  en línea, las ONT de un puerto que cayeron juntas (y si son de una misma
+  caja), una caja con todos sus clientes sin señal, las ONT al límite y un
+  puerto que perdió 1 dB o más respecto de la semana pasada. Si los clientes
+  caídos tienen su recorrido dibujado, dice dónde se juntan: el corte está
+  ahí o antes ("todas cuelgan de BOT-12 y abajo no queda nadie más: el corte
+  está en BOT-12 o en el cable que le llega"), con un toque para verlo en el
+  mapa. Debajo, la curva de ONT en línea (24 horas, 7 o 30 días) y lo que
+  cayó y volvió en los últimos dos días, con su hora. *Puertos PON*: por
+  puerto, cuántas ONT tiene, cuántas en línea y sin señal (y la causa), la
+  potencia promedio que reciben y la peor, con la historia de cada puerto.
+  *ONT*: todas, para buscar por nombre, número de serie, contrato, puerto o
+  caja, filtrar (en línea, sin señal, señal baja, sin cliente en el mapa) y
+  ordenar (la peor señal primero, lo último que cayó primero); tocando una se
+  ve su estado, lo que recibe y emite, su contrato y su caja, la curva de su
+  potencia con la tendencia, sus eventos, y se salta a su cliente o a su caja
+  en el mapa. *Cajas*: todas las NAP con sus bocas libres, cuántos clientes
+  tienen en línea, la potencia promedio y la peor; se filtran (con bocas
+  libres, para revisar, sin señal), se ordenan y la lista se copia para
+  mandarla. Las bocas y los clientes de cada caja salen de Wispro; sin
+  Wispro, de la carta (las salidas del splitter y las bajadas). La ficha de
+  cada NAP dice lo mismo: bocas libres y cómo reciben sus clientes. En "todas
+  las redes" se elige de qué red se mira la OLT. traza anota cada 5 minutos
+  cómo está cada puerto (ONT en línea, potencia promedio y peor) y qué ONT
+  cayó o volvió: de ahí salen las curvas y los avisos de pérdida de potencia;
+  la curva de cada ONT la guarda el panel.
 - **Wispro y la OLT.** Si la red está conectada (ver más abajo), la ficha de
   cada NAP la busca en Wispro por el nombre ("P5-C4" y "P5C4" son la misma);
   si no la encuentra, ofrece las NAPs de Wispro más cercanas para elegir.
@@ -281,9 +314,19 @@ ONTs) y puede pedir mediciones en vivo; un usuario que no tiene asignada la
 red no ve nada de ella. Para alojar a varias empresas en una instalación, cada
 una va en su red, con sus usuarios asignados a esa red (ver Usuarios).
 
+El tablero de la OLT usa esa misma conexión: muestra la OLT (o las OLT) que
+se indicó para la red, y nunca las de otra red aunque estén en el mismo
+panel. Su historial propio va en `/srv/ftth/data/olt.db` (sin nombres: solo
+números de serie, puertos y cuentas): se anota cada 5 minutos, a los ocho
+días queda una anotación por hora y se guarda poco más de un año. Entra en
+la copia diaria.
+
 Para ver cómo responden Wispro y el panel, sin guardar nada y sin mostrar
 claves ni datos de los clientes:
-`python3 herramientas/muestras-olt-wispro.py`. Para ver cómo están las
+`python3 herramientas/muestras-olt-wispro.py`. Para ver todo lo que entrega
+el panel (todas sus rutas y la forma de cada respuesta de lectura: placas,
+puertos, uplinks, tráfico), sin llamar nada que cambie algo ni que lea la
+OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para ver cómo están las
 ubicaciones de las NAPs y de los contratos en Wispro, por OLT (solo cuentas y
 distancias): `python3 herramientas/ubicaciones-wispro.py RED` (el número de la
 red).
@@ -351,6 +394,7 @@ pasar por un usuario.
   api/ftth-api.py                        API de la red (Python, sin dependencias)
   data/ftth.db                           usuarios y sesiones (SQLite)
   data/red.db                            redes, elementos, cables, cartas de empalme e historial (SQLite)
+  data/olt.db                            lo que traza anota de la OLT de cada red cada 5 minutos (SQLite)
   data/api.secreto                       clave entre nginx y la API
   data/integraciones.json                Wispro y el panel de la OLT de cada red (con el token; solo el usuario ftth)
   bin/usuarios                           administración de usuarios
@@ -378,7 +422,9 @@ la API, el script copia la red en `/root/respaldos-ftth/FECHA-antes-de-VERSIÓN/
 una API nueva puede actualizar la estructura de la base, y una API vieja no
 abre una base nueva; para volver atrás del todo se restaura esa copia.
 
-**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.10.0 a
+**Volver a una versión anterior.** `--volver` vuelve solo el visor. De 0.11.0 a
+0.10.0 alcanza con `git checkout 986b241` e instalar (mismas bases; el
+historial de la OLT, `olt.db`, queda sin usarse y se puede borrar). De 0.10.0 a
 0.9.1 alcanza con `git checkout e76e818` e instalar (mismas bases). De 0.9.1 a
 0.9.0 alcanza con `git checkout 0903002` e instalar (mismas bases). De 0.9.0 a
 0.8.0 alcanza con `git checkout db29936` e instalar (mismas bases; solo cambian
@@ -420,7 +466,8 @@ Las copias con etiqueta (las de antes de actualizar) no se borran solas.
 minutos de margen al azar) y quedan las últimas 30 en `/root/respaldos-ftth/`
 (otra cantidad: `FTTH_RESPALDOS=60 ./instalar.sh …`). A mano:
 `sudo /srv/ftth/bin/respaldo`. Cada copia es coherente aunque haya gente
-cargando: los usuarios (`ftth.db`), la red (`red.db`), los ajustes y la
+cargando: los usuarios (`ftth.db`), la red (`red.db`), el historial de la OLT
+(`olt.db`), los ajustes y la
 conexión con Wispro y el panel (`integraciones.json`, con el token). La
 réplica del contenedor a otro nodo no reemplaza estas copias (replica también
 lo que se borra), y conviene llevarlas además fuera del servidor. Para
@@ -507,11 +554,14 @@ contratos y cómo se cruza cada uno con los clientes del mapa, ONTs por número
 de serie o por el número de contrato de su descripción, mediciones en vivo,
 fallas y plazos, agregar dos veces a la vez, traer toda la red de Wispro,
 deshacerlo y traerla dos veces a la vez, elegir sus OLT y quitar lo de la que
-no se usa, NAPs amontonadas, el estado de las ONT para la señal, el comando
-`integraciones`).
+no se usa, NAPs amontonadas, el estado de las ONT para la señal, las cajas
+con sus lecturas, el tablero de la OLT con sus novedades y su historial, el
+comando `integraciones`).
 `node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos,
-potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo) del visor, y `node pruebas/integracion.test.mjs` la medición
-virtual y la estabilidad (Node 20.19 o más nuevo; el de Debian 13 sirve).
+potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo, y
+dónde se juntan los recorridos de varios clientes) del visor, y
+`node pruebas/integracion.test.mjs` la medición virtual, la estabilidad y el
+resumen de cada caja (Node 20.19 o más nuevo; el de Debian 13 sirve).
 
 ## Qué se probó y qué no
 
@@ -559,7 +609,21 @@ base de usuarios real del sandbox. La 0.7.1 salió de traerla en la red real:
 nueva) y una caja dibujada a mano apartaba todas las de alrededor; se probó
 con un Wispro falso que repite esos casos.
 
+El tablero de la OLT (0.11.0) se probó contra un panel falso con cinco
+puertos PON y 66 ONT (un puerto caído, una caja caída entera, señal al
+límite, ONT sin contrato, la OLT de otra empresa en el mismo panel), en las
+pruebas de la API y en Chromium (escritorio, 390 × 844 y modo oscuro), con
+1600 ONT para los tiempos (leer y resumir, unos 15 ms) y con la
+actualización desde 0.10.0. Del panel real usa lo que ya usaban las fichas
+(la lista de ONT, la serie y los eventos de cada una y los umbrales); la
+forma de los puntos de la serie no estaba en las muestras, así que traza
+acepta varias (si no entiende ninguna, muestra la tendencia sin la curva).
+
 No se pudo probar, y hay que mirarlo en el uso real:
+
+- El tablero de la OLT con el panel real: los textos de las causas de caída
+  (traza reconoce LOS, LOF y dying gasp; lo demás va como "sin causa") y la
+  curva de cada ONT.
 
 - Teléfonos reales, Safari y Firefox (en especial arrastrar y pellizcar en
   la carta en modo libre).

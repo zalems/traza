@@ -1339,7 +1339,8 @@ class IntegracionesTest(unittest.TestCase):
             c.execute("INSERT INTO muestras VALUES (7, '', '', ?, 6, 6, -20, -25)", (base + i * 300,))
         c.execute("INSERT INTO muestras VALUES (7, '', '', ?, 6, 6, -20, -25)", (ahora - 500 * 86400,))
         c.execute("INSERT INTO eventos (red, t, sn, tipo) VALUES (7, ?, 'X', 'cae')", (ahora - 500 * 86400,))
-        self.assertEqual(h.podar(), 13)
+        self.assertEqual(h.podar(), 2)  # lo muy viejo se va siempre; lo de hace 20 días ya se había mirado
+        self.assertEqual(h.podar(todo=True), 11)
         self.assertEqual([r[0] for r in c.execute("SELECT t FROM muestras WHERE red = 7 AND pon = '' AND t < ? ORDER BY t", (ahora - 86400 * 9,))], [base])
         self.assertEqual(h.desde(7)["muestras"], 5)
         # Por la API: la pasada anota las redes con panel, y el tablero trae lo reciente.

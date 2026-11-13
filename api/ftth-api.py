@@ -4026,19 +4026,23 @@ class HistoriaOlt:
                                 (red_id,)).fetchone()
         return {"desde": iso_de(r["t"]) if r["t"] is not None else None, "muestras": r["n"], "cada_s": MUESTREO_S}
 
-    def podar(self, ahora: float = None) -> int:
-        """Lo de más de GUARDA_FINA_DIAS queda con una anotación por hora; lo de más de GUARDA_DIAS se borra."""
+    def podar(self, ahora: float = None, todo: bool = False) -> int:
+        """Lo de más de GUARDA_FINA_DIAS queda con una anotación por hora; lo de más
+        de GUARDA_DIAS se borra. Se corre un par de veces por día: alcanza con mirar
+        lo que pasó ese límite en la última semana (todo=True revisa todo)."""
         ahora = time.time() if ahora is None else ahora
         fino, viejo = int(ahora - GUARDA_FINA_DIAS * 86400), int(ahora - GUARDA_DIAS * 86400)
+        desde = 0 if todo else fino - 7 * 86400
         with self._candado:
             c = self.conn()
             c.execute("BEGIN IMMEDIATE")
             try:
                 n = c.execute("DELETE FROM muestras WHERE t < ?", (viejo,)).rowcount
                 n += c.execute(
-                    "DELETE FROM muestras WHERE t < :f AND t > (SELECT MIN(m.t) FROM muestras m WHERE m.red = muestras.red "
-                    "AND m.olt = muestras.olt AND m.pon = muestras.pon AND m.t >= muestras.t / 3600 * 3600 "
-                    "AND m.t < muestras.t / 3600 * 3600 + 3600)", {"f": fino}).rowcount
+                    "DELETE FROM muestras WHERE t < :f AND t >= :d AND t > (SELECT MIN(m.t) FROM muestras m "
+                    "WHERE m.red = muestras.red AND m.olt = muestras.olt AND m.pon = muestras.pon "
+                    "AND m.t >= muestras.t / 3600 * 3600 AND m.t < muestras.t / 3600 * 3600 + 3600)",
+                    {"f": fino, "d": desde}).rowcount
                 n += c.execute("DELETE FROM eventos WHERE t < ?", (viejo,)).rowcount
                 c.execute("COMMIT")
             except Exception:
@@ -4065,15 +4069,15 @@ def anotar_olts(integ, store, historia) -> int:
 
 def muestreo(integ, store, historia, parar: threading.Event):
     """El hilo que anota cada MUESTREO_S (la primera vez, a poco de arrancar)."""
-    ultima_poda = 0.0
+    ultima_poda = None
     espera = 20
     while not parar.wait(espera):
         espera = MUESTREO_S
         try:
             anotar_olts(integ, store, historia)
-            if time.time() - ultima_poda > 12 * 3600:
+            if ultima_poda is None or time.time() - ultima_poda > 12 * 3600:
+                historia.podar(todo=ultima_poda is None)  # al arrancar, todo (pudo estar apagado unos días)
                 ultima_poda = time.time()
-                historia.podar()
         except Exception:  # noqa: BLE001 - el historial no tiene que voltear la API
             log.exception("no se pudo anotar el historial de la OLT")
         finally:
