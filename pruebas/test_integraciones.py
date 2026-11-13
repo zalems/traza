@@ -1205,7 +1205,8 @@ class IntegracionesTest(unittest.TestCase):
         self.assertEqual((por_id[6]["cliente"], por_id[6].get("contrato"), por_id[5].get("cliente")), (b["id"], None, None))
         sin, _ = self.red_con_caja("Tablero C")
         self.configurar(sin, panel=False)
-        self.assertEqual(self.ok("GET", f"/api/olt?red={sin}"), {"configurada": {"wispro": True, "panel": False}, "errores": []})
+        self.assertEqual(self.ok("GET", f"/api/olt?red={sin}"), {"configurada": {"wispro": True, "panel": False}, "errores": [],
+                                                                 "administra": True, "equipos": []})
         self.assertEqual(self.pedir("GET", f"/api/olt/ont?red={sin}&ont=5")[0], 404)
         self.assertEqual(self.pedir("GET", "/api/olt?red=todas")[0], 400)
         self.assertEqual(self.pedir_como(f"/api/olt?red={red}", str(otra)), 403)
@@ -1282,7 +1283,7 @@ class IntegracionesTest(unittest.TestCase):
         # Una lectura vieja del panel va primero.
         nov = api.novedades_olt(onts, pon, nombres, api.iso_de(ahora - 7200), api.UMBRALES)
         self.assertEqual((nov[0]["tipo"], nov[0]["texto"]),
-                         ("lectura-vieja", "El panel leyó la OLT por última vez hace 2 h: lo que se ve puede haber cambiado."))
+                         ("lectura-vieja", "La OLT se leyó por última vez hace 2 h: lo que se ve puede haber cambiado."))
 
     def test_historial_de_la_olt(self):
         h = api.HistoriaOlt(os.path.join(self.tmp.name, "olt-prueba.db"))

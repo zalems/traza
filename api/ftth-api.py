@@ -95,9 +95,12 @@ import logging
 import math
 import os
 import re
+import secrets
+import shutil
 import socket
 import sqlite3
 import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2269,6 +2272,16 @@ class Panel:
         data = self.get("/api/thresholds")
         return data if isinstance(data, dict) else None
 
+    def chasis(self, olt_id: int):
+        """Las placas de una OLT, slot por slot, con los puertos de las de PON."""
+        data = self.get(f"/api/olts/{olt_id}/chassis")
+        return data if isinstance(data, dict) else None
+
+    def interfaces(self, olt_id: int):
+        """Los puertos de una OLT (PON y de subida) con su estado y lo que pasa por cada uno."""
+        data = self.get(f"/api/olts/{olt_id}/interfaces")
+        return data if isinstance(data, list) else None
+
 
 def medida_panel(ont: dict, olt_nombre=None) -> dict:
     """Lo que el panel sabe de una ONT, como lo usa traza."""
@@ -2291,6 +2304,7 @@ def medida_panel(ont: dict, olt_nombre=None) -> dict:
         "causa": texto_corto(ont.get("last_down_cause"), 60),
         "tecnologia": texto_corto(ont.get("technology"), 40),
         "descripcion": texto_corto(ont.get("description"), 120),
+        "distancia": numero(ont.get("distance_m")),
     }
 
 
@@ -2435,34 +2449,39 @@ class DatosWispro:
 
 
 class DatosPanel:
-    """Una lectura de las ONTs del panel, con índices por número de serie y por
-    el número de contrato de su descripción."""
+    """Una lectura de las ONTs de las OLT de una red (las del panel y las que se
+    leen directo), con índices por número de serie y por el número de contrato
+    de su descripción. fuentes: de dónde salió cada OLT, con sus placas (para
+    dibujar el chasis); avisos: lo que no se pudo leer de alguna."""
 
-    def __init__(self, olts: list, onts_por_olt: dict, umbrales):
+    def __init__(self, olts: list, onts_por_olt: dict, umbrales, fuentes=None, directas=(), avisos=()):
         self.cuando = now_iso()
         nombres = {o.get("id"): o.get("name") for o in olts}
         self.olts = [texto_corto(nombres.get(i), 80) or f"OLT {i}" for i in onts_por_olt]
+        self.olts += [nombre for nombre, _ in directas]
         self.umbrales = umbrales
+        self.fuentes = list(fuentes or [])
+        self.avisos = list(avisos)
         por_sn, self.por_numero = {}, {}
         leidas, sin_sn = [], []
-        for olt_id, onts in onts_por_olt.items():
-            for ont in onts:
-                m = medida_panel(ont, nombres.get(olt_id))
-                if m["sn"]:
-                    por_sn.setdefault(m["sn"], []).append(m)
-                else:
-                    sin_sn.append(m)
-                n = numero_de_descripcion(ont.get("description"))
-                if n is not None:
-                    self.por_numero.setdefault(n, []).append(m)
-                if m["cuando"]:
-                    leidas.append(m["cuando"])
+        medidas = [medida_panel(ont, nombres.get(olt_id)) for olt_id, onts in onts_por_olt.items() for ont in onts]
+        medidas += [m for _, suyas in directas for m in suyas]
+        for m in medidas:
+            if m["sn"]:
+                por_sn.setdefault(m["sn"], []).append(m)
+            else:
+                sin_sn.append(m)
+            n = numero_de_descripcion(m["descripcion"])
+            if n is not None:
+                self.por_numero.setdefault(n, []).append(m)
+            if m["cuando"]:
+                leidas.append(m["cuando"])
         # Un número de serie repetido (un registro viejo que quedó al mover la ONT de
         # puerto): vale el que está en línea o, si no, el visto último.
         self.por_sn = {sn: max(lista, key=lambda m: (m["estado"] == "online", m["cuando"] or ""))
                        for sn, lista in por_sn.items()}
         self.leido = max(leidas) if leidas else None
-        self.total = sum(len(v) for v in onts_por_olt.values())
+        self.total = len(medidas)
         # Todas las ONT de la red, una vez cada una (para el tablero de la OLT).
         self.onts = list(self.por_sn.values()) + sin_sn
         self.por_id = {m["panel_id"]: m for m in self.onts if m["panel_id"] is not None}
@@ -2860,7 +2879,9 @@ def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, his
     out = []
 
     def refs(lista) -> dict:
+        # Las ONT del panel van por su número en el panel; las leídas directo, por su número de serie.
         return {"cantidad": len(lista), "onts": [o["panel_id"] for o in lista if o["panel_id"] is not None][:MAX_REFS],
+                "sns": [o["sn"] for o in lista if o["panel_id"] is None and o["sn"]][:MAX_REFS],
                 "clientes": [o["cliente"] for o in lista if o.get("cliente") is not None][:MAX_REFS]}
 
     def motivo_mayor(lista):
@@ -2871,7 +2892,7 @@ def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, his
     horas = horas_desde(leido) if leido else None
     if horas is not None and horas > VIEJO_PANEL_H:
         out.append({"tipo": "lectura-vieja", "nivel": "grave", "desde": leido,
-                    "texto": f"El panel leyó la OLT por última vez {hace_texto(leido)}: lo que se ve puede haber cambiado."})
+                    "texto": f"La OLT se leyó por última vez {hace_texto(leido)}: lo que se ve puede haber cambiado."})
     por_pon, por_caja = {}, {}
     for o in onts:
         por_pon.setdefault((o["olt"], o["interfaz"]), []).append(o)
@@ -2954,6 +2975,950 @@ def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, his
     return out
 
 
+# ------------------------------------------------------- la OLT, leída directo
+#
+# Además del panel, traza puede leer una OLT por su cuenta, por SNMP v2c (GET y
+# GETBULK: no cambia nada en ella). Sirve para las redes que no tienen panel (se
+# llega a su OLT por una IP pública) y para lo que el panel no entrega (la
+# potencia que emite cada puerto PON). Los equipos de cada red se cargan desde el
+# visor (quien administra) y quedan en integraciones.json:
+#   {"redes": {"2": {"olts": [{"id": "9f3a1c0b", "nombre": "OLT Centro", "modelo": "EA5800-X2",
+#       "host": "203.0.113.20", "snmp": {"puerto": 161, "community": "…"},
+#       "consola": {"protocolo": "ssh", "puerto": 22, "usuario": "…", "clave": "…"},
+#       "utc": -180, "panel": null, "leer": true}]}}}
+# La comunidad y la clave entran por el visor y no vuelven a salir del servidor.
+# Por ahora se leen OLT Huawei (MA5800 y EA5800), con las tablas de HUAWEI-XPON-MIB.
+
+MODELOS_OLT = ("MA5800-X17", "MA5800-X15", "MA5800-X7", "MA5800-X2", "EA5800-X17", "EA5800-X15", "EA5800-X7", "EA5800-X2")
+HOST_VALIDO = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.\-:]*[A-Za-z0-9])?")
+MAX_OLTS_RED = 16
+UTC_OLT = -180  # minutos: la hora del reloj de la OLT respecto de UTC, si no se indica (Argentina)
+LECTURA_S = 60  # cada cuánto se lee el estado de las ONT de una OLT directa
+OPTICA_S = 300  # cada cuánto, su potencia, las placas y la óptica de los puertos
+PLAZO_LECTURA = 240  # s: una lectura no espera más que esto
+VIEJA_LECTURA_S = 6 * 3600  # una lectura directa de hace más de esto ya no se muestra
+LECTURAS_S = 900  # el historial de la potencia de cada ONT leída directo: un punto cada tanto
+SNMP_SIN_DATO = 2147483647  # lo que Huawei devuelve cuando no hay lectura
+
+SYS_DESCR, SYS_ENCENDIDA, SYS_NOMBRE = "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.3.0", "1.3.6.1.2.1.1.5.0"
+IF_ESTADO = "1.3.6.1.2.1.2.2.1.8"  # IF-MIB ifOperStatus
+IF_NOMBRE = "1.3.6.1.2.1.31.1.1.1.1"  # ifName: 'GPON 0/18/3', 'ethernet0/9/0'
+IF_ENTRA = "1.3.6.1.2.1.31.1.1.1.6"  # ifHCInOctets
+IF_SALE = "1.3.6.1.2.1.31.1.1.1.10"  # ifHCOutOctets
+IF_VELOCIDAD = "1.3.6.1.2.1.31.1.1.1.15"  # ifHighSpeed (Mb/s)
+HW_SLOT = "1.3.6.1.4.1.2011.6.3.3.2.1"  # HUAWEI-DEVICE-MIB hwSlotTable (marco.slot): 3 descripción, 8 estado, 21 placa
+HW_XPON = "1.3.6.1.4.1.2011.6.128.1.1.2"  # HUAWEI-XPON-MIB
+HW_PON_OPTICA = HW_XPON + ".23.1"  # hwGponOltOpticsDdmInfoTable (ifIndex): 1 °C, 2 tensión (0,01 V), 3 corriente (mA), 4 emite (0,01 dBm)
+HW_ONT_CONFIG = HW_XPON + ".43.1"  # hwGponDeviceOntConfigInfoTable (ifIndex.ONT): 3 serie, 9 descripción
+HW_ONT_CONTROL = HW_XPON + ".46.1"  # hwGponDeviceOntControlInfoTable: 15 estado (1 en línea), 20 distancia (m), 23 última caída, 24 causa
+HW_ONT_OPTICA = HW_XPON + ".51.1"  # hwGponDeviceOntOpticalDdmInfoTable: 4 recibe (0,01 dBm)
+CAUSAS_HUAWEI = {1: "LOS", 2: "LOSi/LOBi", 3: "LOFi", 4: "SFi", 5: "LOAi", 6: "LOAMi", 7: "deactive ONT fails",
+                 8: "deactive ONT success", 9: "reset ONT", 10: "re-register ONT", 11: "pop up fail", 13: "dying-gasp",
+                 15: "LOKi", 18: "deactived ONT due to the ring", 30: "shut down ONT optical module",
+                 31: "reset ONT by ONT command", 32: "reset ONT by ONT reset button", 33: "reset ONT by ONT software",
+                 34: "deactived ONT due to broadcast attack", 35: "operator check fail", 37: "a rogue ONT detected by itself"}
+ESTADOS_SLOT = {2: "normal", 3: "falla", 5: "sin-confirmar", 7: "ausente", 8: "falla", 9: "falla", 13: "apagada",
+                14: "apagada", 15: "apagada", 16: "apagada", 17: "no-coincide", 18: "apagada", 19: "apagada"}
+ESTADOS_IF = {1: "up", 2: "down", 6: "ausente"}
+NOMBRE_PUERTO = re.compile(r"\s*([A-Za-z][A-Za-z0-9\-_ ]*?)\s*(\d{1,2})/(\d{1,2})/(\d{1,3})\s*")
+NOMBRE_PLACA = re.compile(r"H\d{3}[A-Z0-9]{4,5}")
+
+
+def ber_largo(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    cuerpo = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(cuerpo)]) + cuerpo
+
+
+def ber_tlv(tipo: int, contenido: bytes) -> bytes:
+    return bytes([tipo]) + ber_largo(len(contenido)) + contenido
+
+
+def ber_entero(n: int) -> bytes:
+    return ber_tlv(0x02, n.to_bytes(n.bit_length() // 8 + 1, "big", signed=True))
+
+
+def ber_oid(texto: str) -> bytes:
+    partes = [int(x) for x in texto.strip(".").split(".")]
+    out = bytearray([partes[0] * 40 + partes[1]])
+    for p in partes[2:]:
+        trozo = [p & 0x7F]
+        p >>= 7
+        while p:
+            trozo.append(0x80 | (p & 0x7F))
+            p >>= 7
+        out.extend(reversed(trozo))
+    return ber_tlv(0x06, bytes(out))
+
+
+def ber_leer(data: bytes, pos: int):
+    """Un elemento BER: (tipo, contenido, posición siguiente)."""
+    tipo = data[pos]
+    largo = data[pos + 1]
+    pos += 2
+    if largo & 0x80:
+        n = largo & 0x7F
+        largo = int.from_bytes(data[pos:pos + n], "big")
+        pos += n
+    if pos + largo > len(data):
+        raise ValueError("respuesta cortada")
+    return tipo, data[pos:pos + largo], pos + largo
+
+
+def ber_oid_texto(contenido: bytes) -> str:
+    partes = [contenido[0] // 40, contenido[0] % 40]
+    n = 0
+    for b in contenido[1:]:
+        n = (n << 7) | (b & 0x7F)
+        if not b & 0x80:
+            partes.append(n)
+            n = 0
+    return ".".join(map(str, partes))
+
+
+def snmp_valor(tipo: int, contenido: bytes):
+    """El valor de un enlace SNMP: entero, texto (o hexadecimal, si no se puede leer) o None."""
+    if tipo == 0x02:
+        return int.from_bytes(contenido, "big", signed=True)
+    if tipo in (0x41, 0x42, 0x43, 0x46, 0x47):  # Counter32, Gauge32, TimeTicks, Counter64, Unsigned32
+        return int.from_bytes(contenido, "big")
+    if tipo == 0x04:
+        try:
+            texto = contenido.decode("utf-8")
+        except UnicodeDecodeError:
+            return contenido.hex()
+        return texto if not texto or texto.isprintable() else contenido.hex()
+    if tipo == 0x06:
+        return ber_oid_texto(contenido) if contenido else None
+    if tipo == 0x40:
+        return ".".join(str(b) for b in contenido)
+    return None  # NULL, noSuchObject (0x80), noSuchInstance (0x81), endOfMibView (0x82)
+
+
+class Snmp:
+    """Un cliente mínimo de SNMP v2c, solo para leer (GET y GETBULK). `plazo`:
+    cuántos segundos puede durar todo lo que se pida con él."""
+
+    def __init__(self, host: str, puerto: int, community: str, espera: float = 3.0, intentos: int = 2, plazo: float = None):
+        try:
+            familia, tipo, proto, _, destino = socket.getaddrinfo(host, puerto, type=socket.SOCK_DGRAM)[0]
+        except (OSError, UnicodeError):
+            raise IntegracionError("no se encontró su dirección") from None
+        self.sock = socket.socket(familia, tipo, proto)
+        try:
+            self.sock.connect(destino)
+        except OSError as err:
+            self.sock.close()
+            raise IntegracionError(motivo_de(err)) from None
+        self.espera, self.intentos = espera, intentos
+        self.community = community.encode("utf-8", "replace")
+        self.pedido = int.from_bytes(os.urandom(3), "big")
+        self.pedidos = 0
+        self.fin = time.monotonic() + plazo if plazo else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.cerrar()
+
+    def cerrar(self):
+        self.sock.close()
+
+    def desde(self) -> str:
+        """La dirección de este servidor con la que se sale hacia la OLT."""
+        try:
+            return self.sock.getsockname()[0]
+        except OSError:
+            return ""
+
+    def _respuesta(self, data: bytes):
+        """Los enlaces de la respuesta al último pedido; None si `data` no lo es."""
+        try:
+            _, cuerpo, _ = ber_leer(data, 0)
+            _, _, pos = ber_leer(cuerpo, 0)  # versión
+            _, _, pos = ber_leer(cuerpo, pos)  # comunidad
+            tipo, pdu, _ = ber_leer(cuerpo, pos)
+            _, rid, pos = ber_leer(pdu, 0)
+            if tipo != 0xA2 or int.from_bytes(rid, "big", signed=True) != self.pedido:
+                return None  # una respuesta vieja
+            _, estado, pos = ber_leer(pdu, pos)
+            _, _, pos = ber_leer(pdu, pos)
+            _, lista, _ = ber_leer(pdu, pos)
+            out, pos = [], 0
+            while pos < len(lista):
+                _, enlace, pos = ber_leer(lista, pos)
+                _, oid, p2 = ber_leer(enlace, 0)
+                tipo_valor, contenido, _ = ber_leer(enlace, p2)
+                out.append((ber_oid_texto(oid), tipo_valor, contenido))
+        except (ValueError, IndexError):
+            return None  # algo que no es una respuesta SNMP entera
+        error = int.from_bytes(estado, "big")
+        if error:
+            raise IntegracionError(f"respondió con el error SNMP {error}")
+        return out
+
+    def _pedir(self, tipo: int, oids: list, no_rep: int = 0, max_rep: int = 0, espera: float = None) -> list:
+        if self.fin is not None and time.monotonic() > self.fin:
+            raise IntegracionError("está tardando demasiado en responder por SNMP")
+        self.pedido = (self.pedido + 1) & 0x7FFFFFFF
+        enlaces = ber_tlv(0x30, b"".join(ber_tlv(0x30, ber_oid(o) + b"\x05\x00") for o in oids))
+        pdu = ber_tlv(tipo, ber_entero(self.pedido) + ber_entero(no_rep) + ber_entero(max_rep) + enlaces)
+        mensaje = ber_tlv(0x30, ber_entero(1) + ber_tlv(0x04, self.community) + pdu)
+        falla = None
+        for _ in range(self.intentos):
+            try:
+                self.sock.send(mensaje)
+            except OSError as err:  # un rechazo anterior (ICMP) aparece al volver a enviar
+                falla = err
+                continue
+            self.pedidos += 1
+            fin = time.monotonic() + (espera or self.espera)
+            while True:
+                queda = fin - time.monotonic()
+                if queda <= 0:
+                    break
+                self.sock.settimeout(queda)
+                try:
+                    data = self.sock.recv(65535)
+                except socket.timeout:
+                    break
+                except OSError as err:
+                    falla = err
+                    break
+                filas = self._respuesta(data)
+                if filas is not None:
+                    return filas
+        if isinstance(falla, ConnectionRefusedError):
+            raise IntegracionError("rechazó el pedido: en ese puerto no atiende SNMP")
+        if falla is not None:
+            raise IntegracionError(motivo_de(falla))
+        raise IntegracionError("no respondió por SNMP")
+
+    def get(self, oids: list, espera: float = None) -> dict:
+        """{oid: valor} de varios objetos (None si el equipo no tiene alguno)."""
+        out = {}
+        for i in range(0, len(oids), 20):
+            for oid, tipo, contenido in self._pedir(0xA0, oids[i:i + 20], espera=espera):
+                out[oid] = None if tipo in (0x05, 0x80, 0x81, 0x82) else snmp_valor(tipo, contenido)
+        return out
+
+    def recorrer(self, base: str, limite: int = 60000, de_a: int = 40, espera: float = None, crudo: bool = False) -> list:
+        """[(índice, valor)] de una columna de una tabla, con GETBULK. Con crudo=True,
+        los octetos tal como vienen (números de serie, fechas)."""
+        out, actual, prefijo = [], base, base + "."
+        while len(out) < limite:
+            filas = self._pedir(0xA5, [actual], 0, de_a, espera)
+            if not filas:
+                break
+            for oid, tipo, contenido in filas:
+                if not oid.startswith(prefijo) or tipo == 0x82:
+                    return out
+                if tipo not in (0x05, 0x80, 0x81):
+                    out.append((oid[len(prefijo):], contenido if crudo else snmp_valor(tipo, contenido)))
+            if filas[-1][0] == actual:
+                break  # no avanza
+            actual = filas[-1][0]
+        return out
+
+
+def fecha_snmp(crudo, utc_min: int):
+    """Un DateAndTime de SNMP (8 u 11 octetos) como instante en UTC. Sin zona (8
+    octetos) es la hora del reloj de la OLT, que está `utc_min` minutos de UTC."""
+    if not isinstance(crudo, (bytes, bytearray)) or len(crudo) not in (8, 11):
+        return None
+    anio = int.from_bytes(crudo[0:2], "big")
+    try:
+        d = datetime(anio, crudo[2], crudo[3], crudo[4], crudo[5], min(crudo[6], 59))
+    except ValueError:
+        return None  # 0000-00-00: nunca pasó
+    if anio < 2000:
+        return None
+    if len(crudo) == 11:
+        utc_min = (-1 if crudo[8:9] == b"-" else 1) * (crudo[9] * 60 + crudo[10])
+    return iso_de((d - timedelta(minutes=utc_min)).replace(tzinfo=timezone.utc).timestamp())
+
+
+def puerto_de_nombre(nombre):
+    """'GPON 0/18/3' -> ('pon', 0, 18, 3); 'ethernet0/9/0' -> ('eth', 0, 9, 0); None si no es el puerto de una placa."""
+    m = NOMBRE_PUERTO.fullmatch(str(nombre or ""))
+    if not m:
+        return None
+    clase = m.group(1).lower()
+    tipo = "pon" if "pon" in clase else "eth" if re.match(r"eth|x?ge|\d+ge", clase) else None
+    return (tipo, int(m.group(2)), int(m.group(3)), int(m.group(4))) if tipo else None
+
+
+def puerto_gpon(indice: int):
+    """El ifIndex de un puerto GPON de Huawei como 'marco/placa/puerto' (si tiene esa forma)."""
+    if indice & 0xFE000000 != 0xFA000000:
+        return None
+    resto = indice - 0xFA000000
+    return f"{resto >> 19 & 0x3F}/{resto >> 13 & 0x3F}/{resto >> 8 & 0x1F}"
+
+
+def rol_placa(nombre) -> str:
+    """Para qué es una placa de Huawei, por su nombre ('H901GPHF'): pon, control, energia, interfaz, uplink, ventilador u otra."""
+    n = str(nombre or "").upper()
+    tipo = n[4:6] if re.match(r"H\d{3}", n) else n[:2]
+    if tipo in ("GP", "XG", "XS", "XE", "TW", "CG", "CS", "EP", "TG"):
+        return "pon"
+    return {"MP": "control", "PI": "energia", "CI": "interfaz", "NX": "uplink", "OX": "uplink", "OG": "uplink",
+            "ET": "uplink", "GI": "uplink", "X1": "uplink", "X2": "uplink", "SP": "uplink", "FM": "ventilador"}.get(tipo, "otra")
+
+
+def estado_placa(texto) -> str:
+    """El estado de una placa como lo escribe la OLT ('Normal', 'Active_normal', 'Failed'), en pocos grupos."""
+    t = normalizado(texto)
+    if not t or "normal" in t and "abnormal" not in t:
+        return "normal"
+    if re.search(r"fail|fault|abnormal|error|falla", t):
+        return "falla"
+    if "auto" in t:
+        return "sin-confirmar"
+    if re.search(r"offline|absent|ausente", t):
+        return "ausente"
+    return "otro"
+
+
+def chasis_de(modelo, placas: list):
+    """Qué chasis es ('X17', 'X15', 'X7', 'X2'): por el modelo si se sabe y, si no,
+    por dónde tiene las placas de control y de energía. None si no alcanza."""
+    m = re.search(r"X\s?-?(17|15|7|2)(?!\d)", str(modelo or "").upper())
+    if m:
+        return "X" + m.group(1)
+    slots = {p["slot"] for p in placas}
+    control = {p["slot"] for p in placas if p["rol"] == "control"}
+    energia = {p["slot"] for p in placas if p["rol"] == "energia"}
+    if not slots:
+        return None
+    if max(slots) >= 20 or 10 in control or energia & {20, 21}:
+        return "X17"
+    if control and control <= {3, 4} and max(slots) <= 4:
+        return "X2"
+    if control & {8, 9}:
+        if max(slots) >= 12 or energia & {18, 19}:
+            return "X15"
+        if 8 in control or energia & {10, 11}:
+            return "X7"
+    return None
+
+
+def equipo_de(e, red_id=None):
+    """Un equipo de integraciones.json, en una forma segura de usar; None si no sirve."""
+    if not isinstance(e, dict) or not isinstance(e.get("id"), str) or not re.fullmatch(r"[0-9a-f]{6,16}", e["id"]):
+        return None
+    host = e.get("host") if isinstance(e.get("host"), str) and HOST_VALIDO.fullmatch(e["host"]) else ""
+    snmp = e.get("snmp") if isinstance(e.get("snmp"), dict) else {}
+    consola = e.get("consola") if isinstance(e.get("consola"), dict) else {}
+    protocolo = consola.get("protocolo") if consola.get("protocolo") in ("ssh", "telnet") else ""
+
+    def puerto(valor, por_defecto):
+        return valor if isinstance(valor, int) and not isinstance(valor, bool) and 0 < valor < 65536 else por_defecto
+
+    utc = e.get("utc")
+    panel = e.get("panel")
+    return {
+        "id": e["id"], "red": red_id, "nombre": texto_corto(e.get("nombre"), 60) or "OLT", "host": host,
+        "modelo": e.get("modelo") if e.get("modelo") in MODELOS_OLT else "",
+        "snmp": {"puerto": puerto(snmp.get("puerto"), 161),
+                 "community": snmp.get("community") if isinstance(snmp.get("community"), str) else ""},
+        "consola": {"protocolo": protocolo, "puerto": puerto(consola.get("puerto"), 23 if protocolo == "telnet" else 22),
+                    "usuario": consola.get("usuario") if isinstance(consola.get("usuario"), str) else "",
+                    "clave": consola.get("clave") if isinstance(consola.get("clave"), str) else ""},
+        "utc": utc if isinstance(utc, int) and not isinstance(utc, bool) and -720 <= utc <= 840 else UTC_OLT,
+        "panel": panel if isinstance(panel, int) and not isinstance(panel, bool) else None,
+        "leer": e.get("leer") is not False,
+    }
+
+
+def equipo_field(data: dict, previo: dict = None) -> dict:
+    """El equipo que manda el visor, comprobado. La comunidad y la clave vacías
+    conservan las guardadas (previo): así editar no obliga a escribirlas de nuevo."""
+    e = data.get("equipo")
+    if not isinstance(e, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Faltan los datos de la OLT.")
+
+    def texto(clave, limite, rotulo):
+        v = e.get(clave, "")
+        if v is None:
+            v = ""
+        if not isinstance(v, str) or len(v) > limite or any(ord(c) < 32 for c in v):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{rotulo}: no es un texto válido.")
+        return v
+
+    def puerto(clave, por_defecto, rotulo):
+        v = e.get(clave)
+        if v in (None, ""):
+            return por_defecto
+        v = int_value(v, clave)
+        if not 0 < v < 65536:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{rotulo}: el puerto va de 1 a 65535.")
+        return v
+
+    host = texto("host", 253, "Dirección").strip()
+    if not HOST_VALIDO.fullmatch(host):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Indicá la dirección de la OLT: su IP o su nombre (sin http:// ni espacios).")
+    nombre = texto("nombre", 60, "Nombre").strip()
+    modelo = texto("modelo", 20, "Modelo")
+    if modelo and modelo not in MODELOS_OLT:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Ese modelo no está en la lista.")
+    protocolo = texto("consola", 10, "Consola")
+    if protocolo not in ("", "ssh", "telnet"):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "La consola es por SSH, por Telnet o no se usa.")
+    comunidad = texto("comunidad", 128, "Comunidad") or (previo or {}).get("snmp", {}).get("community", "")
+    usuario = texto("usuario", 64, "Usuario").strip()
+    clave = texto("clave", 128, "Clave")
+    if previo and not clave and usuario == previo["consola"]["usuario"]:
+        clave = previo["consola"]["clave"]
+    utc = e.get("utc", UTC_OLT)
+    if isinstance(utc, bool) or not isinstance(utc, int) or not -720 <= utc <= 840:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "La hora de la OLT no es válida.")
+    panel = e.get("panel")
+    if panel is not None and (isinstance(panel, bool) or not isinstance(panel, int) or panel <= 0):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "La OLT del panel no es válida.")
+    leer = e.get("leer", True)
+    if not isinstance(leer, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "leer tiene que ser true o false.")
+    return {"id": (previo or {}).get("id") or secrets.token_hex(4), "nombre": nombre, "host": host, "modelo": modelo,
+            "snmp": {"puerto": puerto("snmp_puerto", 161, "SNMP"), "community": comunidad},
+            "consola": {"protocolo": protocolo, "puerto": puerto("consola_puerto", 23 if protocolo == "telnet" else 22, "Consola"),
+                        "usuario": usuario if protocolo else "", "clave": clave if protocolo else ""},
+            "utc": utc, "panel": panel, "leer": leer}
+
+
+def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: bool = True) -> dict:
+    """Una lectura por SNMP de una OLT Huawei: sus puertos (estado y tráfico), sus
+    placas, la óptica de cada puerto PON y sus ONT (en línea o no, por qué cayó,
+    cuánto recibe). Lo que cambia poco o cuesta leer (de quién es cada ONT, las
+    potencias, las placas) se lee con completa=True; si no, se toma de `previa`.
+    Lanza IntegracionError si la OLT no responde."""
+    empezo = time.monotonic()
+    notas = []
+    with Snmp(eq["host"], eq["snmp"]["puerto"], eq["snmp"]["community"], plazo=PLAZO_LECTURA) as s:
+        sistema = s.get([SYS_DESCR, SYS_NOMBRE, SYS_ENCENDIDA])
+        ticks = sistema.get(SYS_ENCENDIDA)
+        completa = completa or not previa
+
+        def columna(base, **kw):
+            return [(i, v) for i, v in s.recorrer(base, **kw)]
+
+        # --- los puertos de las placas, con su estado y lo que pasó por cada uno
+        if completa:
+            puertos = {}
+            for indice, nombre in columna(IF_NOMBRE, limite=6000):
+                p = puerto_de_nombre(nombre)
+                if p is not None and indice.isdigit():
+                    puertos[int(indice)] = {"nombre": str(nombre).strip(), "tipo": p[0], "marco": p[1], "slot": p[2], "puerto": p[3]}
+            for indice, v in columna(IF_VELOCIDAD, limite=6000):
+                if indice.isdigit() and int(indice) in puertos and isinstance(v, int):
+                    puertos[int(indice)]["velocidad"] = v
+        else:
+            puertos = {i: {k: p[k] for k in ("nombre", "tipo", "marco", "slot", "puerto", "velocidad") if k in p}
+                       for i, p in previa["puertos"].items()}
+        for base, campo in ((IF_ESTADO, "estado_n"), (IF_ENTRA, "entra_oct"), (IF_SALE, "sale_oct")):
+            for indice, v in columna(base, limite=6000):
+                if indice.isdigit() and int(indice) in puertos and isinstance(v, int):
+                    puertos[int(indice)][campo] = v
+        mono_if = time.monotonic()
+        lapso = mono_if - previa["mono_if"] if previa and previa.get("mono_if") else None
+        for i, p in puertos.items():
+            antes = previa["puertos"].get(i, {}) if previa else {}
+            for campo in ("entra", "sale"):
+                a, b = antes.get(campo + "_oct"), p.get(campo + "_oct")
+                p[campo] = round((b - a) * 8 / lapso) if lapso and lapso >= 5 and a is not None and b is not None and b >= a else None
+
+        # --- las placas y la óptica de los puertos PON
+        if completa:
+            placas, optica = {}, {}
+            try:
+                nombres = columna(HW_SLOT + ".21", limite=400)
+                if not any(NOMBRE_PLACA.search(str(v or "")) for _, v in nombres):
+                    nombres = columna(HW_SLOT + ".3", limite=400)
+                for indice, v in nombres:
+                    marco, _, slot = indice.partition(".")
+                    m = NOMBRE_PLACA.search(str(v or "").upper())
+                    if marco == "0" and slot.isdigit() and m:
+                        placas[int(slot)] = {"nombre": m.group(0)}
+                for indice, v in columna(HW_SLOT + ".8", limite=400):
+                    marco, _, slot = indice.partition(".")
+                    if marco == "0" and slot.isdigit() and int(slot) in placas and isinstance(v, int):
+                        placas[int(slot)]["estado"] = ESTADOS_SLOT.get(v, "otro")
+            except IntegracionError as err:
+                notas.append(f"no entregó sus placas ({err})")
+            try:
+                for col, campo, escala in ((4, "tx", 0.01), (1, "temperatura", 1), (2, "tension", 0.01), (3, "corriente", 1)):
+                    for indice, v in columna(f"{HW_PON_OPTICA}.{col}", limite=2000):
+                        if indice.isdigit() and isinstance(v, int) and v != SNMP_SIN_DATO and abs(v) < 100000:
+                            optica.setdefault(int(indice), {})[campo] = round(v * escala, 2)
+            except IntegracionError as err:
+                notas.append(f"no entregó la óptica de sus puertos PON ({err})")
+        else:
+            placas, optica = previa.get("placas", {}), previa.get("optica", {})
+
+        # --- las ONT
+        onts = {}
+        if con_onts:
+            for indice, v in columna(HW_ONT_CONTROL + ".15"):
+                onts[indice] = {"en_linea": v == 1}
+            for indice, v in columna(HW_ONT_CONTROL + ".24"):
+                if indice in onts and isinstance(v, int) and v > 0:
+                    onts[indice]["causa"] = CAUSAS_HUAWEI.get(v) or f"causa {v}"
+            for indice, v in s.recorrer(HW_ONT_CONTROL + ".23", crudo=True):
+                if indice in onts:
+                    onts[indice]["ultima_caida"] = fecha_snmp(v, eq.get("utc", UTC_OLT))
+            anteriores = previa["onts"] if previa else {}
+            if not completa and set(onts) - set(anteriores):
+                completa = True  # apareció una ONT: hay que leer de quién es
+            if completa:
+                for indice, v in s.recorrer(HW_ONT_CONFIG + ".3", crudo=True):
+                    if indice in onts:
+                        onts[indice]["sn"] = sn_canonico(v.hex())
+                for indice, v in columna(HW_ONT_CONFIG + ".9"):
+                    if indice in onts:
+                        onts[indice]["descripcion"] = texto_corto(v, 120)
+                for indice, v in columna(HW_ONT_CONTROL + ".20"):
+                    if indice in onts and isinstance(v, int) and 0 <= v < 100000:
+                        onts[indice]["distancia"] = v
+                try:
+                    # La OLT le pregunta la potencia a cada ONT: va de a pocas y con más espera.
+                    for indice, v in columna(HW_ONT_OPTICA + ".4", de_a=20, espera=10):
+                        if indice in onts and isinstance(v, int) and v != SNMP_SIN_DATO and -6000 < v < 2000:
+                            onts[indice]["rx"] = round(v / 100, 2)
+                except IntegracionError as err:
+                    notas.append(f"no entregó la potencia de las ONT ({err})")
+            for indice, o in onts.items():
+                antes = anteriores.get(indice, {})
+                for campo in ("sn", "descripcion", "distancia", "rx"):
+                    if campo not in o and campo in antes:
+                        o[campo] = antes[campo]
+        pedidos = s.pedidos
+    return {"cuando": now_iso(), "mono": time.monotonic(), "mono_if": mono_if,
+            "mono_completa": time.monotonic() if completa else (previa or {}).get("mono_completa"),
+            "sistema": {"descripcion": texto_corto(sistema.get(SYS_DESCR), 200), "nombre": texto_corto(sistema.get(SYS_NOMBRE), 80),
+                        "encendida_s": ticks // 100 if isinstance(ticks, int) else None},
+            "puertos": puertos, "placas": placas, "optica": optica, "onts": onts, "con_onts": con_onts, "notas": notas,
+            "tardo": round(time.monotonic() - empezo, 1), "pedidos": pedidos}
+
+
+def medidas_directas(lectura: dict, nombre: str) -> list:
+    """Las ONT de una lectura directa, como las del panel (medida_panel)."""
+    out = []
+    for indice, o in lectura["onts"].items():
+        ifindex, _, ont = indice.rpartition(".")
+        p = lectura["puertos"].get(int(ifindex)) if ifindex.isdigit() else None
+        if p is not None and p["tipo"] == "pon":
+            interfaz = f"{p['marco']}/{p['slot']}/{p['puerto']}"
+        else:
+            interfaz = puerto_gpon(int(ifindex)) if ifindex.isdigit() else None
+        out.append({"fuente": "olt", "panel_id": None, "olt": nombre, "sn": o.get("sn"), "interfaz": interfaz,
+                    "ont_id": int(ont) if ont.isdigit() else None, "estado": "online" if o.get("en_linea") else "offline",
+                    "rx": o.get("rx"), "tx": None, "rx_estado": None, "cuando": lectura["cuando"],
+                    "ultima_caida": o.get("ultima_caida"), "causa": o.get("causa"), "tecnologia": "gpon",
+                    "descripcion": o.get("descripcion"), "distancia": o.get("distancia")})
+    return out
+
+
+def clave_puerto(tipo, marco, slot, puerto) -> str:
+    return f"{tipo}:{marco}/{slot}/{puerto}"
+
+
+def placas_de_lectura(lectura: dict) -> list:
+    """Las placas de una lectura directa, con sus puertos, para dibujar el chasis."""
+    por_slot = {slot: {"slot": slot, "nombre": p.get("nombre"), "estado": p.get("estado") or "normal", "detalle": None,
+                       "rol": rol_placa(p.get("nombre")), "puertos": []} for slot, p in lectura.get("placas", {}).items()}
+    for ifindex, p in sorted(lectura["puertos"].items()):
+        if p["marco"] != 0:
+            continue
+        placa = por_slot.setdefault(p["slot"], {"slot": p["slot"], "nombre": None, "estado": "normal", "detalle": None,
+                                                "rol": "pon" if p["tipo"] == "pon" else "uplink", "puertos": []})
+        puerto = {"puerto": p["puerto"], "tipo": p["tipo"], "nombre": p["nombre"],
+                  "clave": clave_puerto(p["tipo"], p["marco"], p["slot"], p["puerto"]),
+                  "estado": ESTADOS_IF.get(p.get("estado_n"), "down"), "velocidad": p.get("velocidad"),
+                  "entra": p.get("entra"), "sale": p.get("sale")}
+        if p["tipo"] == "pon":
+            puerto["interfaz"] = f"{p['marco']}/{p['slot']}/{p['puerto']}"
+            puerto.update(lectura.get("optica", {}).get(ifindex, {}))
+        placa["puertos"].append(puerto)
+    out = sorted(por_slot.values(), key=lambda x: x["slot"])
+    for placa in out:
+        placa["puertos"].sort(key=lambda x: (x["tipo"], x["puerto"]))
+    return out
+
+
+def placas_de_panel(chasis, interfaces) -> list:
+    """Las placas de una OLT según el panel (su chasis y sus interfaces)."""
+    entero = lambda v: isinstance(v, int) and not isinstance(v, bool)  # noqa: E731
+    roles = {"pon": "pon", "control": "control", "power": "energia", "uplink": "uplink", "gpio": "interfaz",
+             "interface": "interfaz", "fan": "ventilador"}
+    por_slot = {}
+    for b in (chasis.get("boards") if isinstance(chasis, dict) else None) or []:
+        if not isinstance(b, dict) or not entero(b.get("slot_id")):
+            continue
+        nombre = texto_corto(b.get("board_name"), 20)
+        puertos = [p for p in b.get("ports") or [] if isinstance(p, dict) and entero(p.get("port"))]
+        if not nombre and not puertos:
+            continue  # un slot vacío
+        slot = b["slot_id"]
+        rol = roles.get(str(b.get("role") or "").lower()) or rol_placa(nombre)
+        por_slot[slot] = {"slot": slot, "nombre": nombre, "estado": estado_placa(b.get("status")),
+                          "detalle": texto_corto(b.get("status"), 40), "rol": "pon" if rol == "otra" and puertos else rol,
+                          "puertos": [{"puerto": p["port"], "tipo": "pon", "nombre": f"GPON 0/{slot}/{p['port']}",
+                                       "clave": clave_puerto("pon", 0, slot, p["port"]), "interfaz": f"0/{slot}/{p['port']}",
+                                       "estado": None, "velocidad": None, "entra": None, "sale": None} for p in puertos]}
+    for i in interfaces if isinstance(interfaces, list) else []:
+        if not isinstance(i, dict):
+            continue
+        p = puerto_de_nombre(i.get("if_name"))
+        if p is None or p[1] != 0:
+            continue
+        tipo, _, slot, numero_puerto = p
+        placa = por_slot.setdefault(slot, {"slot": slot, "nombre": None, "estado": "normal", "detalle": None,
+                                           "rol": "pon" if tipo == "pon" else "uplink", "puertos": []})
+        puerto = next((x for x in placa["puertos"] if x["tipo"] == tipo and x["puerto"] == numero_puerto), None)
+        if puerto is None:
+            puerto = {"puerto": numero_puerto, "tipo": tipo, "nombre": texto_corto(i.get("if_name"), 40),
+                      "clave": clave_puerto(tipo, 0, slot, numero_puerto)}
+            if tipo == "pon":
+                puerto["interfaz"] = f"0/{slot}/{numero_puerto}"
+            placa["puertos"].append(puerto)
+        estado = str(i.get("oper_status") or "").lower()
+        puerto.update({"estado": "up" if estado == "up" else "ausente" if estado == "notpresent" else "down",
+                       "velocidad": i.get("speed_mbps") if entero(i.get("speed_mbps")) else None,
+                       "entra": numero(i.get("in_bps")), "sale": numero(i.get("out_bps"))})
+        if i.get("is_uplink") is True:
+            puerto["uplink"] = True
+    out = sorted(por_slot.values(), key=lambda x: x["slot"])
+    for placa in out:
+        placa["puertos"].sort(key=lambda x: (x["tipo"], x["puerto"]))
+    return out
+
+
+# --- probar la conexión (lo pide quien administra, desde el visor)
+
+def texto_duracion(segundos) -> str:
+    if not isinstance(segundos, (int, float)) or segundos < 0:
+        return ""
+    if segundos < 3600:
+        return f"{round(segundos / 60)} min"
+    if segundos < 2 * 86400:
+        return f"{round(segundos / 3600)} h"
+    return f"{round(segundos / 86400)} días"
+
+
+def es_privada(host: str) -> bool:
+    return bool(re.match(r"(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|169\.254\.)", host))
+
+
+def pistas_snmp(eq: dict, desde: str) -> list:
+    puerto = eq["snmp"]["puerto"]
+    origen = (f"desde {desde}, que es la dirección de este servidor" if desde and es_privada(eq["host"])
+              else "desde la IP pública con la que este servidor sale a internet")
+    out = ["La comunidad: tiene que ser exactamente la de lectura de la OLT (snmp-agent community read …). Si no coincide, la OLT no contesta nada.",
+           f"El permiso: la OLT tiene que aceptar pedidos SNMP {origen} (si la comunidad tiene una lista de acceso, que la incluya)."]
+    if not es_privada(eq["host"]):
+        out.append(f"El camino: el router que está delante de la OLT tiene que dejar pasar UDP {puerto} hacia ella (un reenvío de puerto, mejor limitado a la IP de este servidor).")
+    else:
+        out.append(f"El camino: entre este servidor y la OLT no tiene que haber nada que corte UDP {puerto}.")
+    return out
+
+
+def probar_snmp(eq: dict) -> dict:
+    """Lee por SNMP lo justo para saber si la OLT responde y qué entrega."""
+    puerto = eq["snmp"]["puerto"]
+    out = {"que": "snmp", "titulo": f"Lectura por SNMP (UDP {puerto})", "ok": False, "datos": [], "pistas": []}
+    if not eq["snmp"]["community"]:
+        out["texto"] = "Falta la comunidad de lectura."
+        return out
+    try:
+        s = Snmp(eq["host"], puerto, eq["snmp"]["community"], plazo=28)
+    except IntegracionError as err:
+        out["texto"] = f"La dirección {eq['host']}: {err}."
+        return out
+    with s:
+        desde = s.desde()
+        empezo = time.monotonic()
+        try:
+            sistema = s.get([SYS_DESCR, SYS_NOMBRE, SYS_ENCENDIDA])
+        except IntegracionError as err:
+            out.update({"texto": f"La OLT {err}.", "pistas": pistas_snmp(eq, desde)})
+            return out
+        ms = round((time.monotonic() - empezo) * 1000)
+        nombre = texto_corto(sistema.get(SYS_NOMBRE), 80)
+        ticks = sistema.get(SYS_ENCENDIDA)
+        out.update({"ok": True, "texto": f"Respondió en {ms} ms.", "nombre": nombre})
+        if nombre:
+            out["datos"].append(["Nombre", nombre])
+        if texto_corto(sistema.get(SYS_DESCR), 120):
+            out["datos"].append(["Equipo", texto_corto(sistema.get(SYS_DESCR), 120)])
+        if isinstance(ticks, int):
+            out["datos"].append(["Encendida", f"hace {texto_duracion(ticks // 100)}"])
+        falta = []
+        placas = []
+        try:
+            nombres = s.recorrer(HW_SLOT + ".21", limite=400)
+            if not any(NOMBRE_PLACA.search(str(v or "")) for _, v in nombres):
+                nombres = s.recorrer(HW_SLOT + ".3", limite=400)
+            for indice, v in nombres:
+                marco, _, slot = indice.partition(".")
+                m = NOMBRE_PLACA.search(str(v or "").upper())
+                if marco == "0" and slot.isdigit() and m:
+                    placas.append({"slot": int(slot), "nombre": m.group(0), "rol": rol_placa(m.group(0))})
+        except IntegracionError:
+            pass
+        if placas:
+            out["datos"].append(["Placas", " · ".join(f"{p['nombre']} en {p['slot']}" for p in placas[:24])])
+        else:
+            falta.append("las placas")
+        pon, primero = 0, None
+        try:
+            for indice, v in s.recorrer(IF_NOMBRE, limite=6000):
+                p = puerto_de_nombre(v)
+                if p is not None and p[0] == "pon":
+                    pon += 1
+                    primero = primero or (indice, f"{p[1]}/{p[2]}/{p[3]}")
+                    if not any(x["slot"] == p[2] for x in placas):
+                        placas.append({"slot": p[2], "nombre": None, "rol": "pon"})
+        except IntegracionError:
+            pass
+        # El modelo: si la OLT lo dice en su descripción o en su nombre; si no, el chasis sale de
+        # dónde tiene las placas (la familia, MA o EA, no se distingue así: queda la elegida).
+        dice = f"{sistema.get(SYS_DESCR)} {nombre}".upper().replace(" ", "")
+        modelo = next((m for m in MODELOS_OLT if m in dice), None)
+        chasis = chasis_de(modelo, placas)
+        if modelo:
+            out["modelo"] = modelo
+            out["datos"].append(["Chasis", modelo])
+        elif chasis:
+            familia = "EA5800" if "EA58" in dice or str(eq.get("modelo") or "").startswith("EA") else "MA5800"
+            out["modelo"] = f"{familia}-{chasis}"
+            out["datos"].append(["Chasis", f"{chasis} (por dónde tiene las placas)"])
+        if pon:
+            out["datos"].append(["Puertos PON", str(pon)])
+        else:
+            falta.append("los puertos PON")
+        en_linea = None
+        try:
+            estados = s.recorrer(HW_ONT_CONTROL + ".15", limite=40000)
+            if estados:
+                en_linea = next((i for i, v in estados if v == 1), None)
+                out["datos"].append(["ONT", f"{len(estados)} ({sum(1 for _, v in estados if v == 1)} en línea)"])
+            else:
+                falta.append("las ONT")
+        except IntegracionError:
+            falta.append("las ONT")
+        try:
+            if primero:
+                tx = s.get([f"{HW_PON_OPTICA}.4.{primero[0]}"]).get(f"{HW_PON_OPTICA}.4.{primero[0]}")
+                if isinstance(tx, int) and tx != SNMP_SIN_DATO:
+                    out["datos"].append(["Potencia que emiten los puertos", f"sí: {db_texto(tx / 100)} dBm en {primero[1]}"])
+            if en_linea:
+                t = time.monotonic()
+                rx = s.get([f"{HW_ONT_OPTICA}.4.{en_linea}"], espera=10).get(f"{HW_ONT_OPTICA}.4.{en_linea}")
+                if isinstance(rx, int) and rx != SNMP_SIN_DATO:
+                    out["datos"].append(["Potencia de las ONT", f"sí: una recibe {db_texto(rx / 100)} dBm (tardó {time.monotonic() - t:.1f} s en decirlo)".replace(".", ",")])
+        except IntegracionError:
+            pass
+        if falta:
+            out["parcial"] = True
+            out["texto"] += f" Pero no entregó {', '.join(falta)}."
+            out["pistas"] = ["Responde lo general y no las tablas de Huawei: la comunidad puede tener una vista limitada "
+                             "(snmp-agent mib-view) o la OLT no es una MA5800/EA5800."]
+    return out
+
+
+def leer_telnet(sock, hasta, plazo: float) -> str:
+    """Lee de una sesión Telnet hasta que aparezca `hasta` o se venza el plazo,
+    contestando que no a cada opción que el otro lado propone."""
+    fin = time.monotonic() + plazo
+    texto = b""
+    while time.monotonic() < fin:
+        sock.settimeout(max(0.05, fin - time.monotonic()))
+        try:
+            parte = sock.recv(4096)
+        except socket.timeout:
+            break
+        if not parte:
+            break
+        limpio, i = bytearray(), 0
+        while i < len(parte):
+            b = parte[i]
+            if b != 255 or i + 1 >= len(parte):
+                limpio.append(b)
+                i += 1
+                continue
+            orden = parte[i + 1]
+            if orden in (251, 252, 253, 254) and i + 2 < len(parte):
+                if orden == 253:  # DO -> WONT
+                    sock.sendall(bytes([255, 252, parte[i + 2]]))
+                elif orden == 251:  # WILL -> DONT
+                    sock.sendall(bytes([255, 254, parte[i + 2]]))
+                i += 3
+            elif orden == 250:  # una subnegociación, hasta IAC SE
+                j = parte.find(b"\xff\xf0", i)
+                i = len(parte) if j < 0 else j + 2
+            else:
+                i += 2
+        texto += bytes(limpio)
+        if hasta.search(texto.decode("latin-1")):
+            break
+    return texto.decode("latin-1")
+
+
+PIDE_USUARIO = re.compile(r"(user\s*name|login|usuario)\s*:\s*$", re.I)
+PIDE_CLAVE = re.compile(r"(pass\s*word|clave)\s*:\s*$", re.I)
+ENTRO = re.compile(r"^\s*([\w.\-()]{1,64})[>#]\s*$", re.M)  # la línea de comandos: 'MA5800-X17>'
+NO_ENTRO = re.compile(r"invalid|incorrect|fail|denied|locked|reenter|upper limit", re.I)
+FIN_INGRESO = re.compile(f"{ENTRO.pattern}|{NO_ENTRO.pattern}|{PIDE_USUARIO.pattern}", re.I | re.M)
+
+
+def rechazo_consola(texto: str) -> str:
+    if re.search(r"(?i)reenter|upper limit", texto):
+        return "La OLT no dejó entrar: ese usuario ya tiene abiertas todas las sesiones que se le permiten."
+    if re.search(r"(?i)locked", texto):
+        return "La OLT no dejó entrar: el usuario está bloqueado (pasa después de varias claves equivocadas; se destraba solo en unos minutos)."
+    return "La OLT no aceptó el usuario o la clave."
+
+
+def probar_telnet(host: str, puerto: int, usuario: str, clave: str) -> dict:
+    try:
+        sock = socket.create_connection((host, puerto), timeout=8)
+    except (OSError, UnicodeError) as err:
+        return {"ok": False, "texto": f"El puerto {puerto} {motivo_de(err)}."}
+    try:
+        inicio = leer_telnet(sock, PIDE_USUARIO, 8)
+        if not PIDE_USUARIO.search(inicio):
+            return {"ok": False, "texto": "El puerto respondió, pero no pidió el usuario como lo hace una OLT."
+                    if inicio.strip() else "El puerto se abre, pero no muestra nada."}
+        if not usuario or not clave:
+            return {"ok": True, "parcial": True, "texto": "Responde y pide el usuario. No se probó el ingreso: falta el usuario o la clave."}
+        sock.sendall(usuario.encode("utf-8") + b"\r\n")
+        if not PIDE_CLAVE.search(leer_telnet(sock, PIDE_CLAVE, 8)):
+            return {"ok": False, "texto": "Pidió el usuario, pero después no pidió la clave."}
+        sock.sendall(clave.encode("utf-8") + b"\r\n")
+        fin = leer_telnet(sock, FIN_INGRESO, 12)
+        if NO_ENTRO.search(fin) or PIDE_USUARIO.search(fin):
+            return {"ok": False, "texto": rechazo_consola(fin)}
+        m = ENTRO.search(fin)
+        if not m:
+            return {"ok": False, "texto": "Aceptó la conexión, pero no llegó a la línea de comandos."}
+        try:  # se sale prolijo: una sesión que queda abierta le ocupa un lugar a la OLT
+            sock.sendall(b"quit\r\n")
+            leer_telnet(sock, re.compile(r"\(y/n\)"), 2)
+            sock.sendall(b"y\r\n")
+            leer_telnet(sock, re.compile(r"$^"), 0.5)
+        except OSError:
+            pass
+        return {"ok": True, "texto": f"Entró con el usuario «{usuario}» (la OLT respondió «{m.group(1)}») y salió."}
+    except OSError as err:
+        return {"ok": False, "texto": f"La sesión se cortó: {motivo_de(err)}."}
+    finally:
+        sock.close()
+
+
+_SSH_VIEJOS = None  # los algoritmos viejos que este cliente ssh todavía tiene (los usan las OLT con años)
+
+
+def opciones_ssh(ssh: str) -> list:
+    global _SSH_VIEJOS
+    if _SSH_VIEJOS is None:
+        out = []
+        for consulta, opcion, viejos in (
+                ("kex", "KexAlgorithms", ("diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1", "diffie-hellman-group1-sha1")),
+                ("key", "HostKeyAlgorithms", ("ssh-rsa",)),
+                ("cipher", "Ciphers", ("aes128-cbc", "aes256-cbc", "3des-cbc")),
+                ("mac", "MACs", ("hmac-sha1",))):
+            try:
+                hay = subprocess.run([ssh, "-Q", consulta], capture_output=True, timeout=5, check=False).stdout.decode("ascii", "replace").split()
+            except (OSError, subprocess.SubprocessError):
+                hay = []
+            sirven = [a for a in viejos if a in hay]
+            if sirven:
+                out += ["-o", f"{opcion}=+{','.join(sirven)}"]
+        _SSH_VIEJOS = out
+    return _SSH_VIEJOS
+
+
+def probar_ssh(host: str, puerto: int, usuario: str, clave: str) -> dict:
+    try:
+        with socket.create_connection((host, puerto), timeout=8) as sock:
+            sock.settimeout(8)
+            cartel = sock.recv(255).decode("latin-1", "replace").strip().split("\n")[0].strip()
+    except (OSError, UnicodeError) as err:
+        return {"ok": False, "texto": f"El puerto {puerto} {motivo_de(err)}."}
+    if not cartel.startswith("SSH-"):
+        return {"ok": False, "texto": f"El puerto {puerto} respondió, pero no habla SSH."}
+    if not usuario or not clave:
+        return {"ok": True, "parcial": True, "texto": f"Responde ({cartel[:60]}). No se probó el ingreso: falta el usuario o la clave."}
+    ssh = shutil.which("ssh")
+    if not ssh:
+        return {"ok": True, "parcial": True, "texto": f"Responde ({cartel[:60]}). No se pudo probar el ingreso: este servidor no tiene el cliente ssh.",
+                "pistas": ["En el servidor: apt install openssh-client"]}
+    carpeta = tempfile.mkdtemp(prefix="traza-ssh-")
+    try:
+        guion = os.path.join(carpeta, "clave")
+        with open(guion, "w", encoding="ascii") as fh:
+            fh.write('#!/bin/sh\nprintf \'%s\\n\' "$TRAZA_CLAVE_OLT"\n')
+        os.chmod(guion, 0o700)
+        # La clave va por el entorno del proceso (no por la línea de comandos, que se ve con ps).
+        entorno = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": carpeta, "LANG": "C", "DISPLAY": "traza:0",
+                   "SSH_ASKPASS": guion, "SSH_ASKPASS_REQUIRE": "force", "TRAZA_CLAVE_OLT": clave}
+        orden = [ssh, "-F", "/dev/null", "-p", str(puerto), "-l", usuario, "-tt",
+                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "GlobalKnownHostsFile=/dev/null",
+                 "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no",
+                 "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=10", "-o", "LogLevel=VERBOSE",
+                 *opciones_ssh(ssh), "--", host]
+        try:
+            p = subprocess.run(orden, input=b"\nquit\ny\nexit\n", capture_output=True, timeout=22, env=entorno,
+                               start_new_session=True, check=False)
+            salida, errores = p.stdout, p.stderr
+        except subprocess.TimeoutExpired as err:
+            salida, errores = err.stdout or b"", err.stderr or b""
+        except OSError as err:
+            return {"ok": False, "texto": f"No se pudo usar el cliente ssh del servidor: {err.strerror or err}."}
+    finally:
+        shutil.rmtree(carpeta, ignore_errors=True)
+    salida, errores = salida.decode("latin-1", "replace"), errores.decode("latin-1", "replace")
+    if "Authenticated to" in errores:
+        m = ENTRO.search(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", salida).replace("\r", ""))
+        return {"ok": True, "texto": f"Entró con el usuario «{usuario}»" + (f" (la OLT respondió «{m.group(1)}»)" if m else "") + " y salió."}
+    if re.search(r"(?i)permission denied|authentication fail|too many authentication", errores):
+        return {"ok": False, "texto": rechazo_consola(errores + salida)}
+    if re.search(r"(?i)no matching|unable to negotiate", errores):
+        return {"ok": False, "texto": "La OLT habla un SSH que el cliente de este servidor ya no acepta (algoritmos viejos).",
+                "pistas": ["Probá por Telnet, o actualizá el SSH de la OLT."]}
+    ultima = next((ln.strip() for ln in reversed(errores.splitlines()) if ln.strip()), "")
+    return {"ok": False, "texto": f"No se pudo entrar por SSH{': ' + ultima[:160] if ultima else ''}."}
+
+
+def probar_consola(eq: dict) -> dict:
+    c = eq["consola"]
+    nombre = {"ssh": "SSH", "telnet": "Telnet"}[c["protocolo"]]
+    out = {"que": "consola", "titulo": f"Consola por {nombre} (TCP {c['puerto']})", "datos": [], "pistas": []}
+    out.update((probar_ssh if c["protocolo"] == "ssh" else probar_telnet)(eq["host"], c["puerto"], c["usuario"], c["clave"]))
+    if not out["ok"] and not out["pistas"] and "puerto" in out.get("texto", "").lower():
+        out["pistas"] = [f"Que la OLT tenga habilitado {nombre} y que nada corte TCP {c['puerto']} entre este servidor y ella"
+                         + ("." if es_privada(eq["host"]) else " (en el router que está delante, un reenvío de puerto limitado a la IP de este servidor).")]
+    return out
+
+
+def probar_equipo(eq: dict) -> dict:
+    """Las pruebas de conexión de un equipo, a la vez: la lectura por SNMP y, si se cargó, la consola."""
+    tareas = [_HILOS.submit(probar_snmp, eq)]
+    if eq["consola"]["protocolo"]:
+        tareas.append(_HILOS.submit(probar_consola, eq))
+    pruebas = []
+    for tarea, que in zip(tareas, ("snmp", "consola")):
+        try:
+            pruebas.append(tarea.result(timeout=45))
+        except FuturesTimeout:
+            pruebas.append({"que": que, "titulo": "Lectura por SNMP" if que == "snmp" else "Consola", "ok": False,
+                            "texto": "La prueba tardó demasiado.", "datos": [], "pistas": []})
+    snmp = pruebas[0]
+    return {"pruebas": pruebas, "detectado": {"nombre": snmp.get("nombre"), "modelo": snmp.get("modelo")}}
+
+
 class Integraciones:
     """Lo que traza lee de Wispro y del panel de la OLT, red por red, con caché."""
 
@@ -2965,6 +3930,10 @@ class Integraciones:
         self._cache = {}  # clave -> (cuando, valor)
         self._fallas = {}  # clave -> (cuando, IntegracionError)
         self._candados = {}
+        self._lecturas = {}  # (red, id del equipo) -> {lectura, error, firma, intento, leyendo}: lo leído directo de cada OLT
+        self._escritura = threading.Lock()  # un cambio de integraciones.json por vez
+        self._probando = threading.Lock()  # y una prueba de conexión por vez
+        self.despertar = threading.Event()  # para que el lector de las OLT no espere a su turno
 
     # --- configuración (se relee sola cuando cambia el archivo)
     def config(self) -> dict:
@@ -3008,8 +3977,99 @@ class Integraciones:
             return Panel(c["url"], c.get("olts"))
         return None
 
+    def equipos(self, red_id: int) -> list:
+        """Las OLT cargadas en una red (con su comunidad y su clave: no salen de acá)."""
+        lista = self.de_red(red_id).get("olts")
+        out, vistos = [], set()
+        for e in lista if isinstance(lista, list) else []:
+            eq = equipo_de(e, red_id)
+            if eq is not None and eq["id"] not in vistos:
+                vistos.add(eq["id"])
+                out.append(eq)
+        return out[:MAX_OLTS_RED]
+
+    @staticmethod
+    def se_lee(eq: dict) -> bool:
+        return bool(eq["leer"] and eq["host"] and eq["snmp"]["community"])
+
+    def directas(self, red_id: int) -> list:
+        """Las OLT de una red cuyas ONT lee traza por su cuenta (las que no vienen del panel)."""
+        con_panel = self.panel(red_id) is not None
+        return [e for e in self.equipos(red_id) if self.se_lee(e) and not (con_panel and e["panel"] is not None)]
+
+    def lee_olt(self, red_id: int) -> bool:
+        """La red tiene de dónde leer su OLT: el panel o una OLT cargada con su comunidad."""
+        return self.panel(red_id) is not None or bool(self.directas(red_id))
+
     def estado(self, red_id: int) -> dict:
-        return {"wispro": self.wispro(red_id) is not None, "panel": self.panel(red_id) is not None}
+        # "panel": hay lecturas de la OLT, vengan del panel o de leerla directo (el visor pregunta por esto).
+        return {"wispro": self.wispro(red_id) is not None, "panel": self.lee_olt(red_id)}
+
+    def olvidar(self, clave):
+        """Lo guardado de una clave deja de valer (cambió lo que se lee directo)."""
+        with self._candado:
+            self._cache.pop((self._firma,) + clave, None)
+            self._fallas.pop((self._firma,) + clave, None)
+
+    # --- las OLT que se leen directo: las lee un hilo aparte (lector_olts) y acá queda lo último
+    def leer_directas(self, red_ids, minimo: float = LECTURA_S - 3) -> int:
+        """Lee por SNMP las OLT a las que les toca (las que no se leyeron en los
+        últimos `minimo` segundos): el estado de las ONT cada vez; todo lo demás,
+        cada OPTICA_S. Devuelve a cuántas les tocó."""
+        ahora = time.monotonic()
+        red_ids = list(red_ids)
+        tareas, vivos = [], set()
+        for r in red_ids:
+            con_panel = self.panel(r) is not None
+            for eq in self.equipos(r):
+                if not self.se_lee(eq):
+                    continue
+                clave = (r, eq["id"])
+                vivos.add(clave)
+                vinculado = con_panel and eq["panel"] is not None
+                firma = (eq["host"], eq["snmp"]["puerto"], eq["snmp"]["community"], eq["utc"], vinculado)
+                with self._candado:
+                    e = self._lecturas.get(clave)
+                    if e is None or e["firma"] != firma:
+                        e = self._lecturas[clave] = {"lectura": None, "error": None, "firma": firma, "intento": None, "leyendo": False}
+                    if e["leyendo"] or (e["intento"] is not None and ahora - e["intento"] < minimo):
+                        continue
+                    e["leyendo"], e["intento"] = True, ahora
+                tareas.append((r, _HILOS.submit(self._leer_directa, eq, e, vinculado)))
+        with self._candado:
+            for clave in [k for k in self._lecturas if k[0] in red_ids and k not in vivos]:
+                del self._lecturas[clave]
+        wait([t for _, t in tareas], timeout=PLAZO_LECTURA + 30)
+        for r in {r for r, _ in tareas}:
+            self.olvidar(("panel", r))
+        return len(tareas)
+
+    def _leer_directa(self, eq: dict, e: dict, vinculado: bool):
+        previa = e["lectura"]
+        completa = (previa is None or previa.get("mono_completa") is None
+                    or time.monotonic() - previa["mono_completa"] >= OPTICA_S - 5)
+        lectura, error = None, None
+        try:
+            # De una OLT que también está en el panel se leen solo las placas y los puertos: sus ONT las da el panel.
+            lectura = leer_huawei(eq, previa, completa, con_onts=not vinculado)
+        except IntegracionError as err:
+            error = str(err)
+        except Exception:  # noqa: BLE001 - una lectura rara no tiene que voltear al lector
+            log.exception("leyendo la OLT %s", eq["nombre"])
+            error = "hubo un error al leerla"
+        with self._candado:
+            if lectura is not None:
+                e["lectura"] = lectura
+            e["error"], e["leyendo"] = error, False
+
+    def lectura_de(self, red_id: int, eq_id: str) -> dict:
+        """{lectura, error} de una OLT que se lee directo (lectura None si todavía no hay o es muy vieja)."""
+        with self._candado:
+            e = self._lecturas.get((red_id, eq_id))
+            lectura, error = (e["lectura"], e["error"]) if e else (None, None)
+        if lectura is not None and time.monotonic() - lectura["mono"] > VIEJA_LECTURA_S:
+            lectura = None
+        return {"lectura": lectura, "error": error, "intentada": bool(e and e["intento"] is not None and not e["leyendo"])}
 
     # --- caché
     def _guardado(self, clave, vive: float, traer, refrescar=False, respaldo=False, plazo: float = PLAZO_DATOS):
@@ -3081,31 +4141,84 @@ class Integraciones:
 
         return self._guardado(("wispro", red_id), VIVE_WISPRO, traer, refrescar, respaldo=True)
 
+    @staticmethod
+    def _leer_panel(p: Panel):
+        """Del panel: sus OLT, las ONT de las de esta red, los umbrales y, de cada
+        una, sus placas y sus puertos (de dónde sale el dibujo del chasis)."""
+        olts = p.olts()
+        por_id = {o.get("id"): o for o in olts}
+        ids = p.olts_red
+        if not ids:
+            # Sin decir cuáles, solo si hay una sola: el panel puede tener OLTs de otras empresas.
+            if len(olts) != 1:
+                raise IntegracionError("tiene varias OLT y no se indicó cuál es de esta red "
+                                       "(sudo /srv/ftth/bin/integraciones panel RED URL --olt N)")
+            ids = [olts[0].get("id")]
+        for i in ids:
+            if i not in por_id:
+                raise IntegracionError(f"no tiene la OLT {i}")
+        onts = {i: p.onts(i) for i in ids}
+        try:
+            umbrales = p.umbrales()
+        except IntegracionError:
+            umbrales = None
+        fuentes = []
+        for i in ids:
+            o = por_id[i]
+            try:
+                chasis, interfaces = p.chasis(i), p.interfaces(i)
+            except IntegracionError:
+                chasis, interfaces = None, None  # un panel que no las entrega: se sigue sin el dibujo
+            # Lo último que el panel pudo leer de la OLT y, si después falló, por qué.
+            leyo, fallo = momento(o.get("last_poll_at")), momento(o.get("last_error_at"))
+            error = texto_corto(o.get("last_error"), 160) if o.get("last_error") and (leyo is None or (fallo or 0) >= leyo) else None
+            fuentes.append({"origen": "panel", "panel": i, "nombre": texto_corto(o.get("name"), 80) or f"OLT {i}",
+                            "modelo": texto_corto(o.get("model"), 40), "firmware": texto_corto(o.get("firmware"), 60),
+                            "host": texto_corto(o.get("host"), 253), "leido": texto_corto(o.get("last_poll_at"), 40),
+                            "error": f"el panel no puede leerla: {error}" if error else None,
+                            "placas": placas_de_panel(chasis, interfaces)})
+        return olts, onts, umbrales, fuentes
+
     def datos_panel(self, red_id: int, refrescar=False):
-        """(DatosPanel, falla), como datos_wispro."""
+        """(DatosPanel, falla), como datos_wispro: las ONT de las OLT de la red, las
+        del panel y las de las OLT que se leen directo (lo último que leyó el lector)."""
         p = self.panel(red_id)
-        if p is None:
+        directas = self.directas(red_id)
+        if p is None and not directas:
             return None
+        if refrescar and directas:
+            self.despertar.set()
 
         def traer():
-            olts = p.olts()
-            hay = {o.get("id") for o in olts}
-            ids = p.olts_red
-            if not ids:
-                # Sin decir cuáles, solo si hay una sola: el panel puede tener OLTs de otras empresas.
-                if len(olts) != 1:
-                    raise IntegracionError("tiene varias OLT y no se indicó cuál es de esta red "
-                                           "(sudo /srv/ftth/bin/integraciones panel RED URL --olt N)")
-                ids = [olts[0].get("id")]
-            for i in ids:
-                if i not in hay:
-                    raise IntegracionError(f"no tiene la OLT {i}")
-            onts = {i: p.onts(i) for i in ids}
-            try:
-                umbrales = p.umbrales()
-            except IntegracionError:
-                umbrales = None
-            return DatosPanel(olts, onts, umbrales)
+            olts, onts, umbrales, fuentes, avisos, falla = [], {}, None, [], [], None
+            if p is not None:
+                try:
+                    olts, onts, umbrales, fuentes = self._leer_panel(p)
+                except IntegracionError as err:
+                    if not directas:
+                        raise
+                    falla = err
+                    avisos.append(f"Panel de la OLT: {err}.")
+            extra = []
+            for eq in directas:
+                e = self.lectura_de(red_id, eq["id"])
+                lectura = e["lectura"]
+                fuente = {"origen": "directa", "id": eq["id"], "nombre": eq["nombre"], "modelo": eq["modelo"] or None,
+                          "placas": [], "leido": None, "error": e["error"]}
+                if lectura is None:
+                    avisos.append(f"{eq['nombre']}: {e['error']}." if e["error"] else f"{eq['nombre']}: se está leyendo por primera vez.")
+                else:
+                    fuente.update({"placas": placas_de_lectura(lectura), "leido": lectura["cuando"], "notas": lectura["notas"],
+                                   "encendida_s": lectura["sistema"]["encendida_s"], "descripcion": lectura["sistema"]["descripcion"]})
+                    extra.append((eq["nombre"], medidas_directas(lectura, eq["nombre"])))
+                    if e["error"]:
+                        avisos.append(f"{eq['nombre']}: {e['error']}; se muestra lo leído {hace_texto(lectura['cuando'])}.")
+                    for nota in lectura["notas"]:
+                        avisos.append(f"{eq['nombre']}: {nota}.")
+                fuentes.append(fuente)
+            if falla is not None and not extra:
+                raise falla
+            return DatosPanel(olts, onts, umbrales, fuentes, extra, avisos)
 
         return self._guardado(("panel", red_id), VIVE_PANEL, traer, refrescar, respaldo=True)
 
@@ -3131,7 +4244,7 @@ class Integraciones:
         tareas = {}
         if self.wispro(red_id) is not None:
             tareas["wispro"] = _HILOS.submit(self.datos_wispro, red_id, refrescar)
-        if self.panel(red_id) is not None:
+        if self.lee_olt(red_id):
             tareas["panel"] = _HILOS.submit(self.datos_panel, red_id, refrescar)
         wait(list(tareas.values()), timeout=PLAZO_DATOS)
         res = {}
@@ -3154,6 +4267,7 @@ class Integraciones:
                 continue
             if falla:
                 out["errores"].append(f"{etiqueta}: {falla}; se muestra lo leído {hace_texto(valor.cuando)}.")
+            out["errores"].extend(getattr(valor, "avisos", ()))
             res[nombre] = valor
         return res["wispro"], res["panel"]
 
@@ -3295,7 +4409,7 @@ class Integraciones:
         for r in red_ids:
             if self.wispro(r) is not None:
                 tareas[("wispro", r)] = _HILOS.submit(self.datos_wispro, r, refrescar)
-            if self.panel(r) is not None:
+            if self.lee_olt(r):
                 tareas[("panel", r)] = _HILOS.submit(self.datos_panel, r, refrescar)
         wait(list(tareas.values()), timeout=PLAZO_DATOS)
         nombres = {n["id"]: n["nombre"] for n in store.networks()} if len(red_ids) > 1 else {}
@@ -3320,6 +4434,7 @@ class Integraciones:
                     continue
                 if falla:
                     out["errores"].append(f"{prefijo}{etiqueta}: {falla}; se usa lo leído {hace_texto(valor.cuando)}.")
+                out["errores"].extend(f"{prefijo}{a}" for a in getattr(valor, "avisos", ()))
                 leidos[clave] = valor
             res.append((r, leidos["wispro"], leidos["panel"]))
         return res
@@ -3332,7 +4447,7 @@ class Integraciones:
         las que tienen el panel conectado. leido: la lectura del panel más vieja de
         las que se usaron."""
         out = {"clientes": {}, "errores": [], "leido": None, "conectadas": 0}
-        ids = [r for r in red_ids if self.panel(r) is not None]
+        ids = [r for r in red_ids if self.lee_olt(r)]
         out["conectadas"] = len(ids)
         for r, dw, dp in self._leer_redes(store, ids, out):
             if dp is None:
@@ -3388,15 +4503,99 @@ class Integraciones:
                                                 "sin_lectura": sin_lectura}
         return out
 
-    def olt(self, store, red_id: int, historia=None, refrescar=False) -> dict:
-        """El tablero de la OLT de una red, con lo que el panel leyó de ella: cada
-        ONT (estado, potencia, última caída, su contrato de Wispro y su cliente y su
-        caja del mapa), los puertos PON, las cuentas y las novedades. Con el
-        historial propio, también lo que cayó y volvió en los últimos dos días."""
-        out = {"configurada": self.estado(red_id), "errores": []}
-        if self.panel(red_id) is None:
-            return out
-        _, dw, dp = self._leer_redes(store, [red_id], out, refrescar)[0]
+    @staticmethod
+    def conexion_json(eq: dict) -> dict:
+        """Cómo se llega a una OLT, para quien administra: sin la comunidad ni la clave (solo si están cargadas)."""
+        return {"host": eq["host"], "modelo": eq["modelo"], "snmp_puerto": eq["snmp"]["puerto"],
+                "tiene_comunidad": bool(eq["snmp"]["community"]), "consola": eq["consola"]["protocolo"],
+                "consola_puerto": eq["consola"]["puerto"], "usuario": eq["consola"]["usuario"],
+                "tiene_clave": bool(eq["consola"]["clave"]), "utc": eq["utc"], "leer": eq["leer"], "panel": eq["panel"]}
+
+    def equipos_json(self, red_id: int, dp, admin: bool) -> list:
+        """Las OLT de una red para el visor: las del panel y las cargadas en traza,
+        cada una con sus placas y sus puertos (el chasis) y, para quien administra,
+        cómo se llega a ella."""
+        registrados = self.equipos(red_id)
+        con_panel = self.panel(red_id) is not None
+        campos = ("nombre", "origen", "modelo", "firmware", "leido", "error", "placas", "encendida_s", "descripcion")
+        out, usados = [], set()
+        for f in dp.fuentes if dp is not None else []:
+            item = {k: f.get(k) for k in campos}
+            if f["origen"] == "panel":
+                item.update({"id": f"p{f['panel']}", "panel": f["panel"], "registrado": False})
+                eq = next((e for e in registrados if con_panel and e["panel"] == f["panel"]), None)
+                if eq is not None:
+                    # (una copia: lo leído del panel queda guardado y no se toca)
+                    item.update({"id": eq["id"], "registrado": True, "modelo": item["modelo"] or eq["modelo"] or None,
+                                 "placas": [dict(pl, puertos=[dict(x) for x in pl["puertos"]]) for pl in f["placas"]]})
+                    self._sumar_directo(item, red_id, eq)
+                if admin and f.get("host"):
+                    item["host_panel"] = f["host"]
+            else:
+                eq = next((e for e in registrados if e["id"] == f["id"]), None)
+                item.update({"id": f["id"], "panel": None, "registrado": True})
+            if eq is not None:
+                usados.add(eq["id"])
+                if admin:
+                    item["conexion"] = self.conexion_json(eq)
+            item["chasis"] = chasis_de(item["modelo"], item["placas"])
+            out.append(item)
+        for eq in registrados:  # las cargadas de las que no hay nada leído
+            if eq["id"] in usados:
+                continue
+            e = self.lectura_de(red_id, eq["id"])
+            if not eq["leer"]:
+                error = "no se lee: está en pausa"
+            elif not eq["snmp"]["community"]:
+                error = "falta la comunidad de lectura"
+            elif con_panel and eq["panel"] is not None:
+                error = "el panel no entregó esa OLT"
+            else:
+                error = e["error"] or "se está leyendo por primera vez"
+            item = {"id": eq["id"], "registrado": True, "nombre": eq["nombre"], "origen": "directa", "panel": eq["panel"],
+                    "modelo": eq["modelo"] or None, "firmware": None, "leido": None, "error": error, "placas": [],
+                    "chasis": chasis_de(eq["modelo"], [])}
+            if admin:
+                item["conexion"] = self.conexion_json(eq)
+            out.append(item)
+        return out
+
+    def _sumar_directo(self, item: dict, red_id: int, eq: dict):
+        """A una OLT del panel, lo que traza le leyó directo: lo que emite cada puerto PON (el panel no lo da)."""
+        if not self.se_lee(eq):
+            return
+        e = self.lectura_de(red_id, eq["id"])
+        if e["lectura"] is None:
+            if e["error"]:
+                item["nota"] = f"No se pudo leer directo de la OLT: {e['error']}."
+            return
+        directas = {p["slot"]: p for p in placas_de_lectura(e["lectura"])}
+        if not item["placas"]:
+            item["placas"] = list(directas.values())
+            return
+        for placa in item["placas"]:
+            suya = directas.get(placa["slot"])
+            if suya is None:
+                continue
+            placa["nombre"] = placa["nombre"] or suya["nombre"]
+            de = {(x["tipo"], x["puerto"]): x for x in suya["puertos"]}
+            for puerto in placa["puertos"]:
+                otro = de.get((puerto["tipo"], puerto["puerto"]), {})
+                for campo in ("tx", "temperatura", "tension", "corriente"):
+                    if campo in otro:
+                        puerto[campo] = otro[campo]
+
+    def olt(self, store, red_id: int, historia=None, refrescar=False, admin: bool = False) -> dict:
+        """El tablero de la OLT de una red, con lo que se leyó de ella (el panel o
+        traza, directo): cada ONT (estado, potencia, última caída, su contrato de
+        Wispro y su cliente y su caja del mapa), los puertos PON, las cuentas, las
+        novedades y los equipos con sus placas. Con el historial propio, también lo
+        que cayó y volvió en los últimos dos días."""
+        out = {"configurada": self.estado(red_id), "errores": [], "administra": admin}
+        dw = dp = None
+        if self.lee_olt(red_id):
+            _, dw, dp = self._leer_redes(store, [red_id], out, refrescar)[0]
+        out["equipos"] = self.equipos_json(red_id, dp, admin)
         if dp is None:
             return out
         u = umbrales_de(dp.umbrales)
@@ -3415,7 +4614,7 @@ class Integraciones:
         onts = []
         for m in dp.onts:
             o = {k: m[k] for k in ("panel_id", "olt", "sn", "interfaz", "ont_id", "descripcion", "estado", "rx", "tx",
-                                   "cuando", "ultima_caida", "causa")}
+                                   "cuando", "ultima_caida", "causa", "distancia")}
             o["nivel"] = nivel_ont(m, u)
             if o["nivel"] == "caida":
                 o["motivo"] = tipo_causa(m["causa"])
@@ -3435,6 +4634,12 @@ class Integraciones:
             onts.append(o)
         onts.sort(key=lambda o: (str(o["olt"]), orden_interfaz(o["interfaz"]), o["ont_id"] if o["ont_id"] is not None else 10 ** 9))
         out.update({"olts": dp.olts, "leido": dp.leido, "umbrales": u, "onts": onts, "pon": resumen_pon(onts)})
+        # A cada puerto PON, lo que se sabe de él como puerto: el tráfico y lo que emite su módulo.
+        puertos = {(e["nombre"], x.get("interfaz")): x for e in out["equipos"] for placa in e["placas"]
+                   for x in placa["puertos"] if x["tipo"] == "pon"}
+        for g in out["pon"]:
+            x = puertos.get((g["olt"], g["interfaz"]), {})
+            g.update({"entra": x.get("entra"), "sale": x.get("sale"), "tx": x.get("tx")})
         out["resumen"] = resumen_onts(onts)
         out["novedades"] = novedades_olt(onts, out["pon"], nombres_caja, dp.leido, u, historia, red_id)
         if historia is not None:
@@ -3442,16 +4647,123 @@ class Integraciones:
             out["historia"] = historia.desde(red_id)
         return out
 
-    def olt_ont(self, red_id: int, panel_id: int, horas: int, refrescar=False) -> dict:
-        """La potencia de una ONT en el tiempo y sus eventos, del panel. Solo de una
-        ONT de la OLT de esta red (el panel puede tener las de otra empresa)."""
-        p = self.panel(red_id)
-        if p is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "Esta red no está conectada al panel de la OLT.")
+    def olt_ont(self, red_id: int, panel_id, horas: int, refrescar=False, sn=None, historia=None) -> dict:
+        """La potencia de una ONT en el tiempo y sus eventos: del panel (por su
+        número ahí) o, si su OLT se lee directo, del historial propio (por su número
+        de serie). Solo de una ONT de una OLT de esta red."""
+        if not self.lee_olt(red_id):
+            raise ApiError(HTTPStatus.NOT_FOUND, "Esta red no está conectada a una OLT.")
         dp = self.datos_panel(red_id)[0]
-        if panel_id not in dp.por_id:
+        if sn is not None:
+            m = dp.por_sn.get(sn)
+            if m is None or m["fuente"] != "olt":
+                raise ApiError(HTTPStatus.NOT_FOUND, "Esa ONT no está en la OLT de esta red.")
+            if historia is None:
+                raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "El historial de la OLT no está disponible en este servidor.")
+            return historia.serie_ont(red_id, sn, horas)
+        p = self.panel(red_id)
+        if p is None or panel_id not in dp.por_id:
             raise ApiError(HTTPStatus.NOT_FOUND, "Esa ONT no está en la OLT de esta red.")
         return self._guardado(("serie", red_id, panel_id, horas), VIVE_HISTORIA, lambda: p.serie(panel_id, horas), refrescar)
+
+    # --- cargar, cambiar, quitar y probar una OLT (quien administra, desde el visor)
+    def _cambiar_equipos(self, red_id: int, cambio):
+        """Aplica cambio(lista) a las OLT de una red en integraciones.json, de a un cambio por vez."""
+        with self._escritura:
+            try:
+                data = leer_config(self.ruta)
+            except SystemExit:
+                raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR,
+                               "No se pudo leer la configuración de las integraciones en el servidor.") from None
+            cfg = data["redes"].get(str(red_id))
+            if not isinstance(cfg, dict):
+                cfg = data["redes"][str(red_id)] = {}
+            lista = [e for e in cfg["olts"] if isinstance(e, dict)] if isinstance(cfg.get("olts"), list) else []
+            resultado = cambio(lista)
+            if lista:
+                cfg["olts"] = lista
+            else:
+                cfg.pop("olts", None)
+            if not cfg:
+                data["redes"].pop(str(red_id), None)
+            try:
+                guardar_config(self.ruta, data)
+            except OSError as err:
+                raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR,
+                               f"No se pudo guardar en el servidor: {err.strerror or err}.") from None
+        self.despertar.set()
+        return resultado
+
+    def _olts_del_panel(self, red_id: int) -> dict:
+        """{número en el panel: nombre} de las OLT que el panel da para esta red (lo último leído)."""
+        if self.panel(red_id) is None:
+            return {}
+        try:
+            dp = self.datos_panel(red_id)[0]
+        except IntegracionError:
+            dp = self._ultimo(("panel", red_id))
+        return {f["panel"]: f["nombre"] for f in dp.fuentes if f["origen"] == "panel"} if dp is not None else {}
+
+    def guardar_equipo(self, red_id: int, data: dict, eq_id=None, usuario: str = "") -> dict:
+        actuales = self.equipos(red_id)
+        previo = next((e for e in actuales if e["id"] == eq_id), None)
+        if eq_id is not None and previo is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Esa OLT ya no está cargada: la quitó otro usuario.")
+        nuevo = equipo_field(data, previo)
+        otros = [e for e in actuales if e["id"] != nuevo["id"]]
+        if previo is None and len(otros) >= MAX_OLTS_RED:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"Una red puede tener hasta {MAX_OLTS_RED} OLT.")
+        del_panel = self._olts_del_panel(red_id)
+        if nuevo["panel"] is not None:
+            if self.panel(red_id) is None:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Esta red no está conectada a un panel de OLT.")
+            if del_panel and nuevo["panel"] not in del_panel:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Esa OLT del panel no es de esta red.")
+            if any(e["panel"] == nuevo["panel"] for e in otros):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Esa OLT del panel ya tiene cargada su conexión.")
+            nuevo["nombre"] = del_panel.get(nuevo["panel"]) or nuevo["nombre"] or "OLT"
+        else:
+            if not nuevo["nombre"]:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Ponele un nombre a la OLT.")
+            usados = {normalizado(e["nombre"]) for e in otros if e["panel"] is None} | {normalizado(n) for n in del_panel.values()}
+            if normalizado(nuevo["nombre"]) in usados:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Ya hay una OLT con ese nombre en esta red.")
+
+        def cambio(lista):
+            for i, e in enumerate(lista):
+                if e.get("id") == nuevo["id"]:
+                    lista[i] = nuevo
+                    return
+            lista.append(nuevo)
+
+        self._cambiar_equipos(red_id, cambio)
+        log.info("OLT «%s» (%s) de la red %s: %s por %s", nuevo["nombre"], nuevo["host"], red_id,
+                 "cambiada" if previo else "cargada", usuario)
+        return {"id": nuevo["id"]}
+
+    def quitar_equipo(self, red_id: int, eq_id: str, usuario: str = "") -> dict:
+        def cambio(lista):
+            quedan = [e for e in lista if e.get("id") != eq_id]
+            if len(quedan) == len(lista):
+                raise ApiError(HTTPStatus.NOT_FOUND, "Esa OLT ya no está cargada.")
+            lista[:] = quedan
+
+        self._cambiar_equipos(red_id, cambio)
+        log.info("OLT %s de la red %s: quitada por %s", eq_id, red_id, usuario)
+        return {"ok": True}
+
+    def probar(self, red_id: int, data: dict) -> dict:
+        """Prueba la conexión con los datos del formulario (y, de una OLT ya
+        cargada, con la comunidad y la clave guardadas si no se escribieron otras)."""
+        eq_id = data.get("id")
+        previo = next((e for e in self.equipos(red_id) if e["id"] == eq_id), None) if isinstance(eq_id, str) else None
+        eq = equipo_field(data, previo)
+        if not self._probando.acquire(timeout=2):
+            raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "Ya hay una prueba de conexión en curso: esperá a que termine.")
+        try:
+            return probar_equipo(eq)
+        finally:
+            self._probando.release()
 
     def _wispro_o_error(self, red_id: int):
         """Wispro para una acción (medir, agregar, vincular): la última lectura si es de
@@ -3890,6 +5202,15 @@ class HistoriaOlt:
                  id INTEGER PRIMARY KEY, red INTEGER NOT NULL, t INTEGER NOT NULL, sn TEXT NOT NULL, olt TEXT,
                  pon TEXT, tipo TEXT NOT NULL, causa TEXT)""",
             "CREATE INDEX IF NOT EXISTS eventos_red_t ON eventos(red, t)",
+            # La potencia de cada ONT de una OLT que se lee directo (las del panel, las guarda el panel).
+            """CREATE TABLE IF NOT EXISTS lecturas (
+                 red INTEGER NOT NULL, sn TEXT NOT NULL, t INTEGER NOT NULL, rx REAL NOT NULL,
+                 PRIMARY KEY (red, sn, t)) WITHOUT ROWID""",
+            # Lo que pasa por cada puerto (bits por segundo): los PON ('pon:0/18/3') y los de subida ('eth:0/9/0').
+            """CREATE TABLE IF NOT EXISTS trafico (
+                 red INTEGER NOT NULL, olt TEXT NOT NULL, puerto TEXT NOT NULL, t INTEGER NOT NULL,
+                 entra REAL, sale REAL, PRIMARY KEY (red, olt, puerto, t)) WITHOUT ROWID""",
+            "CREATE INDEX IF NOT EXISTS eventos_red_sn ON eventos(red, sn, t)",
         ):
             c.execute(sentencia)
         self.close()
@@ -3958,6 +5279,13 @@ class HistoriaOlt:
                               "pon = excluded.pon, desde = excluded.desde",
                               (red_id, m["sn"], en, m["olt"], m["interfaz"], cuando))
                 c.executemany("INSERT INTO eventos (red, t, sn, olt, pon, tipo, causa) VALUES (?, ?, ?, ?, ?, ?, ?)", eventos)
+                c.executemany("INSERT OR IGNORE INTO lecturas (red, sn, t, rx) VALUES (?, ?, ?, ?)",
+                              [(red_id, m["sn"], t - t % LECTURAS_S, m["rx"]) for m in dp.onts
+                               if m["fuente"] == "olt" and m["sn"] and m["rx"] is not None and m["estado"] == "online"])
+                c.executemany("INSERT OR IGNORE INTO trafico (red, olt, puerto, t, entra, sale) VALUES (?, ?, ?, ?, ?, ?)",
+                              [(red_id, f["nombre"], x["clave"], t, x.get("entra"), x.get("sale"))
+                               for f in getattr(dp, "fuentes", ()) for placa in f["placas"] for x in placa["puertos"]
+                               if x.get("entra") is not None or x.get("sale") is not None])
                 c.execute("COMMIT")
             except Exception:
                 c.execute("ROLLBACK")
@@ -3978,6 +5306,48 @@ class HistoriaOlt:
         return {"horas": horas, "tramo": tramo, "puntos": [
             {"t": iso_de(r["tc"]), "onts": r["onts"], "en_linea": r["en_linea"], "minimo": r["minimo"],
              "rx_prom": r["rx_prom"], "rx_min": r["rx_min"]} for r in rows]}
+
+    def serie_trafico(self, red_id: int, olt: str, puerto: str, horas: int) -> dict:
+        """Lo que pasó por un puerto en las últimas horas (bits por segundo, promedio
+        y pico de cada tramo). entra y sale, como los cuenta la OLT: por un puerto
+        PON sale la bajada de los clientes; por uno de subida, entra."""
+        desde = int(time.time()) - horas * 3600
+        tramo = max(MUESTREO_S, horas * 3600 // 240 // MUESTREO_S * MUESTREO_S)
+        rows = self.conn().execute(
+            "SELECT t / :c * :c AS tc, AVG(entra) AS entra, MAX(entra) AS entra_max, AVG(sale) AS sale, MAX(sale) AS sale_max "
+            "FROM trafico WHERE red = :r AND olt = :o AND puerto = :p AND t >= :d GROUP BY tc ORDER BY tc",
+            {"c": tramo, "r": red_id, "o": olt, "p": puerto, "d": desde}).fetchall()
+        redondo = lambda v: None if v is None else round(v)  # noqa: E731
+        return {"horas": horas, "tramo": tramo, "puntos": [
+            {"t": iso_de(r["tc"]), "entra": redondo(r["entra"]), "entra_max": redondo(r["entra_max"]),
+             "sale": redondo(r["sale"]), "sale_max": redondo(r["sale_max"])} for r in rows]}
+
+    def serie_ont(self, red_id: int, sn: str, horas: int) -> dict:
+        """La potencia que recibió una ONT (de una OLT que se lee directo) en las
+        últimas horas, su tendencia y lo que le pasó, como lo entrega el panel de las suyas."""
+        ahora = int(time.time())
+        desde = ahora - horas * 3600
+        tramo = max(LECTURAS_S, horas * 3600 // 96 // LECTURAS_S * LECTURAS_S)
+        c = self.conn()
+        rows = c.execute("SELECT t / :c * :c AS tc, AVG(rx) AS rx, MIN(rx) AS bajo, MAX(rx) AS alto, COUNT(*) AS n FROM lecturas "
+                         "WHERE red = :r AND sn = :s AND t >= :d GROUP BY tc ORDER BY tc",
+                         {"c": tramo, "r": red_id, "s": sn, "d": desde}).fetchall()
+        puntos = [{"t": iso_de(r["tc"]), "rx": round(r["rx"], 2), "min": r["bajo"], "max": r["alto"]} for r in rows]
+        tendencia = None
+        if rows:
+            tendencia = {"muestras": sum(r["n"] for r in rows), "rx_min": min(r["bajo"] for r in rows),
+                         "rx_max": max(r["alto"] for r in rows), "rx_prom": round(sum(r["rx"] for r in rows) / len(rows), 2),
+                         "db_semana": None, "desde": puntos[0]["t"], "hasta": puntos[-1]["t"]}
+            xs = [r["tc"] / 604800 for r in rows]
+            if len(rows) >= 8 and xs[-1] - xs[0] >= 1.5 / 7:  # con un día y medio de lecturas, cuánto cambia por semana
+                mx, my = sum(xs) / len(xs), sum(r["rx"] for r in rows) / len(rows)
+                den = sum((x - mx) ** 2 for x in xs)
+                if den > 0:
+                    tendencia["db_semana"] = round(sum((x - mx) * (r["rx"] - my) for x, r in zip(xs, rows)) / den, 2)
+        eventos = [{"cuando": iso_de(r["t"]), "tipo": "offline" if r["tipo"] == "cae" else "online", "causa": r["causa"]}
+                   for r in c.execute("SELECT t, tipo, causa FROM eventos WHERE red = ? AND sn = ? ORDER BY t DESC, id DESC LIMIT 50",
+                                      (red_id, sn))]
+        return {"horas": horas, "puntos": puntos, "tendencia": tendencia, "eventos": eventos}
 
     def antes(self, red_id: int, olt, pon, horas_min: float, horas_max: float):
         """(potencia promedio, ONT en línea) que tenía un PON entre horas_max y
@@ -4045,6 +5415,15 @@ class HistoriaOlt:
                     "AND m.t >= muestras.t / 3600 * 3600 AND m.t < muestras.t / 3600 * 3600 + 3600)",
                     {"f": fino, "d": desde}).rowcount
                 n += c.execute("DELETE FROM eventos WHERE t < ?", (viejo,)).rowcount
+                # El tráfico, igual que las muestras: una anotación por hora. La potencia de cada ONT, una cada seis.
+                n += c.execute("DELETE FROM trafico WHERE t < ?", (viejo,)).rowcount
+                n += c.execute(
+                    "DELETE FROM trafico WHERE t < :f AND t >= :d AND t > (SELECT MIN(m.t) FROM trafico m "
+                    "WHERE m.red = trafico.red AND m.olt = trafico.olt AND m.puerto = trafico.puerto "
+                    "AND m.t >= trafico.t / 3600 * 3600 AND m.t < trafico.t / 3600 * 3600 + 3600)",
+                    {"f": fino, "d": desde}).rowcount
+                n += c.execute("DELETE FROM lecturas WHERE t < ?", (viejo,)).rowcount
+                n += c.execute("DELETE FROM lecturas WHERE t < ? AND t >= ? AND t % 21600 != 0", (fino, desde)).rowcount
                 c.execute("COMMIT")
             except Exception:
                 c.execute("ROLLBACK")
@@ -4056,7 +5435,7 @@ def anotar_olts(integ, store, historia) -> int:
     """Una pasada: anota la OLT de cada red conectada al panel. Devuelve cuántas redes anotó."""
     hechas = 0
     for red in store.networks():
-        if integ.panel(red["id"]) is None:
+        if not integ.lee_olt(red["id"]):
             continue
         try:
             dp, falla = integ.datos_panel(red["id"])
@@ -4066,6 +5445,22 @@ def anotar_olts(integ, store, historia) -> int:
         if falla is None and historia.anotar(red["id"], dp)["muestras"]:
             hechas += 1
     return hechas
+
+
+def lector_olts(integ, store, parar: threading.Event):
+    """El hilo que lee por SNMP las OLT cargadas en traza: mira cada pocos segundos
+    a cuáles les toca (o enseguida, si se cargó o se cambió una)."""
+    minimo = LECTURA_S - 3
+    while not parar.is_set():
+        try:
+            integ.leer_directas([r["id"] for r in store.networks()], minimo)
+        except Exception:  # noqa: BLE001 - el lector no tiene que voltear la API
+            log.exception("no se pudieron leer las OLT")
+        finally:
+            store.close()
+        # Si alguien pidió «Actualizar» (o cargó una OLT), se lee ya, sin esperar el minuto.
+        minimo = REFRESCO_MINIMO if integ.despertar.wait(10) else LECTURA_S - 3
+        integ.despertar.clear()
 
 
 def muestreo(integ, store, historia, parar: threading.Event):
@@ -4374,8 +5769,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/integracion"):
             return self.route_integracion(method, path, q, user)
-        if path in ("/api/olt", "/api/olt/ont", "/api/olt/historia") and method == "GET":
+        if path in ("/api/olt", "/api/olt/ont", "/api/olt/historia", "/api/olt/trafico") and method == "GET":
             return self.route_olt(path, q)
+        if path.startswith("/api/olt/equipos"):
+            return self.route_equipos(method, path, q, user)
 
         raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
 
@@ -4386,20 +5783,53 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Las integraciones no están disponibles en este servidor.")
         red_id = self.red_param(q("red"))
         if path == "/api/olt":
-            return HTTPStatus.OK, integ.olt(self.store, red_id, self.historia, q("refrescar") == "1")
+            return HTTPStatus.OK, integ.olt(self.store, red_id, self.historia, q("refrescar") == "1", self.administra())
         horas = q("horas", "168")
         horas = int(horas) if horas.isascii() and horas.isdigit() and int(horas) in HORAS_HISTORIA else 168
         if path == "/api/olt/ont":
+            if q("sn"):  # una ONT de una OLT que se lee directo: por su número de serie
+                sn = sn_canonico(q("sn")[:40])
+                if sn is None:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "Número de serie inválido.")
+                return HTTPStatus.OK, integ.olt_ont(red_id, None, horas, sn=sn, historia=self.historia)
             ont = int_value(q("ont"), "ont")
             if ont <= 0:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar la ONT.")
             return HTTPStatus.OK, integ.olt_ont(red_id, ont, horas, q("refrescar") == "1")
         if self.historia is None:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "El historial de la OLT no está disponible en este servidor.")
+        if path == "/api/olt/trafico":
+            puerto = q("puerto")[:24]
+            if not re.fullmatch(r"(pon|eth):\d{1,2}/\d{1,2}/\d{1,3}", puerto):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Puerto inválido.")
+            return HTTPStatus.OK, self.historia.serie_trafico(red_id, q("olt")[:80], puerto, horas)
         olt, pon = q("olt")[:80], q("pon")[:20]
         if pon and not re.fullmatch(r"[0-9?]{1,4}(/[0-9]{1,4}){0,3}", pon):
             raise ApiError(HTTPStatus.BAD_REQUEST, "Puerto PON inválido.")
         return HTTPStatus.OK, self.historia.serie(red_id, horas, olt if pon else "", pon)
+
+    def route_equipos(self, method, path, q, user):
+        """Las OLT cargadas en una red: agregar, cambiar, quitar y probar la
+        conexión. Solo quien administra: acá entran la comunidad y la clave."""
+        integ = self.integraciones
+        if integ is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Las integraciones no están disponibles en este servidor.")
+        if not self.administra():
+            raise ApiError(HTTPStatus.FORBIDDEN, "Solo quien administra puede cargar o cambiar una OLT.")
+        resto = path[len("/api/olt/equipos"):].strip("/")
+        if method == "DELETE" and re.fullmatch(r"[0-9a-f]{6,16}", resto):
+            return HTTPStatus.OK, integ.quitar_equipo(self.red_param(q("red")), resto, user)
+        if method not in ("POST", "PUT"):
+            raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
+        data = self.read_json()
+        red_id = self.red_param(data.get("red"))
+        if method == "POST" and resto == "":
+            return HTTPStatus.CREATED, integ.guardar_equipo(red_id, data, None, user)
+        if method == "POST" and resto == "probar":
+            return HTTPStatus.OK, integ.probar(red_id, data)
+        if method == "PUT" and re.fullmatch(r"[0-9a-f]{6,16}", resto):
+            return HTTPStatus.OK, integ.guardar_equipo(red_id, data, resto, user)
+        raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
 
     def route_integracion(self, method, path, q, user):
         """Wispro y el panel de la OLT (solo lectura, salvo agregar clientes al mapa)."""
@@ -4508,6 +5938,8 @@ def serve(db_path: str, host: str, port: int, secret_path: str = "", integracion
     except (sqlite3.Error, OSError) as err:  # sin historial se sigue atendiendo
         log.warning("sin historial de la OLT (olt.db): %s", err)
     parar = threading.Event()
+    threading.Thread(target=lector_olts, args=(Handler.integraciones, Handler.store, parar),
+                     name="lector-olt", daemon=True).start()
     if Handler.historia is not None:
         threading.Thread(target=muestreo, args=(Handler.integraciones, Handler.store, Handler.historia, parar),
                          name="historial-olt", daemon=True).start()
@@ -4605,7 +6037,8 @@ def cli_ver(store: Store, ruta: str) -> int:
     for red in store.networks():
         cfg = data["redes"].get(str(red["id"])) or {}
         w, p = cfg.get("wispro") or {}, cfg.get("panel") or {}
-        if not w and not p:
+        equipos = [e for e in (equipo_de(x) for x in cfg.get("olts") or [] if isinstance(cfg.get("olts"), list)) if e]
+        if not w and not p and not equipos:
             print(f"  {red['nombre']} (red {red['id']}): sin integraciones")
             continue
         print(f"  {red['nombre']} (red {red['id']})")
@@ -4617,6 +6050,11 @@ def cli_ver(store: Store, ruta: str) -> int:
             ids = Panel(str(p.get("url") or ""), p.get("olts")).olts_red
             olts = f"OLT {', '.join(str(x) for x in ids)}" if ids else "sin OLT elegida: sirve solo si el panel tiene una"
             print(f"    Panel de la OLT: {p.get('url')} ({olts})")
+        for e in equipos:  # las que se cargan desde el visor (nunca se muestra la comunidad ni la clave)
+            lee = (f"SNMP en el puerto {e['snmp']['puerto']}" if e["snmp"]["community"] else "sin comunidad de lectura")
+            consola = f"; consola por {e['consola']['protocolo']} en el {e['consola']['puerto']}" if e["consola"]["protocolo"] else ""
+            del_panel = f"; es la OLT {e['panel']} del panel" if e["panel"] is not None else ""
+            print(f"    OLT «{e['nombre']}»: {e['host']} ({lee}{consola}{del_panel}{'' if e['leer'] else '; en pausa'})")
     return 0
 
 
@@ -4727,8 +6165,11 @@ def cli_probar(store: Store, ruta: str, args) -> int:
     if estado["panel"]:
         t = time.monotonic()
         try:
+            integ.leer_directas([red["id"]])  # las OLT cargadas en traza se leen acá mismo
             dp, _ = integ.datos_panel(red["id"])
-            linea = f"Panel de la OLT: {dp.total} ONTs de {', '.join(dp.olts)} ({time.monotonic() - t:.1f} s)"
+            for aviso in dp.avisos:
+                print(f"Ojo: {aviso}")
+            linea = f"{'Panel de la OLT' if integ.panel(red['id']) else 'OLT'}: {dp.total} ONTs de {', '.join(dp.olts) or 'ninguna OLT'} ({time.monotonic() - t:.1f} s)"
             if dp.leido:
                 horas = horas_desde(dp.leido)
                 linea += f"; última lectura {fecha_local(dp.leido)}"
