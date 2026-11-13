@@ -3459,6 +3459,14 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
                             optica.setdefault(int(indice), {})[campo] = round(v * escala, 2)
             except IntegracionError as err:
                 notas.append(f"no entregó la óptica de sus puertos PON ({err})")
+            # Si la OLT no nombra sus puertos como se espera ('GPON 0/1/0'), los PON salen igual
+            # de su número de interfaz (los que tienen óptica son los puertos PON).
+            for ifindex in optica:
+                donde = puerto_gpon(ifindex) if ifindex not in puertos else None
+                if donde:
+                    marco, slot, numero_puerto = (int(x) for x in donde.split("/"))
+                    puertos[ifindex] = {"nombre": f"GPON {donde}", "tipo": "pon", "marco": marco, "slot": slot,
+                                        "puerto": numero_puerto, "entra": None, "sale": None}
         else:
             placas, optica = previa.get("placas", {}), previa.get("optica", {})
 

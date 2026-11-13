@@ -43,6 +43,7 @@ class OltFalsa:
         self.pedidos = 0  # cuántos pedidos SNMP atendió
         self.sesiones = 0  # cuántas veces entraron por Telnet
         self.lenta = 0.0  # segundos que demora cada respuesta
+        self.nombre_pon = "GPON 0/{slot}/{puerto}"  # cómo nombra sus puertos PON (ifName)
         self.muda = False  # no contesta (como con la comunidad equivocada)
         self.onts = {}  # índice 'ifIndex.ont' -> {sn, descripcion, en_linea, causa, cayo, distancia, rx}
         self.pon, self.eth = [], []
@@ -136,7 +137,7 @@ class OltFalsa:
             suyas = [o for i, o in onts.items() if i.startswith(f"{ifindex}.")]
             arriba = bool(suyas)
             poner(f"1.3.6.1.2.1.2.2.1.8.{ifindex}", entero(1 if arriba else 2))
-            poner(f"1.3.6.1.2.1.31.1.1.1.1.{ifindex}", texto(f"GPON 0/{slot}/{puerto}"))
+            poner(f"1.3.6.1.2.1.31.1.1.1.1.{ifindex}", texto(self.nombre_pon.format(slot=slot, puerto=puerto)))
             # Por un puerto PON sale la bajada (40 Mb/s por ONT en línea) y entra la subida (4 Mb/s).
             en_linea = sum(1 for o in suyas if o["en_linea"])
             poner(f"1.3.6.1.2.1.31.1.1.1.6.{ifindex}", contador(int(andando * en_linea * 500000) + 10 ** 9))

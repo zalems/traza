@@ -173,6 +173,13 @@ class OltDirectaTest(unittest.TestCase):
         olt.agregar(5, 999, "#999 Nueva")
         tres = api.leer_huawei(eq, dos, completa=False)
         self.assertIn("HWTC000003E7", {m["sn"] for m in api.medidas_directas(tres, "Prueba")})
+        # Una OLT que nombra de otra manera sus puertos PON: salen igual, por su número de interfaz.
+        olt.nombre_pon = "Huawei-MA5800-GPON_UNI"
+        cuatro = api.leer_huawei(eq)
+        self.assertEqual(sum(1 for p in cuatro["puertos"].values() if p["tipo"] == "pon"), 16)  # los que tienen módulo
+        self.assertEqual({m["sn"]: m for m in api.medidas_directas(cuatro, "Prueba")}["HWTC00000065"]["interfaz"], "0/1/0")
+        self.assertEqual(api.placas_de_lectura(cuatro)[1]["puertos"][2]["interfaz"], "0/1/2")
+        olt.nombre_pon = "GPON 0/{slot}/{puerto}"
         # Con otra comunidad, la OLT no contesta.
         mala = api.equipo_de({"id": "abcdef02", "host": "127.0.0.1", "snmp": {"puerto": olt.puerto, "community": "x"}})
         with self.assertRaises(api.IntegracionError) as ctx:
