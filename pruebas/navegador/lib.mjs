@@ -33,6 +33,10 @@ export async function abrir({ ancho = 1280, alto = 800, movil = false, oscuro = 
   await page.fill('#clave', clave);
   await Promise.all([page.waitForURL((u) => !u.pathname.endsWith('login.html')), page.click('#entrar')]);
   const pedidos = new Map();
+  const rechazos = []; // lo que la API o la sesión contestaron mal mientras cargaba
+  page.on('response', (r) => {
+    if (r.status() >= 400 && /\/(api|auth)\//.test(r.url())) rechazos.push(`${r.status()} ${r.request().method()} ${r.url().slice(BASE.length, BASE.length + 90)}`);
+  });
   page.on('request', (r) => pedidos.set(r, Date.now()));
   page.on('requestfinished', (r) => pedidos.delete(r));
   page.on('requestfailed', (r) => pedidos.delete(r));
@@ -44,6 +48,7 @@ export async function abrir({ ancho = 1280, alto = 800, movil = false, oscuro = 
       cargada: window.ftth?.herramientas?.red?.state?.cargada ?? null, url: location.href, aviso: document.querySelector('#notice-text')?.textContent ?? '' }));
     console.log('  !!  la red no cargó:', JSON.stringify(estado));
     for (const [r, t] of pedidos) console.log(`       esperando hace ${Math.round((Date.now() - t) / 1000)} s: ${r.method()} ${r.url().slice(0, 110)}`);
+    for (const r of rechazos) console.log('        respondió', r);
     for (const e of errores) console.log('       ', e);
     throw err;
   }

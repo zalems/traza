@@ -165,7 +165,7 @@ await page.evaluate(() => window.ftth.herramientas.olt.abrir('resumen'));
 await page.waitForSelector('#olt .olt-cifras');
 await page.focus('[data-pestana="resumen"]');
 await page.keyboard.press('ArrowRight');
-comprobar(await page.evaluate(() => document.activeElement?.dataset.pestana === 'puertos' && document.activeElement.getAttribute('aria-selected') === 'true'), 'las flechas cambian de pestaña');
+comprobar(await page.evaluate(() => document.activeElement?.dataset.pestana === 'equipos' && document.activeElement.getAttribute('aria-selected') === 'true'), 'las flechas cambian de pestaña');
 await page.keyboard.press('Escape');
 comprobar(await page.isHidden('#olt'), 'Escape cierra el tablero');
 const desborde = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

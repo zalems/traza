@@ -4403,3 +4403,581 @@ button.integ-enlace:hover {
     padding-left: 10px;
   }
 }
+
+/* ---- los equipos: cada OLT dibujada como es, con sus placas y sus puertos ---- */
+
+.olt-equipo + .olt-equipo {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.olt-equipo-cab {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.olt-equipo-cab h3 {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.olt-equipo-cab .olt-nota,
+.olt-equipo-cab .olt-novedad-botones {
+  margin-top: 2px;
+}
+
+.olt-equipo-agregar {
+  margin-top: 24px;
+}
+
+.olt-novedad-botones.centro {
+  justify-content: center;
+}
+
+.olt-equipo-agregar button,
+.olt-form-botones button,
+.chasis-lista button {
+  min-height: 34px;
+  padding: 3px 14px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.olt-equipo-agregar button:hover,
+.olt-form-botones button:hover,
+.chasis-lista button:hover {
+  background: var(--paper-dim);
+}
+
+.olt-cuerpo button.primario {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.olt-cuerpo button.primario:hover {
+  background: color-mix(in srgb, var(--ink) 86%, var(--paper));
+}
+
+.olt-cuerpo button.peligro {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.olt-cuerpo button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.olt-cuerpo button.olt-enlace {
+  min-height: 34px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.olt-cuerpo button.olt-enlace.peligro {
+  margin-left: auto;
+  color: var(--signal);
+}
+
+/* el chasis: X17 y X15 son casi cuadrados, y el detalle va al lado; X7 y X2 son apaisados, y va abajo */
+.chasis {
+  display: grid;
+  gap: 16px 24px;
+}
+
+.chasis.alto {
+  grid-template-columns: minmax(0, 540px) minmax(250px, 1fr);
+  align-items: start;
+}
+
+.chasis-marco,
+.chasis-detalle {
+  min-width: 0;
+}
+
+.chasis-dibujo {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 580px;
+}
+
+.chasis-x7 {
+  max-width: 780px;
+}
+
+.chasis-x2 {
+  max-width: 920px;
+}
+
+.chasis-caja {
+  fill: var(--caja);
+  stroke: var(--caja-sombra);
+  stroke-width: 1.5;
+}
+
+.chasis-ventilador,
+.chasis-frente {
+  fill: var(--caja-luz);
+  stroke: var(--caja-sombra);
+  stroke-width: 0.8;
+}
+
+.chasis-aspa {
+  fill: none;
+  stroke: var(--caja-sombra);
+  stroke-width: 2.4;
+  stroke-dasharray: 2.6 2.6;
+}
+
+.chasis-eje {
+  fill: var(--caja-sombra);
+}
+
+.chasis-slot.vacio .chasis-frente {
+  fill: var(--bandeja);
+  stroke-dasharray: 2 2;
+}
+
+/* las placas de control, más oscuras: como en la figura del fabricante */
+.chasis-slot.rol-control .chasis-frente {
+  fill: color-mix(in srgb, var(--ink) 13%, var(--caja-luz));
+}
+
+.chasis-slot.con-falla .chasis-frente {
+  stroke: var(--senal-caida);
+  stroke-width: 1.6;
+}
+
+.chasis-slot.con-placa {
+  cursor: pointer;
+}
+
+.chasis-slot.con-placa:hover .chasis-frente {
+  stroke: var(--ink);
+}
+
+.chasis-slot.elegida .chasis-frente {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.chasis-slot:focus {
+  outline: none;
+}
+
+.chasis-slot:focus-visible .chasis-frente {
+  stroke: var(--signal);
+  stroke-width: 2.6;
+}
+
+.chasis-dibujo text {
+  stroke: none;
+}
+
+.chasis-slot-numero {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.chasis-nombre {
+  fill: var(--ink);
+  font-size: 8.5px;
+  font-weight: 650;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.chasis-puerto {
+  cursor: pointer;
+}
+
+.chasis-puerto rect {
+  fill: var(--nivel, var(--paper));
+  stroke: color-mix(in srgb, var(--ink) 40%, transparent);
+  stroke-width: 0.5;
+}
+
+.chasis-puerto.bien,
+.chasis-chip.bien,
+.chasis-clave.bien,
+.olt-resultado.bien { --nivel: var(--nivel-bien); }
+
+.chasis-puerto.atencion,
+.chasis-chip.atencion,
+.chasis-clave.atencion,
+.olt-resultado.atencion { --nivel: var(--nivel-atencion); }
+
+.chasis-puerto.mal,
+.chasis-chip.mal,
+.chasis-clave.mal,
+.olt-resultado.mal { --nivel: var(--nivel-mal); }
+
+.chasis-puerto.caida,
+.chasis-chip.caida,
+.chasis-clave.caida { --nivel: var(--nivel-caida); }
+
+.chasis-puerto.libre rect,
+.chasis-puerto.apagado rect {
+  stroke: var(--line);
+  stroke-width: 0.9;
+}
+
+.chasis-puerto.ausente rect {
+  fill: transparent;
+  stroke: var(--line);
+  stroke-width: 0.9;
+  stroke-dasharray: 1.6 1.6;
+}
+
+.chasis-puerto:hover rect {
+  stroke: var(--ink);
+  stroke-width: 1.3;
+}
+
+.chasis-puerto.elegido rect {
+  stroke: var(--ink);
+  stroke-width: 2.4;
+}
+
+.chasis-numero {
+  fill: var(--paper);
+  font-size: 7px;
+  font-weight: 750;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+.chasis-puerto.atencion .chasis-numero {
+  fill: #16222c;
+}
+
+.chasis-puerto.libre .chasis-numero,
+.chasis-puerto.apagado .chasis-numero,
+.chasis-puerto.ausente .chasis-numero {
+  fill: var(--muted);
+}
+
+.chasis-leyenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.chasis-clave::before {
+  content: '';
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 5px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: var(--nivel, var(--paper));
+  vertical-align: -1px;
+}
+
+.chasis-clave.libre::before {
+  border-color: var(--line);
+}
+
+.chasis-clave.ausente::before {
+  border: 1px dashed var(--line);
+  background: transparent;
+}
+
+.chasis-lista {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chasis-lista button {
+  width: 100%;
+  text-align: left;
+}
+
+.chasis-lista button[aria-pressed='true'] {
+  background: var(--paper-dim);
+}
+
+/* lo que pasa en la placa y en el puerto que se eligió */
+.chasis-detalle .olt-datos {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.chasis-detalle .olt-datos > div {
+  grid-template-columns: 8.5em minmax(0, 1fr);
+}
+
+.olt-cuerpo h4.chasis-placa-titulo {
+  margin: 0;
+  font-size: 15.5px;
+}
+
+.chasis-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(66px, 1fr));
+  gap: 6px;
+  margin: 10px 0 12px;
+}
+
+.chasis-chip {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  min-height: var(--tap);
+  padding: 4px 6px 4px 8px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--nivel, var(--line));
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.chasis-chip:hover {
+  background: var(--paper-dim);
+}
+
+.chasis-chip strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chasis-chip span {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chasis-chip[aria-pressed='true'] {
+  border-color: var(--ink);
+  border-left-color: var(--nivel, var(--ink));
+  background: var(--paper-dim);
+}
+
+.chasis-puerto-detalle {
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+}
+
+.chasis-puerto-detalle > h4:first-child {
+  font-size: 15px;
+}
+
+.grafico-linea.bajada { stroke: var(--senal-trafico); }
+
+.grafico-linea.subida {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+
+.olt-clave.subida::before {
+  border-top-color: var(--muted);
+}
+
+/* cargar o cambiar una OLT */
+.olt-form {
+  max-width: 740px;
+}
+
+.olt-form-cab {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+  margin-bottom: 4px;
+}
+
+.olt-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px 18px;
+  min-width: 0;
+  margin: 16px 0 0;
+  padding: 12px 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.olt-form legend {
+  padding: 0 6px;
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.olt-campo {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.olt-campo > span:first-child {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.olt-campo small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.olt-campo input,
+.olt-campo select {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+.olt-campo input:focus-visible,
+.olt-campo select:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.olt-secreto {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.olt-tilde {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.olt-tilde input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--ink);
+}
+
+.olt-form-botones {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.olt-form-botones p {
+  width: 100%;
+  margin: 0;
+  font-weight: 650;
+}
+
+.olt-form-botones button.peligro:not(.olt-enlace) {
+  background: var(--signal);
+  color: #fff;
+}
+
+.olt-resultado {
+  margin-top: 14px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--nivel);
+  border-radius: var(--radius-inner);
+}
+
+.olt-cuerpo .olt-resultado h4 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 0 0 4px;
+  font-size: 14.5px;
+}
+
+.olt-marca {
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--nivel);
+  color: var(--paper);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.olt-resultado.atencion .olt-marca {
+  color: #16222c;
+}
+
+.olt-resultado p {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+}
+
+.olt-resultado ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.olt-resultado li + li {
+  margin-top: 4px;
+}
+
+.olt-resultado .olt-revisar {
+  margin-top: 8px;
+  font-weight: 650;
+}
+
+@media (max-width: 840px) {
+  .chasis.alto {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* en el teléfono el dibujo queda chico: los números de slot, más grandes; los de cada puerto están en la lista de abajo */
+@media (max-width: 640px) {
+  .chasis-slot-numero {
+    font-size: 12px;
+  }
+
+  .chasis-numero {
+    font-size: 10px;
+  }
+
+  .chasis-x17 .chasis-numero,
+  .chasis-x15 .chasis-numero {
+    display: none;
+  }
+}

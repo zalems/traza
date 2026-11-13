@@ -2,7 +2,8 @@
 # Corre todas las pruebas en navegador (escritorio, teléfono y modo oscuro) y dice cuáles fallaron.
 cd "$(dirname "$0")" || exit 1
 fallas=0
-for t in "humo.mjs" "olt.mjs" "olt.mjs movil" "olt.mjs movil oscuro" "olt-historia.mjs" "olt-historia.mjs movil" "regresion.mjs" "regresion.mjs movil"; do
+for t in "humo.mjs" "olt.mjs" "olt.mjs movil" "olt.mjs movil oscuro" "olt-historia.mjs" "olt-historia.mjs movil" "regresion.mjs" "regresion.mjs movil" \
+    "equipos.mjs" "equipos.mjs movil" "equipos.mjs movil oscuro"; do
   a=$(date +%s)
   # shellcheck disable=SC2086
   salida="$(node $t 2>&1)"; rc=$?

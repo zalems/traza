@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Lee por SNMP, directo de la OLT, lo que el panel no entrega de cada puerto PON:
 la potencia de salida del SFP, su temperatura, corriente y tensión, y el tráfico.
+Y muestra las primeras filas de cada tabla que traza lee de una OLT cargada en el
+visor (placas, ONT, potencias), con cuánto tarda cada una: sirve para comparar con
+lo que dice la OLT si algo no coincide. No muestra números de serie enteros ni
+descripciones.
 
 Sirve para comprobar, antes de sumarlo a traza, que desde este servidor se llega a
 la OLT por SNMP y que la OLT responde esas tablas. Solo lee (GET y GETBULK de SNMP
@@ -30,6 +34,21 @@ OPTICA = "1.3.6.1.4.1.2011.6.128.1.1.2.23.1"
 COLUMNAS = {1: "temperatura", 2: "tension", 3: "corriente", 4: "tx", 5: "rx"}
 SIN_DATO = 2147483647  # lo que Huawei devuelve cuando no hay lectura
 GPON = 0xFA000000  # los ifIndex de los puertos GPON de Huawei empiezan acá (tipo 125)
+SLOT = "1.3.6.1.4.1.2011.6.3.3.2.1"  # HUAWEI-DEVICE-MIB hwSlotTable (marco.slot)
+XPON = "1.3.6.1.4.1.2011.6.128.1.1.2"  # HUAWEI-XPON-MIB
+# Lo que traza lee de una OLT cargada en el visor: (qué es, columna, cómo se muestra, cuántas filas se piden).
+TABLAS = [
+    ("placas: nombre (hwSlotTypeName)", SLOT + ".21", "texto", 100),
+    ("placas: descripción (hwSlotDesc)", SLOT + ".3", "texto", 100),
+    ("placas: estado (2 normal)", SLOT + ".8", "texto", 100),
+    ("ONT: número de serie", XPON + ".43.1.3", "serie", 5000),
+    ("ONT: descripción", XPON + ".43.1.9", "privado", 5000),
+    ("ONT: estado (1 en línea, 2 no)", XPON + ".46.1.15", "texto", 5000),
+    ("ONT: distancia (m)", XPON + ".46.1.20", "texto", 5000),
+    ("ONT: última caída (fecha)", XPON + ".46.1.23", "texto", 5000),
+    ("ONT: causa de la última caída", XPON + ".46.1.24", "texto", 5000),
+    ("ONT: potencia que recibe (0,01 dBm)", XPON + ".51.1.4", "texto", 60),  # pocas: la OLT se la pregunta a cada ONT
+]
 
 
 # ------------------------------------------------------------------ SNMP v2c
@@ -287,6 +306,23 @@ def main():
                   f"«entra» y «sale» son de la OLT: lo que sube de los clientes y lo que baja hacia ellos.)")
     except SinRespuesta as e:
         print(f"\nLa OLT {e} al leer la óptica de los puertos.")
+    print("\n== Las tablas que traza lee de una OLT cargada en el visor (filas, tiempo, primer índice y primeros valores)")
+    for rotulo, columna, clase, limite in TABLAS:
+        t0 = time.monotonic()
+        try:
+            filas = snmp.recorrer(columna, limite)
+        except SinRespuesta as e:
+            print(f"{rotulo}: la OLT {e}")
+            continue
+        muestra = []
+        for _, v in filas[:3]:
+            if clase == "privado":
+                v = f"({len(str(v))} caracteres)"
+            elif clase == "serie":  # el fabricante sí, el resto no
+                v = f"{str(v)[:8]}… ({len(str(v))} caracteres)"
+            muestra.append(str(v)[:40])
+        tope = " (se pidieron solo esas)" if len(filas) >= limite else ""
+        print(f"{rotulo}: {len(filas)} filas{tope} en {time.monotonic() - t0:.1f} s · primer índice {filas[0][0] if filas else '—'} · {muestra}")
     print(f"\nListo: {snmp.pedidos} pedidos SNMP en {time.monotonic() - inicio:.1f} s, todos de lectura. Nada se cambió en la OLT.")
     return 0
 

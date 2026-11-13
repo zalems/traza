@@ -57,8 +57,9 @@ await page.click('[data-pestana="resumen"]');
 await page.waitForSelector('#olt .olt-cifras');
 comprobar((await page.locator('#olt .olt-red option').allTextContents()).join('|') === 'Formosa prueba|Sin OLT', 'en todas las redes se elige la red');
 await page.selectOption('#olt .olt-red select', { label: 'Sin OLT' });
-await page.waitForSelector('#olt .olt-comando');
-comprobar((await texto(page, '#olt .olt-comando')) === 'sudo /srv/ftth/bin/integraciones panel "Sin OLT" http://DIRECCIÓN-DEL-PANEL:8080 --olt N', 'la red sin OLT dice cómo conectarla');
+await page.waitForFunction(() => /todavía no tiene una OLT/.test(document.querySelector('#olt .olt-cuerpo')?.textContent ?? ''));
+comprobar(/todavía no tiene una OLT de dónde leer/.test(await texto(page, '#olt .olt-cuerpo'))
+  && (await page.locator('#olt .olt-cuerpo button:has-text("Agregar una OLT")').count()) === 1, 'la red sin OLT lo dice y, a quien administra, le ofrece agregarla');
 await page.screenshot({ path: `${CAPTURAS}t30-${sufijo}-sin-olt.png` });
 await page.click('[data-pestana="cajas"]');
 await page.waitForSelector('#olt .olt-lista-cajas li');
@@ -71,7 +72,9 @@ await browser.close();
 todos.push(...errores);
 comprobar(await page.evaluate(() => window.ftth.herramientas.red.state.red === 2), 'entra directo a su red');
 await page.click('.olt-boton');
-await page.waitForSelector('#olt .olt-comando');
+await page.waitForFunction(() => /todavía no tiene una OLT/.test(document.querySelector('#olt .olt-cuerpo')?.textContent ?? ''));
+comprobar(/La carga quien administra/.test(await texto(page, '#olt .olt-cuerpo')) && (await page.locator('#olt .olt-cuerpo button.primario').count()) === 0,
+  'a quien no administra, la red sin OLT le dice quién la carga');
 comprobar(await page.isHidden('#olt .olt-red'), 'no elige red');
 await page.click('[data-pestana="cajas"]');
 await page.waitForSelector('#olt .olt-lista-cajas li');

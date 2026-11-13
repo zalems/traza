@@ -1,16 +1,18 @@
-// El tablero de la OLT de una red: lo que el panel leyó de ella, mirado como red.
-// Resumen y novedades (qué se cayó, qué está al límite), puertos PON, las ONT con
+// El tablero de la OLT de una red: lo que se leyó de ella (el panel, o traza por su
+// cuenta), mirado como red. Resumen y novedades (qué se cayó, qué está al límite),
+// los equipos dibujados con sus placas y sus puertos, los puertos PON, las ONT con
 // la historia de cada una, y las cajas con la potencia promedio y las bocas libres.
 // Solo lee: no cambia nada en la OLT. Cruza con el mapa para decir dónde mirar.
 
 import { api } from './api.js';
 import * as F from './fibras.js';
 import { dbTexto, haceCuanto, textoBocas, textoClientesCaja, tiempo, viejo } from './integracion.js';
+import { bps, setupEquipos } from './equipos.js';
 
-const SONDEO_MS = 60 * 1000; // el panel lee la OLT cada 2 minutos
+const SONDEO_MS = 60 * 1000; // la OLT se lee cada uno o dos minutos
 const PAGINA = 120; // ONT que se dibujan de una vez
 const CLAVE_PESTANA = 'ftth.olt.pestana';
-const PESTANAS = [['resumen', 'Resumen'], ['puertos', 'Puertos PON'], ['onts', 'ONT'], ['cajas', 'Cajas']];
+const PESTANAS = [['resumen', 'Resumen'], ['equipos', 'Equipos'], ['puertos', 'Puertos PON'], ['onts', 'ONT'], ['cajas', 'Cajas']];
 const RANGOS = [[24, '24 h'], [168, '7 días'], [720, '30 días']];
 const MOTIVO = { fibra: 'sin luz', energia: 'sin energía', otra: 'sin señal' };
 const NIVEL_ONT = { bien: 'buena', atencion: 'justa', critica: 'al límite', alta: 'alta: puede saturar', caida: 'sin señal', 'sin-dato': 'sin lectura' };
@@ -131,6 +133,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   let pidiendo = false;
   let turno = 0; // para descartar respuestas que llegan tarde
   let sondeo = null;
+  let repeticion = null; // un pedido más, a los pocos segundos de cargar o actualizar una OLT que se lee directo
   let volverA = null; // a dónde vuelve el foco al cerrar
   let horas = 24; // el lapso de las curvas
   const series = new Map(); // `${red}|${horas}|${olt}|${pon}` -> { datos | error }
@@ -160,12 +163,20 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     return actual.todas ? acciones.redes() : [actual];
   }
 
-  function pedir({ forzar = false } = {}) {
+  // repetir: cuántas veces más se vuelve a pedir, cada pocos segundos (una OLT recién cargada tarda un poco en leerse).
+  function pedir({ forzar = false, repetir = 0 } = {}) {
     if (!redVista) return;
     const redId = redVista;
     const mio = (turno += 1);
     pidiendo = true;
     pintarCabecera();
+    clearTimeout(repeticion);
+    const directas = datos && datosDe === redId && (datos.equipos ?? []).some((e) => e.origen === 'directa');
+    if (repetir > 0 || (forzar && directas)) {
+      repeticion = setTimeout(() => {
+        if (abierta() && redVista === redId && !pidiendo) pedir({ repetir: datos?.onts?.length ? 0 : repetir - 1 });
+      }, 6000);
+    }
     api(`api/olt?red=${redId}${forzar ? '&refrescar=1' : ''}`, { espera: 60000 }).then((res) => {
       if (mio !== turno || redVista !== redId) return;
       for (const o of res.onts ?? []) {
@@ -181,7 +192,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     }).finally(() => {
       if (mio !== turno) return;
       pidiendo = false;
-      if (abierta()) pintar({ conservar: true });
+      if (abierta()) pintar({ conservar: true, lectura: true });
     });
     senal.pedirTodo(forzar ? { forzar: true } : undefined);
   }
@@ -205,13 +216,14 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   }
 
   function detalleOnt(o) {
-    const clave = `${redVista}|${o.panel_id}|${horas}`;
+    const clave = `${redVista}|${o.clave}|${horas}`;
     const hay = detalles.get(clave);
     // Lo leído vale cinco minutos (como en el servidor); mientras se vuelve a pedir, se ve lo anterior.
     if (hay && (hay.pidiendo || hay.error || Date.now() - hay.cuando < 5 * SONDEO_MS)) return hay;
     const entrada = { ...(hay ?? {}), pidiendo: true };
     detalles.set(clave, entrada);
-    api(`api/olt/ont?red=${redVista}&ont=${o.panel_id}&horas=${horas}`, { espera: 40000 }).then(
+    const cual = o.panel_id !== null ? `ont=${o.panel_id}` : `sn=${encodeURIComponent(o.sn)}`;
+    api(`api/olt/ont?red=${redVista}&${cual}&horas=${horas}`, { espera: 40000 }).then(
       (res) => detalles.set(clave, { datos: res, cuando: Date.now() }),
       (err) => {
         detalles.set(clave, { error: err.message });
@@ -286,6 +298,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     const cuentas = datos && datosDe === redVista && datos.resumen ? {
       puertos: datos.pon.length, onts: datos.resumen.onts,
     } : {};
+    if (datos && datosDe === redVista && datos.equipos?.length > 1) cuentas.equipos = datos.equipos.length;
     const totalCajas = senal.cajas().resumenes.size;
     // La cabecera se rehace con cada lectura: el foco queda en el mismo control.
     const conFoco = cab.contains(document.activeElement) ? document.activeElement : null;
@@ -328,14 +341,20 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     ontAbierta = null;
     ponAbierto = null;
     filtro = { ...filtro, pon: '', grupo: null, mostradas: PAGINA };
+    equiposUI.cerrar();
     pintar();
     pedir();
   }
 
   // --------------------------------------------------------------- cuerpo
 
-  function pintar({ conservar = false } = {}) {
+  function pintar({ conservar = false, lectura = false } = {}) {
     if (!abierta()) return;
+    // Con el formulario de una OLT abierto, una lectura nueva no lo rehace (se está escribiendo).
+    if (lectura && pestana === 'equipos' && equiposUI.escribiendo()) {
+      pintarCabecera();
+      return;
+    }
     const arriba = conservar ? cuerpo.scrollTop : 0;
     // Mientras se escribe en el buscador, una lectura nueva rehace solo la lista.
     if (conservar && pestana === 'onts' && cuerpo.querySelector('.olt-lista-onts') && datos?.onts) {
@@ -353,8 +372,9 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     if (pestana === 'cajas') partes.push(...pintarCajas());
     else if (!redVista) partes.push(h('p.olt-vacio', { text: 'Elegí una red para ver su OLT.' }));
     else if (!listos) partes.push(error ? null : h('p.olt-vacio', { text: 'Leyendo la OLT…' }));
+    else if (pestana === 'equipos') partes.push(...equiposUI.pintar());
     else if (!datos.configurada?.panel) partes.push(...sinPanel());
-    else if (!datos.onts) partes.push(h('p.olt-vacio', { text: 'El panel de la OLT no respondió. Probá «Actualizar» en un momento.' }));
+    else if (!datos.onts) partes.push(h('p.olt-vacio', { text: 'No se pudo leer la OLT. Probá «Actualizar» en un momento.' }));
     else if (pestana === 'resumen') partes.push(...pintarResumen());
     else if (pestana === 'puertos') partes.push(...pintarPuertos());
     else partes.push(...pintarOnts());
@@ -375,11 +395,14 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
   }
 
   function sinPanel() {
-    const nombre = redes().find((r) => r.id === redVista)?.nombre ?? 'RED';
     return [
-      h('p.olt-vacio', { text: 'Esta red todavía no está conectada a una OLT.' }),
-      h('p.olt-nota', { text: 'La conexión se hace una vez, en el servidor, con la dirección del panel que lee la OLT y el número de esa OLT:' }),
-      h('pre.olt-comando', { text: `sudo /srv/ftth/bin/integraciones panel "${nombre}" http://DIRECCIÓN-DEL-PANEL:8080 --olt N` }),
+      h('p.olt-vacio', { text: 'Esta red todavía no tiene una OLT de dónde leer.' }),
+      datos.administra
+        ? h('div.olt-novedad-botones.centro', {}, boton('Agregar una OLT', () => {
+          elegirPestana('equipos');
+          equiposUI.abrirFormulario(null);
+        }, { class: 'primario' }))
+        : h('p.olt-nota', { text: 'La carga quien administra traza, en la pestaña «Equipos».' }),
       h('p.olt-nota', { text: 'Las cajas se pueden ver igual, con lo que dicen las cartas de empalme.' }),
     ];
   }
@@ -409,10 +432,10 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
           h('p.olt-novedad-texto', {}, n.texto, n.desde && n.tipo !== 'lectura-vieja' ? h('small', { text: ` · ${haceCuanto(n.desde)}` }) : null),
           pista ? h('p.olt-novedad-pista', { text: pista }) : null,
           h('div.olt-novedad-botones', {},
-            n.onts?.length ? boton(n.cantidad === 1 ? 'Ver la ONT' : `Ver las ${n.cantidad} ONT`, () => irAOnts({ grupo: { titulo: n.texto, ids: new Set(n.onts) } })) : null,
+            n.onts?.length || n.sns?.length ? boton(n.cantidad === 1 ? 'Ver la ONT' : `Ver las ${n.cantidad} ONT`, () => irAOnts({ grupo: { titulo: n.texto, ids: new Set(n.onts ?? []), sns: new Set(n.sns ?? []) } })) : null,
             ir ? boton('Ver en el mapa', ir) : null));
       }))
-      : h('p.olt-bien', { text: r.onts ? 'Sin novedades: nada caído en grupo ni al límite.' : 'El panel no informa ninguna ONT en esta OLT.' });
+      : h('p.olt-bien', { text: r.onts ? 'Sin novedades: nada caído en grupo ni al límite.' : 'No se leyó ninguna ONT de esta OLT.' });
 
     const bloques = [cifras, h('section.olt-bloque', {}, h('h3', { text: 'Para mirar ahora' }), lista)];
 
@@ -474,6 +497,10 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     const varias = new Set(datos.pon.map((p) => p.olt)).size > 1;
     const u = datos.umbrales;
     const filas = [];
+    // Lo que se sabe de cada puerto como puerto (no por sus ONT): se muestra si alguno lo trae.
+    const conTrafico = datos.pon.some((p) => Number.isFinite(p.sale) || Number.isFinite(p.entra));
+    const conModulo = datos.pon.some((p) => Number.isFinite(p.tx));
+    const columnas = 7 + (conTrafico ? 1 : 0) + (conModulo ? 1 : 0);
     for (const p of datos.pon) {
       const clave = `${p.olt}|${p.interfaz}`;
       const caidas = p.onts - p.en_linea;
@@ -490,35 +517,40 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
         h('td', { 'data-rotulo': 'Sin señal' }, caidas ? `${caidas}${causas ? ` (${causas})` : ''}` : '0'),
         h('td', { 'data-rotulo': 'Reciben' }, p.rx_prom === null ? '—' : `${dbTexto(p.rx_prom)} dBm`),
         h(`td${p.rx_min !== null && p.rx_min <= u.critica ? '.mal' : p.rx_min !== null && p.rx_min <= u.atencion ? '.atencion' : ''}`, { 'data-rotulo': 'La peor' }, p.rx_min === null ? '—' : dbTexto(p.rx_min)),
+        conTrafico ? h('td', { 'data-rotulo': 'Tráfico' }, Number.isFinite(p.sale) || Number.isFinite(p.entra) ? `↓ ${bps(p.sale)} · ↑ ${bps(p.entra)}` : '—') : null,
+        conModulo ? h('td', { 'data-rotulo': 'Emite' }, Number.isFinite(p.tx) ? `${dbTexto(p.tx)} dBm` : '—') : null,
         h('td.olt-botones', {},
           boton('Ver sus ONT', () => irAOnts({ pon: clave })),
           datos.historia ? boton('Historia', () => {
             ponAbierto = abierto ? null : clave;
             pintar({ conservar: true });
           }, { 'aria-expanded': String(abierto) }) : null)));
-      if (abierto) filas.push(h('tr.olt-historia-pon', {}, h('td', { colspan: '7' }, ...historiaPon(p))));
+      if (abierto) filas.push(h('tr.olt-historia-pon', {}, h('td', { colspan: String(columnas) }, ...historiaPon(p))));
     }
+    const titulos = ['Puerto', 'ONT', 'En línea', 'Sin señal', 'Reciben (promedio)', 'La peor',
+      conTrafico ? 'Tráfico (bajada · subida)' : null, conModulo ? 'Emite el puerto' : null, ''].filter((t) => t !== null);
     return [
       h('div.olt-tabla-marco', {}, h('table.olt-tabla', {},
-        h('thead', {}, h('tr', {}, ...['Puerto', 'ONT', 'En línea', 'Sin señal', 'Reciben (promedio)', 'La peor', ''].map((t) => h('th', { scope: 'col', text: t })))),
+        h('thead', {}, h('tr', {}, ...titulos.map((t) => h('th', { scope: 'col', text: t })))),
         h('tbody', {}, ...filas))),
       h('p.olt-nota', { text: `Potencia que recibe cada ONT, según la OLT. Para mirar: ${dbTexto(u.atencion)} dBm o menos; al límite: ${dbTexto(u.critica)} o menos.` }),
     ];
   }
 
-  function historiaPon(p) {
+  // Las curvas de un puerto PON con lo que traza anotó (sinLapsos: quien llama ya puso el selector del lapso).
+  function historiaPon(p, { sinLapsos = false } = {}) {
     const s = serie(p.olt, p.interfaz);
     const puntos = s.datos?.puntos ?? [];
     if (puntos.length < 2) {
       return [h('p.olt-nota', { text: s.error ? `No se pudo leer el historial: ${s.error}` : s.pidiendo && !s.datos ? 'Leyendo el historial…'
-        : 'Todavía no hay historia de este puerto en el lapso elegido: se anota cada pocos minutos.' }), lapsos()];
+        : 'Todavía no hay historia de este puerto en el lapso elegido: se anota cada pocos minutos.' }), sinLapsos ? null : lapsos()];
     }
     const hasta = Date.now();
     const desde = hasta - horas * HORA;
     const hueco = (s.datos.tramo ?? 300) * 3500;
     const u = datos.umbrales;
     return [
-      h('div.olt-bloque-cab', {}, h('h4', { text: `PON ${p.interfaz}: ONT en línea` }), lapsos()),
+      h('div.olt-bloque-cab', {}, h('h4', { text: `PON ${p.interfaz}: ONT en línea` }), sinLapsos ? null : lapsos()),
       grafico({ desde, hasta, hueco, positivo: true, formato: (v) => String(Math.round(v)), series: [
         { puntos: puntos.map((x) => [tiempo(x.t), x.onts]), clase: 'registradas', escalon: true },
         { puntos: puntos.map((x) => [tiempo(x.t), x.minimo]), clase: 'en-linea', escalon: true }] }),
@@ -553,7 +585,7 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     const g = filtro.grupo;
     let lista = datos.onts.filter((o) => pasaEstado[filtro.estado](o)
       && (!filtro.pon || `${o.olt}|${o.interfaz}` === filtro.pon)
-      && (!g || (g.ids ? g.ids.has(o.panel_id) : g.sns.has(o.sn)))
+      && (!g || g.ids?.has(o.panel_id) || g.sns?.has(o.sn))
       && palabras.every((p) => o.buscar.includes(p)));
     if (ORDENES[filtro.orden]) lista = [...lista].sort(ORDENES[filtro.orden]);
     return lista;
@@ -649,12 +681,13 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
         : dato('Recibe', o.rx === null ? null : `${dbTexto(o.rx, 2)} dBm · ${NIVEL_ONT[o.nivel] ?? ''}`),
       dato('Emite', o.tx === null || o.nivel === 'caida' ? null : `${dbTexto(o.tx, 2)} dBm`),
       dato('Puerto', `${o.interfaz ?? '?'}, ONT ${o.ont_id ?? '?'}${datos.olts.length > 1 ? ` · ${o.olt}` : ''}`),
+      dato('Fibra hasta la OLT', Number.isFinite(o.distancia) && o.distancia > 0 ? `${Math.round(o.distancia).toLocaleString('es-AR')} m` : null),
       dato('N.º de serie', o.sn),
       dato('Contrato', o.contrato !== undefined && o.contrato !== null ? `#${o.contrato}${o.titular ? ` · ${o.titular}` : ''}` : null),
       dato('Caja', o.nap),
       dato('Leída', o.cuando ? haceCuanto(o.cuando) : null),
     )];
-    if (o.panel_id !== null) {
+    if (o.panel_id !== null || o.sn) {
       const d = detalleOnt(o);
       if (d.pidiendo && !d.datos) partes.push(h('p.olt-nota', { text: 'Leyendo su historia…' }));
       else if (d.error) partes.push(h('p.olt-nota.alerta', { text: `No se pudo leer su historia: ${d.error}` }));
@@ -672,7 +705,8 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
           ? `${t.db_semana < 0 ? 'Viene bajando' : 'Viene subiendo'} ${dbTexto(Math.abs(t.db_semana))} dB por semana. ` : '';
         const rango = Number.isFinite(t?.rx_min) && Number.isFinite(t?.rx_max) ? `Entre ${dbTexto(t.rx_min)} y ${dbTexto(t.rx_max)} dBm en el lapso.` : '';
         partes.push(h('div.olt-bloque-cab', {}, h('h4', { text: 'Potencia que recibe (dBm)' }), lapsos()));
-        partes.push(dibujo ?? h('p.olt-nota', { text: 'El panel no tiene lecturas de esta ONT en el lapso elegido.' }));
+        partes.push(dibujo ?? h('p.olt-nota', { text: o.panel_id !== null ? 'El panel no tiene lecturas de esta ONT en el lapso elegido.'
+          : 'Todavía no hay historia de esta ONT en el lapso elegido: traza anota su potencia cada 15 minutos.' }));
         if (ritmo || rango) partes.push(h(`p.olt-nota${t?.db_semana <= -0.5 ? '.alerta' : ''}`, { text: `${ritmo}${rango}` }));
         const eventos = (d.datos.eventos ?? []).slice(0, 12);
         if (eventos.length) {
@@ -804,6 +838,20 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     }
   }
 
+  // Los equipos (el chasis de cada OLT y cómo se llega a ella) tienen su módulo.
+  const equiposUI = setupEquipos({
+    h, boton, grafico, toast,
+    redVista: () => redVista,
+    nombreRed: () => redes().find((r) => r.id === redVista)?.nombre ?? '',
+    datos: () => (datos && datosDe === redVista ? datos : null),
+    repintar: (opciones) => pintar(opciones),
+    pedir: (opciones) => pedir(opciones),
+    irAOnts,
+    historiaPon: (p) => historiaPon(p, { sinLapsos: true }),
+    lapsos,
+    horas: () => horas,
+  });
+
   // --------------------------------------------------------- abrir, cerrar
 
   function abrir(cual = null) {
@@ -845,8 +893,10 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     document.body.classList.remove('con-olt');
     clearInterval(sondeo);
     sondeo = null;
+    clearTimeout(repeticion);
     turno += 1;
     pidiendo = false;
+    equiposUI.cerrar();
     cuerpo.replaceChildren();
     for (const el of apagados) el.inert = false;
     apagados = [];

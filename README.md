@@ -1,12 +1,13 @@
-# Plataforma FTTH · kit 0.10.0
+# Plataforma FTTH · kit 0.12.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
 NAP, botellas, nodos, clientes, reservas y cables) y las cartas de empalme
 (fibras con sus colores, fusiones, splitters y el recorrido de cada pelo),
 desde la computadora o desde el teléfono en la calle. Si se conecta con
-Wispro y con el panel de la OLT, cada NAP muestra sus clientes y la potencia
-de sus ONTs. Se instala en un servidor propio.
+Wispro y con la OLT (a través de un panel o leyéndola directo), cada NAP
+muestra sus clientes y la potencia de sus ONTs, y la OLT se ve dibujada con
+sus placas y sus puertos. Se instala en un servidor propio.
 
 El nombre `ftth` (carpeta `/srv/ftth`, sitio `ftth.conf`, servicios
 `ftth-auth` y `ftth-api`) es neutro a propósito: la instalación no queda atada
@@ -125,9 +126,15 @@ se consultan recién cuando alguien las elige.
   ahí o antes ("todas cuelgan de BOT-12 y abajo no queda nadie más: el corte
   está en BOT-12 o en el cable que le llega"), con un toque para verlo en el
   mapa. Debajo, la curva de ONT en línea (24 horas, 7 o 30 días) y lo que
-  cayó y volvió en los últimos dos días, con su hora. *Puertos PON*: por
-  puerto, cuántas ONT tiene, cuántas en línea y sin señal (y la causa), la
-  potencia promedio que reciben y la peor, con la historia de cada puerto.
+  cayó y volvió en los últimos dos días, con su hora. *Equipos*: cada OLT
+  dibujada como es de frente (el chasis con sus slots, las placas puestas y
+  los puertos de cada una), con el color de cada puerto según cómo están sus
+  ONT; tocando una placa o un puerto se ve qué pasa ahí (ONT, potencia, lo que
+  emite el módulo del puerto, tráfico de ahora y su historia). Quien
+  administra carga ahí las OLT y prueba la conexión (ver más abajo).
+  *Puertos PON*: por puerto, cuántas ONT tiene, cuántas en línea y sin señal
+  (y la causa), la potencia promedio que reciben y la peor, el tráfico (bajada
+  y subida) y lo que emite, con la historia de cada puerto.
   *ONT*: todas, para buscar por nombre, número de serie, contrato, puerto o
   caja, filtrar (en línea, sin señal, señal baja, sin cliente en el mapa) y
   ordenar (la peor señal primero, lo último que cayó primero); tocando una se
@@ -328,12 +335,77 @@ el panel (todas sus rutas y la forma de cada respuesta de lectura: placas,
 puertos, uplinks, tráfico), sin llamar nada que cambie algo ni que lea la
 OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para leer por
 SNMP, directo de la OLT, la óptica de cada puerto PON (potencia de salida del
-SFP, temperatura, corriente, tensión) y su tráfico, y comprobar así que desde
-el servidor se llega a la OLT: `python3 herramientas/muestras-snmp.py --olt N`
-(pide la community sin mostrarla; solo lee). Para ver cómo están las
+SFP, temperatura, corriente, tensión) y su tráfico, comprobar así que desde
+el servidor se llega a la OLT y ver las primeras filas de cada tabla que traza
+lee de una OLT cargada en el visor (placas, ONT, potencias; sin números de
+serie enteros ni descripciones): `python3 herramientas/muestras-snmp.py --olt N`
+o `--host DIRECCIÓN` (pide la community sin mostrarla; solo lee). Para ver cómo están las
 ubicaciones de las NAPs y de los contratos en Wispro, por OLT (solo cuentas y
 distancias): `python3 herramientas/ubicaciones-wispro.py RED` (el número de la
 red).
+
+### Las OLT de cada red
+
+Hay dos maneras de que traza lea la OLT de una red, y se pueden combinar:
+
+- **Un panel de OLT** (el de arriba, `integraciones panel`): traza le pide al
+  panel lo que el panel ya leyó.
+- **Directo**: traza lee la OLT por SNMP. Es lo que sirve para una red cuya
+  OLT está en otro lado (se llega por una IP pública) o que no tiene panel.
+
+Las OLT se cargan desde el visor, en el tablero de la OLT, pestaña *Equipos*,
+"Agregar una OLT". Solo quien administra (los demás ven la OLT dibujada, sin
+cómo se llega a ella). Se indica:
+
+- el **nombre** con que se la va a ver y la **dirección** (IP o nombre) con
+  que el servidor llega a ella;
+- el **modelo** (Huawei MA5800 o EA5800, X17, X15, X7 o X2): de ahí sale el
+  dibujo del chasis. Si no se elige, se deduce de dónde tiene las placas;
+- la **lectura**: puerto UDP (161) y comunidad de SNMP v2c. Alcanza con una
+  comunidad de solo lectura;
+- la **consola** (opcional): SSH o Telnet, puerto, usuario y clave. Por ahora
+  se usa solo para comprobar que se puede entrar; conviene un usuario de
+  consulta;
+- la **hora de la OLT** (la zona de su reloj), para ubicar las caídas que
+  ella anota.
+
+"Probar la conexión" se puede usar antes de guardar: dice si la OLT respondió
+por SNMP y qué entrega (su nombre, las placas, el chasis, cuántos puertos PON
+y ONT, si da la potencia de los puertos y de las ONT) y si se pudo entrar por
+la consola. Si no anduvo, dice qué revisar. Lo más común:
+
+- en la OLT: `snmp-agent community read LA-COMUNIDAD` y, si esa comunidad
+  tiene una lista de acceso, que incluya la dirección del servidor de traza;
+- para una OLT de otra red: en el router que tiene delante, reenviar UDP 161
+  (y el puerto de la consola, si se usa) hacia la OLT, mejor limitado a la IP
+  pública con que sale el servidor de traza. SNMP v2c no viaja cifrado: si se
+  puede, conviene un túnel (VPN) en vez de publicar el puerto;
+- para probar SSH el servidor necesita el cliente (`apt install
+  openssh-client`); sin él, la prueba solo dice si el puerto responde.
+
+La comunidad y la clave se escriben en el visor, viajan por HTTPS y quedan en
+`/srv/ftth/data/integraciones.json` (solo lo lee el usuario del servicio). No
+vuelven a salir del servidor: al cambiar una OLT, su casilla aparece vacía y
+se completa solo para cambiarla. Si se cambia la dirección o el puerto, hay
+que escribirlas de nuevo: lo guardado no se le manda a otro equipo.
+`integraciones ver` lista las OLT cargadas, sin esos dos datos.
+
+Qué lee traza de una OLT cargada, y cada cuánto: cada minuto, el estado de
+cada ONT (en línea o no, por qué cayó y cuándo) y el tráfico de cada puerto;
+cada cinco minutos, la potencia que recibe cada ONT, la distancia, las placas
+y la óptica de cada puerto PON (lo que emite, temperatura, tensión y
+corriente). Solo lee (GET y GETBULK): no cambia nada en la OLT. "Actualizar",
+en el tablero, la lee en el momento. Con eso anda todo lo demás (novedades,
+puertos, ONT, cajas, la señal en el mapa) igual que con un panel. La historia
+de cada ONT la guarda traza (su potencia cada 15 minutos; a los ocho días,
+una lectura cada seis horas), junto con el tráfico de cada puerto, en
+`olt.db`.
+
+Una OLT que ya viene de un panel también puede tener cargada su conexión
+("Cargar su conexión", en su tarjeta): sus ONT las sigue dando el panel y de
+la OLT se lee lo que el panel no informa (lo que emite cada puerto PON).
+
+Por ahora se leen OLT Huawei MA5800 y EA5800 (las tablas de HUAWEI-XPON-MIB).
 
 ### Publicarlo con nombre y HTTPS
 
@@ -560,7 +632,12 @@ fallas y plazos, agregar dos veces a la vez, traer toda la red de Wispro,
 deshacerlo y traerla dos veces a la vez, elegir sus OLT y quitar lo de la que
 no se usa, NAPs amontonadas, el estado de las ONT para la señal, las cajas
 con sus lecturas, el tablero de la OLT con sus novedades y su historial, el
-comando `integraciones`).
+comando `integraciones`), y las OLT cargadas en traza contra una OLT Huawei
+de mentira (`pruebas/olt_falsa.py`: SNMP y Telnet en la misma máquina): la
+lectura por SNMP, cargar, cambiar y quitar una OLT (y que la comunidad y la
+clave no vuelvan a salir), la prueba de conexión, el tablero de una red que
+se lee directo con su historial y su tráfico, y el chasis de una OLT del
+panel.
 `node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos,
 potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo, y
 dónde se juntan los recorridos de varios clientes) del visor, y
@@ -626,8 +703,31 @@ actualización desde 0.10.0. Del panel real usa lo que ya usaban las fichas
 forma de los puntos de la serie no estaba en las muestras, así que traza
 acepta varias (si no entiende ninguna, muestra la tendencia sin la curva).
 
+Las OLT cargadas en traza y su lectura directa (0.12.0) se probaron contra
+una OLT de mentira armada con las tablas que publica Huawei (HUAWEI-XPON-MIB
+y HUAWEI-DEVICE-MIB): en las pruebas de la API (con Python 3.11 y 3.13), en
+Chromium (escritorio, 390 × 844 y modo oscuro) y con la actualización desde
+0.11.0, la vuelta a 0.11.0 y la subida de nuevo. El cliente SNMP propio se
+comparó con net-snmp (mismas filas y valores que `snmpwalk` contra `snmpd`);
+la prueba de la consola, contra un servidor OpenSSH (SSH) y contra la OLT de
+mentira (Telnet). Los dibujos de los chasis X17, X7 y X2 siguen las figuras
+de la descripción de hardware de Huawei; el X15 se dibuja como el X17 con dos
+slots menos (su figura no la tuve a la vista).
+
 No se pudo probar, y hay que mirarlo en el uso real:
 
+- La lectura directa contra una OLT de verdad: al escribirla, ninguna OLT
+  contestaba SNMP desde el servidor de traza. Lo primero para mirar con una
+  es "Probar la conexión" (dice qué entrega y cuánto tarda en dar la potencia
+  de una ONT) y que las cuentas de ONT y de puertos coincidan con las de la
+  OLT. En particular: el nombre de cada placa (traza lo busca en dos columnas
+  de la tabla de slots), cuánto tarda una OLT con cientos de ONT en dar la
+  potencia de todas (la pide de a 20, con 10 segundos de espera; si no llega,
+  sigue con lo demás y lo avisa) y la hora de las caídas (según la zona que
+  se indique para el reloj de la OLT).
+- La consola por SSH contra una OLT de verdad (las que tienen años usan
+  algoritmos que el cliente de hoy trae apagados; traza los habilita si el
+  cliente del servidor todavía los tiene).
 - El tablero de la OLT con el panel real: los textos de las causas de caída
   (traza reconoce LOS, LOF y dying gasp; lo demás va como "sin causa") y la
   curva de cada ONT.
