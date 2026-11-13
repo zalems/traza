@@ -3476,3 +3476,930 @@ button.integ-enlace:hover {
     transition: transform 0.15s ease;
   }
 }
+
+/* ------------------------------------------------------ tablero de la OLT */
+
+/* Cómo recibe una ONT, un puerto o una caja: el color va siempre con una forma
+   distinta (lleno, hueco) y con el texto al lado, nunca solo. */
+:root {
+  --nivel-bien: var(--senal-trafico);
+  --nivel-atencion: var(--senal-luz);
+  --nivel-mal: var(--senal-caida);
+  --nivel-caida: #8f1d18;
+  --nivel-ninguno: #7c8890;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --nivel-caida: #ff8a80;
+    --nivel-ninguno: #8d9aa2;
+  }
+}
+
+.nivel-bien { --nivel: var(--nivel-bien); }
+.nivel-atencion { --nivel: var(--nivel-atencion); }
+.nivel-mal { --nivel: var(--nivel-mal); }
+.nivel-caida { --nivel: var(--nivel-caida); }
+.nivel-ninguno { --nivel: var(--nivel-ninguno); }
+
+/* el botón del mapa: debajo del de la señal */
+.olt-boton svg circle {
+  fill: var(--ink);
+}
+
+.olt {
+  position: fixed;
+  z-index: 7;
+  inset: 0;
+  display: grid;
+  padding: calc(var(--edge) + var(--safe-top)) calc(var(--edge) + var(--safe-right))
+    calc(var(--edge) + var(--safe-bottom)) calc(var(--edge) + var(--safe-left));
+  background: rgb(16 24 30 / 0.42);
+}
+
+.olt-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1040px, 100%);
+  min-height: 0;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.olt-cab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 8px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.olt-titulo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 10px;
+  min-width: 0;
+}
+
+.olt-titulo small {
+  width: 100%;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.olt-titulo strong {
+  font-size: 20px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.olt-red select,
+.olt-selectores select {
+  min-height: 34px;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 650;
+}
+
+.olt-acciones {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.olt-leido {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.olt-leido.alerta,
+.olt-nota.alerta,
+.olt-aviso.alerta {
+  color: var(--signal);
+  font-weight: 650;
+}
+
+.olt-actualizar,
+.olt-novedad-botones button,
+.olt-botones button,
+.olt-mas button,
+.olt-selectores > button {
+  min-height: 34px;
+  padding: 3px 12px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.olt-actualizar:hover,
+.olt-novedad-botones button:hover,
+.olt-botones button:hover,
+.olt-mas button:hover,
+.olt-selectores > button:hover {
+  background: var(--paper-dim);
+}
+
+.olt-actualizar:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: default;
+}
+
+/* las pestañas: la elegida, subrayada con tinta */
+.olt-pestanas {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 2px;
+  margin-left: -8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.olt-pestanas button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.olt-pestanas button:hover {
+  color: var(--ink);
+}
+
+.olt-pestanas button[aria-selected='true'] {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.olt-cuenta {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--paper-dim);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.olt-cuerpo {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 16px 32px;
+  overscroll-behavior: contain;
+}
+
+.olt-cuerpo:focus {
+  outline: none;
+}
+
+.olt-cuerpo h3 {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 750;
+}
+
+.olt-cuerpo h4 {
+  margin: 12px 0 4px;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.olt-bloque {
+  margin-top: 22px;
+}
+
+.olt-bloque > h3,
+.olt-bloque-cab {
+  margin-bottom: 8px;
+}
+
+.olt-bloque-cab {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.olt-bloque-cab h4 {
+  margin: 0;
+}
+
+.olt-nota,
+.olt-vacio,
+.olt-bien {
+  max-width: 72ch;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-wrap: pretty;
+}
+
+.olt-vacio {
+  margin: 18px 0 6px;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.olt-bien {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.olt-aviso {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+}
+
+.olt-comando,
+.olt-copia {
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: var(--paper-dim);
+  color: var(--ink);
+  font: 500 12.5px/1.45 ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+}
+
+.olt-copia {
+  display: block;
+  width: 100%;
+  resize: vertical;
+}
+
+/* las cuentas: una tira de números, no tarjetas */
+.olt-cifras {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0;
+  border-block: 1px solid var(--line);
+}
+
+.olt-cifra {
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  padding: 11px 12px 10px;
+  border: 0;
+  border-left: 1px solid var(--paper-dim);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.olt-cifra:first-child {
+  padding-left: 2px;
+  border-left: 0;
+}
+
+.olt-cifra:hover {
+  background: var(--paper-dim);
+}
+
+.olt-cifra strong {
+  font-size: 30px;
+  font-weight: 750;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+
+.olt-cifra span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.olt-cifra[class*='nivel-'] span::before {
+  content: '';
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--nivel);
+}
+
+.olt-cifra.nivel-caida span::before {
+  border: 2.5px solid var(--nivel);
+  background: transparent;
+}
+
+.olt-cifra small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* las novedades */
+.olt-novedades,
+.olt-recientes,
+.olt-eventos,
+.olt-lista {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.olt-novedad {
+  padding: 9px 12px 10px;
+  border-left: 4px solid var(--nivel);
+  background: color-mix(in srgb, var(--nivel) 7%, transparent);
+}
+
+.olt-novedad + .olt-novedad {
+  margin-top: 6px;
+}
+
+.olt-novedad p {
+  max-width: 78ch;
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.olt-novedad-texto {
+  font-weight: 650;
+}
+
+.olt-novedad-texto small {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.olt-novedad-pista {
+  margin-top: 3px !important;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.olt-novedad-botones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.olt-recientes li,
+.olt-eventos li {
+  display: grid;
+  grid-template-columns: 6.2em minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--paper-dim);
+  font-size: 13.5px;
+}
+
+.olt-recientes time,
+.olt-eventos time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.olt-recientes .cae span {
+  font-weight: 650;
+}
+
+/* el lapso de las curvas: 24 h | 7 días | 30 días */
+.olt-lapsos,
+.olt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.olt-lapsos button,
+.olt-chips button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.olt-chips button {
+  min-height: 34px;
+}
+
+.olt-lapsos button:hover,
+.olt-chips button:hover {
+  background: var(--paper-dim);
+}
+
+.olt-lapsos button[aria-pressed='true'],
+.olt-chips button[aria-pressed='true'] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.olt-chips button[aria-pressed='true'] .olt-cuenta {
+  background: color-mix(in srgb, var(--paper) 22%, transparent);
+  color: var(--paper);
+}
+
+/* las curvas */
+.grafico {
+  margin: 4px 0 2px;
+}
+
+.grafico-lienzo {
+  position: relative;
+  height: 148px;
+  border-block: 1px solid var(--paper-dim);
+}
+
+.grafico-lienzo svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: none;
+  overflow: visible;
+}
+
+.grafico-linea {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.grafico-linea.en-linea { stroke: var(--senal-trafico); }
+.grafico-linea.peor { stroke: var(--senal-caida); stroke-width: 1.5; }
+
+.grafico-linea.registradas {
+  stroke: var(--muted);
+  stroke-width: 1.3;
+  stroke-dasharray: 5 4;
+}
+
+.grafico-umbral {
+  stroke: var(--senal-luz);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.grafico-umbral.mal { stroke: var(--senal-caida); }
+
+.grafico-valor,
+.grafico-marca {
+  position: absolute;
+  left: 0;
+  padding: 0 4px 0 0;
+  transform: translateY(-50%);
+  background: color-mix(in srgb, var(--paper) 82%, transparent);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.grafico-marca {
+  left: auto;
+  right: 0;
+  padding: 0 0 0 4px;
+}
+
+.grafico-eje {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 3px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.olt-claves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.olt-clave::before {
+  content: '';
+  display: inline-block;
+  width: 18px;
+  margin-right: 6px;
+  border-top: 2px solid var(--senal-trafico);
+  vertical-align: 4px;
+}
+
+.olt-clave.registradas::before {
+  border-top: 1.5px dashed var(--muted);
+}
+
+/* los puertos PON */
+.olt-tabla-marco {
+  overflow-x: auto;
+}
+
+.olt-tabla {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.olt-tabla th,
+.olt-tabla td {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--paper-dim);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.olt-tabla thead th {
+  border-bottom-color: var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.olt-tabla tbody th {
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.olt-tabla tbody th small {
+  display: block;
+  padding-left: 18px;
+  color: var(--nivel);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: normal;
+}
+
+.olt-tabla td.atencion,
+.olt-tabla td.mal {
+  font-weight: 700;
+}
+
+.olt-tabla td.mal {
+  color: var(--nivel-caida);
+}
+
+.olt-barra {
+  display: block;
+  width: 64px;
+  height: 4px;
+  margin-top: 3px;
+  border-radius: 2px;
+  background: var(--paper-dim);
+}
+
+.olt-barra span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--senal-trafico);
+}
+
+.olt-botones {
+  white-space: nowrap;
+  text-align: right !important;
+}
+
+.olt-botones button + button {
+  margin-left: 6px;
+}
+
+.olt-botones button[aria-expanded='true'] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.olt-historia-pon td {
+  padding: 4px 0 18px;
+}
+
+/* el punto de estado: lleno si está en línea, hueco si no hay señal */
+.olt-punto {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--nivel, var(--nivel-ninguno));
+}
+
+.nivel-caida > .olt-fila .olt-punto,
+.nivel-caida > th .olt-punto {
+  border: 2.5px solid var(--nivel);
+  background: transparent;
+}
+
+.nivel-ninguno > .olt-fila .olt-punto {
+  border: 1.5px dashed var(--nivel);
+  background: transparent;
+}
+
+/* filtros de las listas */
+.olt-filtros {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.olt-buscar input {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-inner);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
+.olt-selectores {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.olt-selectores label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.olt-grupo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 7px 10px;
+  border-left: 4px solid var(--ink);
+  background: var(--paper-dim);
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.olt-cuantas {
+  margin: 8px 0 2px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+/* una ONT o una caja por renglón */
+.olt-lista > li {
+  border-bottom: 1px solid var(--paper-dim);
+}
+
+.olt-fila {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 1px 0;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 7px 4px 7px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.olt-fila:hover,
+.olt-fila[aria-expanded='true'] {
+  background: var(--paper-dim);
+}
+
+.olt-fila-nombre {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.olt-fila-valor {
+  padding-left: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.nivel-caida > .olt-fila .olt-fila-valor,
+.nivel-mal > .olt-fila .olt-fila-valor {
+  color: var(--nivel-caida);
+}
+
+.olt-fila-linea {
+  grid-column: 2 / -1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.olt-detalle {
+  padding: 4px 4px 16px 20px;
+  background: var(--paper-dim);
+}
+
+.olt-datos {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 18px;
+  margin: 0 0 6px;
+  padding-top: 4px;
+}
+
+.olt-datos > div {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr);
+  gap: 8px;
+}
+
+.olt-datos dt {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.olt-datos dd {
+  margin: 0;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.olt-eventos li {
+  grid-template-columns: 6.2em minmax(0, 1fr);
+  border-bottom-color: color-mix(in srgb, var(--line) 50%, transparent);
+  font-size: 13px;
+}
+
+.olt-mas {
+  padding-top: 12px;
+}
+
+/* en la leyenda de la señal: qué quiere decir el anillo de cada caja */
+.senal-anillos {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  width: 26px;
+  justify-content: center;
+}
+
+.senal-anillo {
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--nivel);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--nivel) 22%, transparent);
+}
+
+.senal-ver-cajas {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 7px;
+  padding: 3px 8px;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-inner);
+  background: transparent;
+  color: var(--ink);
+  font: 650 12.5px/1.2 var(--font);
+}
+
+.senal-ver-cajas:hover {
+  background: var(--paper-dim);
+}
+
+@media (max-width: 899px) {
+  /* en el teléfono el tablero ocupa toda la pantalla */
+  .olt {
+    padding: 0;
+    background: var(--paper);
+  }
+
+  .olt-panel {
+    width: 100%;
+    padding-top: var(--safe-top);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .olt-cuerpo {
+    padding: 14px 14px calc(28px + var(--safe-bottom));
+  }
+}
+
+@media (max-width: 699px) {
+  .olt-leido {
+    display: none;
+  }
+
+  .olt-cifras {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .olt-cifra,
+  .olt-cifra:first-child {
+    padding: 9px 10px 9px 2px;
+    border-left: 0;
+    border-bottom: 1px solid var(--paper-dim);
+  }
+
+  .olt-cifra strong {
+    font-size: 26px;
+  }
+
+  /* cada puerto, un bloque: el nombre arriba y sus números debajo, con rótulo */
+  .olt-tabla thead {
+    display: none;
+  }
+
+  .olt-tabla tbody tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .olt-tabla th,
+  .olt-tabla td {
+    padding: 0;
+    border: 0;
+  }
+
+  .olt-tabla tbody th,
+  .olt-tabla td.olt-botones {
+    grid-column: 1 / -1;
+  }
+
+  .olt-tabla td[data-rotulo]::before {
+    content: attr(data-rotulo);
+    display: block;
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 650;
+  }
+
+  .olt-tabla td.olt-botones {
+    padding-top: 4px;
+    text-align: left !important;
+  }
+
+  .olt-tabla tr.olt-historia-pon {
+    display: block;
+  }
+
+  .olt-detalle {
+    padding-left: 10px;
+  }
+}

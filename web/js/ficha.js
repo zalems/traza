@@ -937,6 +937,13 @@ export function setupFicha({ root, red, acciones }) {
     ];
   }
 
+  // Las bocas de una caja y cómo reciben sus clientes (lo mismo que en la lista de cajas de la OLT).
+  function filasCaja(feature) {
+    acciones.senal?.pedir(); // las lecturas, aunque la señal del mapa esté apagada
+    const caja = acciones.senal?.caja?.(feature.id) ?? null;
+    return [fila('Bocas libres', I.textoBocas(caja)), fila('Sus clientes', I.textoClientesCaja(caja))];
+  }
+
   function verElemento(feature) {
     // Al abrir la ficha de otra cosa, una caja que estaba eligiendo su NAP de Wispro
     // ("Cambiar") vuelve a su vista normal.
@@ -988,6 +995,7 @@ export function setupFicha({ root, red, acciones }) {
     const detalle = h('dl.ficha-datos', {},
       fila('Red', acciones.nombreRed?.(props.red)),
       props.tipo === 'cliente' ? null : fila('Señal', senalDeElemento(feature)),
+      ...(props.tipo === 'nap' ? filasCaja(feature) : []),
       fila('Estado', ESTADOS[props.estado] ?? props.estado),
       ...(CAMPOS[props.tipo] ?? []).map((c) => filaDato(c, datos[c.k])),
       ...viejos,

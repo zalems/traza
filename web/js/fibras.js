@@ -687,6 +687,23 @@ export function conexionCliente(state, cliente) {
   return null;
 }
 
+// Los clientes de cada caja según las cartas: caja -> [clientes] cuya bajada tiene
+// su primera unión en esa caja. Se calcula una vez por estado de la red.
+export function clientesPorCaja(state) {
+  const idx = indice(state);
+  if (idx.clientesPorCaja) return idx.clientesPorCaja;
+  const out = new Map();
+  for (const e of state.elementos.values()) {
+    if (e.properties.tipo !== 'cliente') continue;
+    const caja = conexionCliente(state, e)?.union.elemento;
+    if (caja === undefined) continue;
+    if (!out.has(caja)) out.set(caja, []);
+    out.get(caja).push(e.id);
+  }
+  idx.clientesPorCaja = out;
+  return out;
+}
+
 export const nombreElemento = (state, id) => {
   const e = state.elementos.get(id);
   if (!e) return 'un elemento borrado';
@@ -848,6 +865,48 @@ export function iluminacion(state) {
   const out = { rev: state.rev, tramos, extremos, clientes, puertos, porCable: porCableLuz, porElemento, conflictos, segmentos: null };
   idx.luz = out;
   return out;
+}
+
+// Dónde se juntan los recorridos de la luz de varios clientes: el elemento (caja,
+// botella o nodo) más cercano a ellos por el que pasa la luz de todos. Si cayeron
+// juntos, el problema está ahí o antes. Devuelve null si ninguno tiene luz en el
+// mapa; si no, { elemento, conLuz (cuántos de la lista tienen luz), abajo (cuántos
+// clientes cuelgan de ese elemento por esas fibras), todos (no cuelga nadie más
+// que los de la lista), cable (el cable por el que le llega la luz, si es uno solo) }.
+export function comunDeClientes(state, ids) {
+  const luz = iluminacion(state);
+  const cadenas = [];
+  for (const id of ids) {
+    const llegada = luz.clientes.get(id);
+    if (!llegada) continue;
+    const cadena = []; // del cliente hacia la OLT: [{ elemento, regs }]
+    for (let reg = llegada.padre; reg; reg = reg.padre) {
+      if (reg.tipo !== 'extremo') continue;
+      if (cadena.at(-1)?.elemento === reg.elemento) cadena.at(-1).regs.push(reg);
+      else cadena.push({ elemento: reg.elemento, regs: [reg] });
+    }
+    cadenas.push(cadena.reverse());
+  }
+  if (!cadenas.length) return null;
+  let nivel = -1;
+  while (cadenas[0][nivel + 1] && cadenas.every((c) => c[nivel + 1]?.elemento === cadenas[0][nivel + 1].elemento)) nivel += 1;
+  if (nivel < 0) return null; // salen de nodos distintos
+  const lista = new Set(ids);
+  const abajo = new Set();
+  const cables = new Set();
+  for (const c of cadenas) {
+    // El primer registro de la luz en ese elemento (por donde entra): lo de abajo y el cable que la trae.
+    const entrada = c[nivel].regs.at(-1);
+    for (const cliente of entrada.clientes) abajo.add(cliente);
+    cables.add(entrada.padre?.tipo === 'tramo' ? entrada.padre.cable : null);
+  }
+  return {
+    elemento: cadenas[0][nivel].elemento,
+    conLuz: cadenas.length,
+    abajo: abajo.size,
+    todos: [...abajo].every((cliente) => lista.has(cliente)),
+    cable: cables.size === 1 ? [...cables][0] : null,
+  };
 }
 
 // Los tramos con luz partidos en segmentos (de un elemento con carta o un cliente al

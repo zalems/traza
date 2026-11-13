@@ -223,4 +223,54 @@ state.fusiones.delete(34);
 state.equipos.delete(22);
 state.rev += 1;
 
+// --- Dónde se juntan los recorridos de varios clientes (para ubicar un corte).
+// NODO (OLT) — TR — BOT (splitter 1x2) — DA — NAP-A (1x4) — clientes 1 y 2
+//                                      \— DB — NAP-B (1x4) — cliente 3
+{
+  const n = el(101, 'nodo', 'N', -58.170, -26.180);
+  const b = el(102, 'botella', 'B', -58.168, -26.180);
+  const na = el(103, 'nap', 'NAP-A', -58.166, -26.180);
+  const nb = el(104, 'nap', 'NAP-B', -58.168, -26.178);
+  const k1 = el(105, 'cliente', 'K1', -58.1661, -26.1795);
+  const k2 = el(106, 'cliente', 'K2', -58.1659, -26.1795);
+  const k3 = el(107, 'cliente', 'K3', -58.1681, -26.1775);
+  const sinLuz = el(108, 'cliente', 'K4', -58.1690, -26.1775);
+  const cables = [cab(110, 'TR', 'troncal', 12, [n, b]), cab(111, 'DA', 'distribucion', 12, [b, na]), cab(112, 'DB', 'distribucion', 12, [b, nb]),
+    cab(113, 'B1', 'bajada', 1, [na, k1]), cab(114, 'B2', 'bajada', 1, [na, k2]), cab(115, 'B3', 'bajada', 1, [nb, k3])];
+  const s2 = {
+    rev: 1,
+    elementos: new Map([n, b, na, nb, k1, k2, k3, sinLuz].map((e) => [e.id, e])),
+    cables: new Map(cables.map((c) => [c.id, c])),
+    equipos: new Map([
+      [120, { id: 120, elemento: 101, tipo: 'olt', nombre: 'OLT', entradas: 0, salidas: 16, datos: {}, version: 1 }],
+      [121, { id: 121, elemento: 102, tipo: 'splitter', nombre: '1x2', entradas: 1, salidas: 2, datos: { modo: 'plc' }, version: 1 }],
+      [122, { id: 122, elemento: 103, tipo: 'splitter', nombre: '1x4', entradas: 1, salidas: 4, datos: { modo: 'plc' }, version: 1 }],
+      [123, { id: 123, elemento: 104, tipo: 'splitter', nombre: '1x4', entradas: 1, salidas: 4, datos: { modo: 'plc' }, version: 1 }],
+    ]),
+    fusiones: new Map(),
+  };
+  const unir = (id, elemento, a, b2) => s2.fusiones.set(id, { id, elemento, a, b: b2, tipo: 'fusion', version: 1 });
+  unir(130, 101, 'q120:s:1', 'c110:b:1');
+  unir(131, 102, 'c110:a:1', 'q121:e:1');
+  unir(132, 102, 'q121:s:1', 'c111:b:1');
+  unir(133, 102, 'q121:s:2', 'c112:b:1');
+  unir(134, 103, 'c111:a:1', 'q122:e:1');
+  unir(135, 103, 'q122:s:1', 'c113:b:1');
+  unir(136, 103, 'q122:s:2', 'c114:b:1');
+  unir(137, 104, 'c112:a:1', 'q123:e:1');
+  unir(138, 104, 'q123:s:1', 'c115:b:1');
+  assert.deepEqual([...F.iluminacion(s2).clientes.keys()].sort(), [105, 106, 107]);
+  // Los dos de la misma caja: la caja, por el cable que le llega; no cuelga nadie más.
+  assert.deepEqual(F.comunDeClientes(s2, [105, 106]), { elemento: 103, conLuz: 2, abajo: 2, todos: true, cable: 111 });
+  // Uno solo: su caja, de la que cuelga otro más.
+  assert.deepEqual(F.comunDeClientes(s2, [105]), { elemento: 103, conLuz: 1, abajo: 2, todos: false, cable: 111 });
+  // De dos cajas: se juntan en la botella; el tercero de abajo no está en la lista.
+  assert.deepEqual(F.comunDeClientes(s2, [105, 107]), { elemento: 102, conLuz: 2, abajo: 3, todos: false, cable: 110 });
+  assert.deepEqual(F.comunDeClientes(s2, [105, 106, 107, 108]), { elemento: 102, conLuz: 3, abajo: 3, todos: true, cable: 110 });
+  // Sin luz en el mapa no hay nada que decir.
+  assert.equal(F.comunDeClientes(s2, [108, 999]), null);
+  assert.equal(F.comunDeClientes(s2, []), null);
+  assert.deepEqual([...F.clientesPorCaja(s2)].map(([caja, lista]) => [caja, lista.sort()]), [[103, [105, 106]], [104, [107]]]);
+}
+
 console.log('fibras: TODO OK');

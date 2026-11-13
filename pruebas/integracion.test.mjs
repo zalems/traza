@@ -187,4 +187,41 @@ assert.equal(I.haceCuanto('', ahora), '');
 assert.equal(I.viejo('2026-10-14T11:00:00Z', ahora), true);
 assert.equal(I.viejo('2026-10-14T11:45:00Z', ahora), false);
 
+// --- Una caja de un vistazo: bocas y cómo reciben sus clientes.
+// Con Wispro valen su capacidad y sus contratos, y las lecturas del panel.
+const entrada = { nap: { capacidad: 16, contratos: 5 }, sin_lectura: 2,
+  lecturas: [{ rx: -21.3, estado: 'online' }, { rx: -25.5, estado: 'online' }, { rx: null, estado: 'offline' }] };
+const c1 = I.resumenCaja(state, nap, entrada, null);
+assert.deepEqual([c1.fuente, c1.capacidad, c1.ocupados, c1.libres, c1.sobrecargada, c1.clientes, c1.conLectura, c1.enLinea, c1.sinSenal, c1.nivel],
+  ['wispro', 16, 5, 11, false, 5, 3, 2, 1, 'atencion']);
+cerca(c1.promedio, -23.4);
+assert.equal(c1.peor, -25.5);
+const caja = (capacidad, contratos, lecturas, sin = 0) => I.resumenCaja(state, nap, { nap: { capacidad, contratos }, lecturas, sin_lectura: sin }, null);
+assert.equal(caja(8, 2, [{ rx: null, estado: 'offline' }, { rx: null, estado: 'offline' }]).nivel, 'caida');
+assert.equal(caja(8, 1, [{ rx: -28.2, estado: 'online' }]).nivel, 'mal');
+assert.equal(caja(8, 1, [{ rx: -21, estado: 'online' }]).nivel, 'bien');
+// La mitad sin señal: para mirar, aunque el resto reciba bien.
+assert.equal(caja(8, 2, [{ rx: -20, estado: 'online' }, { rx: null, estado: 'offline' }]).nivel, 'atencion');
+// Una ONT caída que conserva su última potencia no cuenta para el promedio.
+assert.equal(caja(8, 2, [{ rx: -20, estado: 'online' }, { rx: -31, estado: 'offline' }, { rx: -22, estado: 'online' }]).peor, -22);
+const llena = caja(8, 9, [], 9);
+assert.deepEqual([llena.libres, llena.sobrecargada, llena.nivel, llena.clientes], [0, true, 'ninguno', 9]);
+assert.equal(caja(null, 3, []).libres, null); // Wispro sin capacidad y la caja sin puertos anotados
+// Sin Wispro, la carta: el splitter de 8 con una salida en uso, el cliente de esa bajada y su ONT.
+assert.deepEqual([...F.clientesPorCaja(state)], [[2, [3]]]);
+const c2 = I.resumenCaja(state, nap, null, new Map([[3, { estado: 'online', rx: -22 }]]));
+assert.deepEqual([c2.fuente, c2.capacidad, c2.ocupados, c2.libres, c2.clientes, c2.enLinea, c2.promedio, c2.nivel], ['carta', 8, 1, 7, 1, 1, -22, 'bien']);
+const c3 = I.resumenCaja(state, nap, null, null);
+assert.deepEqual([c3.clientes, c3.conLectura, c3.promedio, c3.nivel], [1, 0, null, 'ninguno']);
+// Una caja sin splitter dibujado: las bocas anotadas en su ficha.
+const sola = el(9, 'nap', 'NAP-9', -58.16, -26.18);
+sola.properties.datos = { puertos: '16' };
+state.elementos.set(9, sola);
+state.rev += 1;
+const c4 = I.resumenCaja(state, sola, null, null);
+assert.deepEqual([c4.capacidad, c4.ocupados, c4.libres, c4.clientes], [16, 0, 16, 0]);
+assert.equal(I.dbTexto(-21.34), '−21,3');
+assert.equal(I.dbTexto(-21.34, 2), '−21,34');
+assert.equal(I.dbTexto(null), '—');
+
 console.log('integracion.test.mjs: todo bien');

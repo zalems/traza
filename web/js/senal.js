@@ -3,10 +3,13 @@
 // según el panel de la OLT). Los cables sin luz muestran el sentido de la red, del
 // nodo hacia afuera. Se prende y se apaga con un botón del mapa; la carta y las
 // fichas usan los mismos datos (el estado de las ONT se pide una vez por minuto).
+// Con la señal prendida, cada NAP lleva un anillo del color de cómo reciben sus
+// clientes y, al acercar, la potencia promedio y las bocas libres. Debajo del botón
+// de la señal va el que abre el tablero de la OLT.
 
 import { api } from './api.js';
 import * as F from './fibras.js';
-import { haceCuanto, viejo } from './integracion.js';
+import { dbTexto, haceCuanto, resumenCaja, viejo } from './integracion.js';
 
 const CLAVE = 'ftth.senal';
 const CLAVE_LEYENDA = 'ftth.senal.leyenda'; // abierta | cerrada (en el teléfono arranca cerrada: tapa el mapa)
@@ -16,7 +19,10 @@ const PASO_FLUJO_MS = 100; // diez cuadros por segundo: se ve el movimiento sin 
 // red: el sentido de los cables sin luz (más oscuro que las flechas de las calles del mapa).
 export const COLORES = { trafico: '#0b9d58', luz: '#ef9a00', caida: '#dc2b25', red: '#3d4852' };
 const DEBAJO_DE = 'red-recorrido-halo'; // las capas de la señal van debajo del recorrido y de los elementos
-const CAPAS = ['senal-halo', 'senal-linea', 'senal-flujo', 'senal-flechas'];
+const CAPAS = ['senal-halo', 'senal-linea', 'senal-flujo', 'senal-flechas', 'senal-cajas-anillo', 'senal-cajas-texto'];
+// Cómo reciben los clientes de una caja (los mismos colores que las fibras).
+export const NIVELES = { bien: '#0b9d58', atencion: '#ef9a00', mal: '#dc2b25', caida: '#8f1d18', ninguno: '#7c8890' };
+const DEBAJO_DE_CAJAS = 'red-elementos-sel'; // el anillo va debajo del dibujo de la caja
 // Rayas que avanzan en el sentido de la línea (de MapLibre, "animate a line").
 const FLUJO = [
   [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5], [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0],
@@ -57,6 +63,9 @@ async function cargarImagen(svg) {
 }
 
 const ICONO_BOTON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2.5-6 4 12 2.5-6H21"/></svg>';
+// La OLT: un chasis con sus puertos.
+const ICONO_OLT = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/>'
+  + '<path d="M7 10v4M11 10v4M15 10v4"/><circle cx="18.2" cy="12" r="0.6"/></svg>';
 
 function leerPreferencia() {
   try {
@@ -83,7 +92,17 @@ function leyendaAbiertaGuardada() {
 const reducido = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
 
-export function setupSenal({ map, red, irA }) {
+// Lo que se escribe junto a una caja en el mapa: "−21,3 · 5 libres".
+export function textoCaja(r) {
+  const partes = [];
+  if (r.nivel === 'caida') partes.push('sin señal');
+  else if (r.promedio !== null) partes.push(dbTexto(r.promedio));
+  if (r.sobrecargada) partes.push('llena');
+  else if (r.libres !== null) partes.push(r.libres === 0 ? 'llena' : `${r.libres} ${r.libres === 1 ? 'libre' : 'libres'}`);
+  return partes.join(' · ');
+}
+
+export function setupSenal({ map, red, irA, abrirOlt }) {
   let activa = leerPreferencia();
   let capas = false;
   let estados = new Map(); // cliente -> { estado, rx, cuando, causa }
@@ -93,6 +112,13 @@ export function setupSenal({ map, red, irA }) {
   let errores = [];
   let pidiendo = null;
   let ultimoPedido = 0;
+  let cajas = new Map(); // caja -> { nap, lecturas, sin_lectura } (de Wispro y el panel)
+  let cajasDe = null;
+  let conWispro = null; // cuántas redes de lo que se ve están conectadas con Wispro
+  let erroresCajas = [];
+  let pidiendoCajas = null;
+  let ultimoPedidoCajas = 0;
+  let resumenes = { clave: null, mapa: new Map() }; // el resumen de cada NAP, por estado de la red y de las lecturas
   let version = 0;
   let recalculo = null;
   let sondeo = null;
@@ -114,7 +140,15 @@ export function setupSenal({ map, red, irA }) {
   boton.innerHTML = ICONO_BOTON;
   // Sin aria-live: se rehace con cada cambio de la red y no tiene que anunciarse cada vez.
   const leyenda = h('div.senal-leyenda', { hidden: !activa });
-  const contenedor = h('div.maplibregl-ctrl.senal-ctrl', {}, h('div.maplibregl-ctrl-group', {}, boton), leyenda);
+  const botonOlt = h('button.senal-boton.olt-boton', {
+    type: 'button',
+    'aria-label': 'Tablero de la OLT: puertos PON, ONT, caídas y cajas',
+    title: 'OLT: puertos PON, ONT, caídas y cajas',
+    hidden: !abrirOlt,
+  });
+  botonOlt.innerHTML = ICONO_OLT;
+  botonOlt.addEventListener('click', () => abrirOlt?.());
+  const contenedor = h('div.maplibregl-ctrl.senal-ctrl', {}, h('div.maplibregl-ctrl-group', {}, boton, botonOlt), leyenda);
   boton.addEventListener('click', () => alternar(!activa));
   map.addControl({ onAdd: () => contenedor, onRemove: () => contenedor.remove() }, 'top-right');
 
@@ -174,6 +208,45 @@ export function setupSenal({ map, red, irA }) {
         'icon-keep-upright': false,
       },
     });
+    // Las cajas: un anillo del color de cómo reciben sus clientes y, de cerca, el número.
+    map.addSource('senal-cajas', { type: 'geojson', data: vacio });
+    const color = ['match', ['get', 'nivel'], 'bien', NIVELES.bien, 'atencion', NIVELES.atencion, 'mal', NIVELES.mal,
+      'caida', NIVELES.caida, NIVELES.ninguno];
+    map.addLayer({
+      id: 'senal-cajas-anillo',
+      type: 'circle',
+      source: 'senal-cajas',
+      filter: ['!=', ['get', 'nivel'], 'ninguno'],
+      layout: { visibility: activa ? 'visible' : 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 4.5, 15, 13, 18, 20, 21, 26],
+        'circle-color': color,
+        'circle-opacity': 0.2,
+        'circle-stroke-color': color,
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 1.6, 15, 3, 18, 3.6],
+      },
+    }, map.getLayer(DEBAJO_DE_CAJAS) ? DEBAJO_DE_CAJAS : undefined);
+    map.addLayer({
+      id: 'senal-cajas-texto',
+      type: 'symbol',
+      source: 'senal-cajas',
+      minzoom: 15,
+      filter: ['!=', ['get', 'texto'], ''],
+      layout: {
+        visibility: activa ? 'visible' : 'none',
+        'text-field': ['get', 'texto'],
+        'text-font': ['Noto Sans Medium'],
+        'text-size': 11,
+        'text-anchor': 'top',
+        'text-offset': [0, 2.95], // debajo del nombre de la caja
+        'text-optional': true,
+      },
+      paint: {
+        'text-color': ['match', ['get', 'nivel'], 'bien', '#06693a', 'atencion', '#8a5200', 'mal', '#b3211c', 'caida', '#8f1d18', '#3d4852'],
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.6,
+      },
+    });
     capas = true;
     aplicarVisibilidad();
     if (activa) construir();
@@ -231,6 +304,61 @@ export function setupSenal({ map, red, irA }) {
     return pidiendo;
   }
 
+  // Las cajas con su NAP de Wispro y las lecturas de sus contratos. Como los estados:
+  // una vez por minuto y, si ninguna red está conectada con Wispro, no se repite.
+  function pedirCajas({ forzar = false } = {}) {
+    const redId = red.state.red;
+    if (!redId || !red.state.cargada) return Promise.resolve(null);
+    if (pidiendoCajas) return pidiendoCajas;
+    if (!forzar && cajasDe === redId && (conWispro === 0 || Date.now() - ultimoPedidoCajas < ESTADOS_MS)) {
+      return Promise.resolve(cajas);
+    }
+    ultimoPedidoCajas = Date.now();
+    pidiendoCajas = api(`api/integracion/cajas?red=${redId}`, { espera: 60000 })
+      .then((res) => {
+        if (red.state.red !== redId) return null;
+        cajas = new Map(Object.entries(res.cajas ?? {}).map(([k, v]) => [Number(k), v]));
+        cajasDe = redId;
+        conWispro = res.conectadas ?? 0;
+        erroresCajas = res.errores ?? [];
+        version += 1;
+        avisar();
+        return cajas;
+      })
+      .catch((err) => {
+        if (red.state.red === redId) {
+          cajasDe = redId;
+          erroresCajas = [err.message];
+          avisar();
+        }
+        return null;
+      })
+      .finally(() => {
+        pidiendoCajas = null;
+      });
+    return pidiendoCajas;
+  }
+
+  const pedirTodo = (opciones) => Promise.all([pedirEstados(opciones), pedirCajas(opciones)]);
+
+  // El resumen de cada NAP (bocas y cómo reciben sus clientes): se rehace cuando
+  // cambia la red o llegan lecturas nuevas.
+  function resumenesDeCajas() {
+    const s = red.state;
+    const clave = `${s.red}|${s.rev}|${version}`;
+    if (resumenes.clave === clave) return resumenes.mapa;
+    const mapa = new Map();
+    if (s.cargada) {
+      const est = estadosVigentes();
+      const deWispro = cajasDe !== null && cajasDe === s.red ? cajas : null;
+      for (const e of s.elementos.values()) {
+        if (e.properties.tipo === 'nap') mapa.set(e.id, resumenCaja(s, e, deWispro?.get(e.id) ?? null, est));
+      }
+    }
+    resumenes = { clave, mapa };
+    return mapa;
+  }
+
   function avisar() {
     if (activa) construir();
     for (const fn of oyentes) fn();
@@ -239,7 +367,7 @@ export function setupSenal({ map, red, irA }) {
   function iniciarSondeo() {
     clearInterval(sondeo);
     sondeo = setInterval(() => {
-      if (activa && document.visibilityState === 'visible') pedirEstados();
+      if (activa && document.visibilityState === 'visible') pedirTodo();
     }, ESTADOS_MS);
   }
 
@@ -283,6 +411,13 @@ export function setupSenal({ map, red, irA }) {
       }
     }
     map.getSource('senal')?.setData({ type: 'FeatureCollection', features });
+    const puntos = [];
+    for (const [id, r] of resumenesDeCajas()) {
+      const texto = textoCaja(r);
+      if (r.nivel === 'ninguno' && !texto) continue;
+      puntos.push({ type: 'Feature', properties: { id, nivel: r.nivel, texto }, geometry: s.elementos.get(id).geometry });
+    }
+    map.getSource('senal-cajas')?.setData({ type: 'FeatureCollection', features: puntos });
     pintarLeyenda(segs, est);
     animar();
   }
@@ -306,8 +441,8 @@ export function setupSenal({ map, red, irA }) {
         return;
       }
       const k = Math.floor(t / PASO_FLUJO_MS) % FLUJO.length;
-      // Con la carta abierta el mapa no se ve: no se redibuja.
-      if (k !== pasoFlujo && !document.body.classList.contains('con-carta')) {
+      // Con la carta o el tablero de la OLT abiertos el mapa no se ve: no se redibuja.
+      if (k !== pasoFlujo && !document.body.matches('.con-carta, .con-olt')) {
         pasoFlujo = k;
         map.setPaintProperty('senal-flujo', 'line-dasharray', FLUJO[k]);
       }
@@ -401,7 +536,20 @@ export function setupSenal({ map, red, irA }) {
     } else if (leido) {
       lineas.push(h(`p.senal-nota${viejo(leido) ? '.senal-alerta' : ''}`, { text: `OLT leída ${haceCuanto(leido)}.` }));
     }
-    for (const e of errores.slice(0, 2)) lineas.push(h('p.senal-nota.senal-alerta', { text: e }));
+    for (const e of [...new Set([...errores, ...erroresCajas])].slice(0, 2)) lineas.push(h('p.senal-nota.senal-alerta', { text: e }));
+    // Las cajas: qué quiere decir el anillo y cuántas hay con algo para mirar.
+    const deCajas = [...resumenesDeCajas().values()];
+    const conDatos = deCajas.filter((r) => r.nivel !== 'ninguno').length;
+    if (conDatos) {
+      const revisar = deCajas.filter((r) => ['mal', 'caida', 'atencion'].includes(r.nivel)).length;
+      items.push(h('li.senal-clave-cajas', {},
+        h('span.senal-anillos', { 'aria-hidden': 'true' }, h('span.senal-anillo.nivel-bien'), h('span.senal-anillo.nivel-atencion'), h('span.senal-anillo.nivel-mal')),
+        'Cajas: cómo reciben sus clientes'));
+      lineas.push(h('p', { text: `${plural(conDatos, 'caja con lecturas', 'cajas con lecturas')}${revisar ? ` · ${revisar} para revisar` : ''}` }));
+    }
+    const verCajas = abrirOlt && deCajas.length
+      ? h('button.senal-ver-cajas', { type: 'button', text: `Ver las cajas (${deCajas.length})`, onclick: () => abrirOlt('cajas') })
+      : null;
     const conflictos = [];
     const vistos = new Set();
     for (const c of luz.conflictos) {
@@ -418,6 +566,7 @@ export function setupSenal({ map, red, irA }) {
       titulo,
       h('ul.senal-claves', {}, ...items),
       h('div.senal-cuentas', {}, ...lineas),
+      verCajas,
       conflictos.length ? h('ul.senal-conflictos', {}, ...conflictos) : null,
     ].filter(Boolean));
     leyenda.hidden = false;
@@ -433,12 +582,13 @@ export function setupSenal({ map, red, irA }) {
     aplicarVisibilidad();
     if (activa) {
       construir();
-      pedirEstados();
+      pedirTodo();
       iniciarSondeo();
     } else {
       clearInterval(sondeo);
       sondeo = null;
       map.getSource('senal')?.setData(vacio);
+      map.getSource('senal-cajas')?.setData(vacio);
       animar();
     }
   }
@@ -451,15 +601,20 @@ export function setupSenal({ map, red, irA }) {
     conectadas = null;
     errores = [];
     ultimoPedido = 0;
+    cajas = new Map();
+    cajasDe = null;
+    conWispro = null;
+    erroresCajas = [];
+    ultimoPedidoCajas = 0;
     version += 1;
     if (activa) {
       construir();
-      pedirEstados();
+      pedirTodo();
     }
     for (const fn of oyentes) fn();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && activa) pedirEstados();
+    if (document.visibilityState === 'visible' && activa) pedirTodo();
   });
   if (activa) iniciarSondeo();
 
@@ -469,6 +624,17 @@ export function setupSenal({ map, red, irA }) {
     estados: estadosVigentes,
     version: () => version,
     pedirEstados,
+    pedirTodo,
+    // El resumen de una NAP (bocas y cómo reciben sus clientes) y el de todas, para la lista.
+    caja: (id) => resumenesDeCajas().get(id) ?? null,
+    cajas: () => ({
+      resumenes: resumenesDeCajas(),
+      leido,
+      conWispro,
+      conPanel: conectadas,
+      errores: [...new Set([...errores, ...erroresCajas])],
+      cargando: Boolean(pidiendo || pidiendoCajas) && (estadosDe !== red.state.red || cajasDe !== red.state.red),
+    }),
     on: (fn) => oyentes.add(fn),
   };
 }
