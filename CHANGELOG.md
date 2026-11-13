@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.0 · 13/11/2026
+## 0.12.0 · 13/11/2026 · commit af287bc
 
 Las OLT se cargan desde el visor, traza las lee por su cuenta (SNMP) y cada
 una se ve dibujada como es: el chasis con sus placas y sus puertos.
