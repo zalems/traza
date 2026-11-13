@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.11.0 · 13/11/2026
+## 0.11.0 · 13/11/2026 · commit 0e4602e
 
 La OLT de cada red, dentro de traza: tablero con resumen y novedades, puertos
 PON, ONT, cajas con potencia promedio y bocas libres, e historial propio.
