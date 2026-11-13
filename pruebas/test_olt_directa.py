@@ -232,6 +232,18 @@ class OltDirectaTest(unittest.TestCase):
                          ("nueva", "otro", ""))
         code, _ = self.pedir("PUT", "/api/olt/equipos/ffffffff", {"red": red, "equipo": self.equipo()})
         self.assertEqual(code, 404)
+        # Lo guardado no se le manda a otro lado: si cambia la dirección o el puerto, hay que escribirlo de nuevo
+        # (si no, alcanzaría con apuntar la OLT a otro equipo para llevarse la comunidad o la clave).
+        self.ok("PUT", f"/api/olt/equipos/{eq_id}", {"red": red, "equipo": self.equipo(clave=CLAVE, comunidad=COMUNIDAD)})
+        for cambio, falta in (({"host": "127.0.0.2"}, "comunidad"), ({"snmp_puerto": 1161}, "comunidad"),
+                              ({"host": "127.0.0.2", "comunidad": "x"}, "clave"), ({"consola_puerto": 2323}, "clave"),
+                              ({"consola": "ssh", "consola_puerto": self.olt.telnet}, "clave")):
+            for ruta, metodo, cuerpo in ((f"/api/olt/equipos/{eq_id}", "PUT", {}), ("/api/olt/equipos/probar", "POST", {"id": eq_id})):
+                code, data = self.pedir(metodo, ruta, {"red": red, **cuerpo, "equipo": self.equipo(**{"comunidad": "", "clave": "", **cambio})})
+                self.assertEqual(code, 400, (cambio, ruta))
+                self.assertIn(f"escribí de nuevo la {falta}", data["error"], (cambio, ruta))
+        guardado = api.leer_config(self.config)["redes"][str(red)]["olts"][0]
+        self.assertEqual((guardado["host"], guardado["snmp"]["community"], guardado["consola"]["clave"]), ("127.0.0.1", COMUNIDAD, CLAVE))
         # En otra red no se toca.
         otra = self.red("Carga B")
         code, _ = self.pedir("DELETE", f"/api/olt/equipos/{eq_id}?red={otra}")

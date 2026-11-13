@@ -386,8 +386,9 @@ la consola. Si no anduvo, dice qué revisar. Lo más común:
 La comunidad y la clave se escriben en el visor, viajan por HTTPS y quedan en
 `/srv/ftth/data/integraciones.json` (solo lo lee el usuario del servicio). No
 vuelven a salir del servidor: al cambiar una OLT, su casilla aparece vacía y
-se completa solo para cambiarla. `integraciones ver` lista las OLT cargadas,
-sin esos dos datos.
+se completa solo para cambiarla. Si se cambia la dirección o el puerto, hay
+que escribirlas de nuevo: lo guardado no se le manda a otro equipo.
+`integraciones ver` lista las OLT cargadas, sin esos dos datos.
 
 Qué lee traza de una OLT cargada, y cada cuánto: cada minuto, el estado de
 cada ONT (en línea o no, por qué cayó y cuándo) y el tráfico de cada puerto;

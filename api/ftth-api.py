@@ -3340,7 +3340,10 @@ def equipo_de(e, red_id=None):
 
 def equipo_field(data: dict, previo: dict = None) -> dict:
     """El equipo que manda el visor, comprobado. La comunidad y la clave vacías
-    conservan las guardadas (previo): así editar no obliga a escribirlas de nuevo."""
+    conservan las guardadas (previo): así editar no obliga a escribirlas de
+    nuevo. Pero solo mientras vayan al mismo lugar: si cambia la dirección o el
+    puerto hay que escribirlas otra vez (si no, alcanzaría con cambiar la
+    dirección para que el servidor le mande a otro equipo lo que tiene guardado)."""
     e = data.get("equipo")
     if not isinstance(e, dict):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Faltan los datos de la OLT.")
@@ -3372,11 +3375,21 @@ def equipo_field(data: dict, previo: dict = None) -> dict:
     protocolo = texto("consola", 10, "Consola")
     if protocolo not in ("", "ssh", "telnet"):
         raise ApiError(HTTPStatus.BAD_REQUEST, "La consola es por SSH, por Telnet o no se usa.")
-    comunidad = texto("comunidad", 128, "Comunidad") or (previo or {}).get("snmp", {}).get("community", "")
+    puerto_snmp = puerto("snmp_puerto", 161, "SNMP")
+    puerto_consola = puerto("consola_puerto", 23 if protocolo == "telnet" else 22, "Consola")
+    comunidad = texto("comunidad", 128, "Comunidad")
     usuario = texto("usuario", 64, "Usuario").strip()
     clave = texto("clave", 128, "Clave")
-    if previo and not clave and usuario == previo["consola"]["usuario"]:
-        clave = previo["consola"]["clave"]
+    if previo:
+        mismo_lugar = previo["host"].lower() == host.lower()
+        if not comunidad and previo["snmp"]["community"]:
+            if not (mismo_lugar and previo["snmp"]["puerto"] == puerto_snmp):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Cambió la dirección o el puerto de la OLT: escribí de nuevo la comunidad.")
+            comunidad = previo["snmp"]["community"]
+        if protocolo and not clave and previo["consola"]["clave"] and usuario == previo["consola"]["usuario"]:
+            if not (mismo_lugar and previo["consola"]["protocolo"] == protocolo and previo["consola"]["puerto"] == puerto_consola):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Cambió la dirección o la consola de la OLT: escribí de nuevo la clave.")
+            clave = previo["consola"]["clave"]
     utc = e.get("utc", UTC_OLT)
     if isinstance(utc, bool) or not isinstance(utc, int) or not -720 <= utc <= 840:
         raise ApiError(HTTPStatus.BAD_REQUEST, "La hora de la OLT no es válida.")
@@ -3387,8 +3400,8 @@ def equipo_field(data: dict, previo: dict = None) -> dict:
     if not isinstance(leer, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "leer tiene que ser true o false.")
     return {"id": (previo or {}).get("id") or secrets.token_hex(4), "nombre": nombre, "host": host, "modelo": modelo,
-            "snmp": {"puerto": puerto("snmp_puerto", 161, "SNMP"), "community": comunidad},
-            "consola": {"protocolo": protocolo, "puerto": puerto("consola_puerto", 23 if protocolo == "telnet" else 22, "Consola"),
+            "snmp": {"puerto": puerto_snmp, "community": comunidad},
+            "consola": {"protocolo": protocolo, "puerto": puerto_consola,
                         "usuario": usuario if protocolo else "", "clave": clave if protocolo else ""},
             "utc": utc, "panel": panel, "leer": leer}
 

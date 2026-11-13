@@ -26,8 +26,9 @@ una se ve dibujada como es: el chasis con sus placas y sus puertos.
   por la consola; si algo no anda, qué revisar (la comunidad, el permiso en
   la OLT para la dirección del servidor, el puerto). La comunidad y la clave
   quedan en el servidor (`integraciones.json`, que solo lee el servicio) y no
-  vuelven a salir: al cambiar una OLT se escriben solo si cambian. Se puede
-  dejar en pausa o quitar.
+  vuelven a salir: al cambiar una OLT se escriben solo si cambian, y si se
+  cambia la dirección o el puerto hay que escribirlas de nuevo (lo guardado
+  no se le manda a otro equipo). Se puede dejar en pausa o quitar.
 - Lectura directa: traza lee por SNMP v2c (solo GET y GETBULK) las OLT
   cargadas: cada minuto, el estado de cada ONT, por qué cayó y cuándo, y el
   tráfico de cada puerto; cada cinco, la potencia que recibe cada ONT, la

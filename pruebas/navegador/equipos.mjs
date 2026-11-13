@@ -198,6 +198,15 @@ comprobar(await page.inputValue('input[name=comunidad]') === '' && await page.in
 comprobar(/guardada/.test(await page.getAttribute('input[name=comunidad]', 'placeholder')), 'dice que están guardadas');
 const fuente = await page.evaluate(async (id) => (await fetch(`api/olt?red=${id}`)).text(), red);
 comprobar(!fuente.includes(COMUNIDAD) && !fuente.includes(CLAVE), 'la API no devuelve la comunidad ni la clave');
+// Lo guardado vale para esa dirección: si se cambia, hay que escribirlo de nuevo (no se le manda a otro equipo).
+await page.fill('input[name=host]', '127.0.0.2');
+comprobar(/escribila de nuevo/.test(await page.getAttribute('input[name=comunidad]', 'placeholder'))
+  && /escribila de nuevo/.test(await page.getAttribute('input[name=clave]', 'placeholder')), 'al cambiar la dirección pide de nuevo la comunidad y la clave');
+await page.click('.olt-form-botones button[type=submit]');
+await page.waitForSelector('.olt-form [role=alert]');
+comprobar(/escribí de nuevo la comunidad/.test(await texto('.olt-form [role=alert]')), 'y sin escribirlas no guarda');
+await page.fill('input[name=host]', '127.0.0.1');
+comprobar(/guardada/.test(await page.getAttribute('input[name=comunidad]', 'placeholder')), 'con la dirección de antes, siguen valiendo las guardadas');
 // Una lectura nueva no borra lo que se está escribiendo.
 await page.fill('input[name=nombre]', 'OLT Carcarañá');
 await page.click('.olt-actualizar');

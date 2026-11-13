@@ -425,7 +425,8 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       titulo: equipo ? equipo.nombre : null,
       tieneComunidad: Boolean(c.tiene_comunidad),
       tieneClave: Boolean(c.tiene_clave),
-      usuarioGuardado: c.usuario ?? '',
+      // A dónde va lo guardado: si eso cambia, la comunidad y la clave se escriben de nuevo.
+      guardado: { host: c.host ?? '', snmp_puerto: c.snmp_puerto ?? 161, consola: c.consola ?? '', consola_puerto: c.consola_puerto ?? 22, usuario: c.usuario ?? '' },
       v: {
         nombre: equipo?.origen === 'panel' ? '' : equipo?.nombre ?? '',
         host: c.host ?? equipo?.host_panel ?? '',
@@ -541,13 +542,34 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       name: clave, value: form.v[clave] ?? '', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
       oninput: (e) => {
         form.v[clave] = e.target.value;
+        ponerAyudas(e.target.form);
       },
       ...attrs,
     });
   }
 
-  function secreto(clave, guardado, rotulo) {
-    const input = entrada(clave, { type: 'password', autocomplete: 'new-password', placeholder: guardado ? 'guardada: escribí solo para cambiarla' : '' });
+  // Lo guardado vale mientras vaya al mismo lugar (la misma dirección y el mismo puerto).
+  function sigueGuardada(cual) {
+    const v = form.v;
+    const g = form.guardado;
+    if (v.host.trim().toLowerCase() !== g.host.toLowerCase()) return false;
+    if (cual === 'comunidad') return form.tieneComunidad && Number(v.snmp_puerto) === g.snmp_puerto;
+    return form.tieneClave && v.consola === g.consola && Number(v.consola_puerto) === g.consola_puerto && v.usuario.trim() === g.usuario;
+  }
+
+  function ayuda(cual) {
+    if (sigueGuardada(cual)) return 'guardada: escribí solo para cambiarla';
+    const habia = cual === 'comunidad' ? form.tieneComunidad : form.tieneClave && form.v.usuario.trim() === form.guardado.usuario;
+    return habia ? 'escribila de nuevo: cambió a dónde va' : '';
+  }
+
+  // Al cambiar la dirección o un puerto, las casillas de la comunidad y de la clave dicen si hay que escribirlas (sin rehacer el formulario).
+  function ponerAyudas(formulario) {
+    for (const cual of ['comunidad', 'clave']) formulario?.querySelector(`input[name=${cual}]`)?.setAttribute('placeholder', ayuda(cual));
+  }
+
+  function secreto(clave, rotulo) {
+    const input = entrada(clave, { type: 'password', autocomplete: 'new-password', placeholder: ayuda(clave) });
     const ver = boton('ver', () => {
       input.type = input.type === 'password' ? 'text' : 'password';
       ver.textContent = input.type === 'password' ? 'ver' : 'ocultar';
@@ -605,7 +627,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       campo('Hora de la OLT', seleccion('utc', zonas), 'La zona del reloj de la OLT: sirve para ubicar las caídas que ella anota.')),
     h('fieldset', {}, h('legend', { text: 'Lectura (SNMP v2c)' }),
       campo('Puerto UDP', entrada('snmp_puerto', { type: 'number', inputmode: 'numeric', min: '1', max: '65535' })),
-      campo('Comunidad de lectura', secreto('comunidad', form.tieneComunidad, 'la comunidad'),
+      campo('Comunidad de lectura', secreto('comunidad', 'la comunidad'),
         'Con la comunidad, traza lee las ONT, las placas y los puertos. Alcanza con una de solo lectura.'),
       h('label.olt-tilde', {}, h('input', {
         type: 'checkbox', checked: v.leer,
@@ -621,7 +643,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       }), 'Por ahora sirve para comprobar que se puede entrar. Conviene un usuario de solo consulta.'),
       v.consola ? campo('Puerto TCP', puertoConsola) : null,
       v.consola ? campo('Usuario', entrada('usuario', { maxlength: '64' })) : null,
-      v.consola ? campo('Clave', secreto('clave', form.tieneClave && v.usuario.trim() === form.usuarioGuardado, 'la clave')) : null),
+      v.consola ? campo('Clave', secreto('clave', 'la clave')) : null),
     form.error ? h('p.olt-aviso.alerta', { role: 'alert', text: form.error }) : null,
     form.quitar
       ? h('div.olt-form-botones', {},
