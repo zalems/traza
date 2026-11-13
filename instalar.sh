@@ -717,7 +717,7 @@ chmod 0700 "$dest"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 chown "$SERVICE_USER:" "$tmp"
-for db in ftth red; do
+for db in ftth red olt; do
   [[ -f "$ROOT/data/$db.db" ]] || continue
   runuser -u "$SERVICE_USER" -- /usr/bin/python3 -I -c 'import sqlite3, sys
 src = sqlite3.connect(sys.argv[1])

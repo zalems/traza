@@ -355,7 +355,7 @@ class IntegracionesTest(unittest.TestCase):
         self.assertEqual(data["conectadas"], 1)
         self.assertEqual(data["leido"], "2026-10-14T13:00:00Z")
         self.assertEqual(data["clientes"][str(a["id"])], {"estado": "online", "rx": -21.3, "cuando": "2026-10-14T13:00:00Z",
-                                                          "causa": None})
+                                                          "causa": None, "interfaz": "0/19/3"})
         self.assertEqual((data["clientes"][str(c["id"])]["estado"], data["clientes"][str(c["id"])]["causa"]), ("offline", "LOS"))
         self.assertNotIn(str(nadie["id"]), data["clientes"])
         # Solo con el panel: sin Wispro, por la ONT anotada.
@@ -1112,6 +1112,282 @@ class IntegracionesTest(unittest.TestCase):
             self.assertIn(".json aparte", r.stderr)
         finally:
             w.cerrar()
+
+    # ------------------------------------------------- cajas y tablero de la OLT
+
+    def pedir_como(self, ruta, redes):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{ruta}",
+                                     headers={"Host": "traza.ejemplo", "X-Usuario": "ana", "X-Redes": redes})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                return res.status
+        except urllib.error.HTTPError as err:
+            return err.code
+
+    def test_cajas_con_potencias_y_bocas(self):
+        """Todas las cajas juntas: bocas de Wispro y la lectura de la ONT de cada contrato."""
+        red, nap = self.red_con_caja("Cajas A")
+        self.configurar(red)
+        suelta = self.ok("POST", "/api/elementos", {"red": red, "tipo": "nap", "nombre": "Sin par en Wispro",
+                                                    "lon": -58.2, "lat": -26.2}, status=201)["elemento"]
+        data = self.ok("GET", f"/api/integracion/cajas?red={red}")
+        self.assertEqual((data["errores"], data["conectadas"], data["leido"]), ([], 1, "2026-10-14T13:00:00Z"))
+        self.assertEqual(set(data["cajas"]), {str(nap["id"])})  # la que no está en Wispro no figura
+        self.assertNotIn(str(suelta["id"]), data["cajas"])
+        caja = data["cajas"][str(nap["id"])]
+        self.assertEqual((caja["nap"]["nombre"], caja["nap"]["capacidad"], caja["nap"]["contratos"]), ("P5C4", 16, 5))
+        # Tres contratos con su ONT en el panel (uno por el «#405» de la descripción) y dos sin lectura.
+        self.assertEqual(sorted((x["estado"], x["rx"]) for x in caja["lecturas"]),
+                         [("offline", None), ("online", -25.53), ("online", -21.3)])
+        self.assertEqual({x["interfaz"] for x in caja["lecturas"]}, {"0/19/3"})
+        self.assertEqual(caja["sin_lectura"], 2)
+        # Sin el panel quedan las bocas; sin Wispro no hay nada que decir.
+        solo_wispro, nap2 = self.red_con_caja("Cajas B")
+        self.configurar(solo_wispro, panel=False)
+        data = self.ok("GET", f"/api/integracion/cajas?red={solo_wispro}")
+        self.assertEqual((data["cajas"][str(nap2["id"])]["lecturas"], data["cajas"][str(nap2["id"])]["sin_lectura"]), ([], 5))
+        self.assertIsNone(data["leido"])
+        solo_panel, _ = self.red_con_caja("Cajas C")
+        self.configurar(solo_panel, wispro=False)
+        self.assertEqual(self.ok("GET", f"/api/integracion/cajas?red={solo_panel}"),
+                         {"cajas": {}, "errores": [], "leido": None, "conectadas": 0})
+        todas = self.ok("GET", "/api/integracion/cajas?red=todas")
+        self.assertGreaterEqual(todas["conectadas"], 2)
+        self.assertIn(str(nap["id"]), todas["cajas"])
+        self.assertIn(str(nap2["id"]), todas["cajas"])
+        self.assertEqual(self.pedir_como("/api/integracion/cajas?red=todas", str(red)), 403)
+        self.assertEqual(self.pedir_como(f"/api/integracion/cajas?red={solo_wispro}", str(red)), 403)
+        self.assertEqual(self.pedir_como(f"/api/integracion/cajas?red={red}", str(red)), 200)
+
+    def test_tablero_de_la_olt(self):
+        red, nap = self.red_con_caja("Tablero A")
+        self.configurar(red)
+        ana = self.cliente(red, "Ana", -58.17, -26.17, ont="HG8145V5 · 48575443-90BCF28A")
+        data = self.ok("GET", f"/api/olt?red={red}")
+        self.assertEqual(data["errores"], [])
+        self.assertEqual(data["configurada"], {"wispro": True, "panel": True})
+        self.assertEqual(data["olts"], ["ALVATIC-MA5800-01"])
+        self.assertEqual(data["umbrales"], {"atencion": -25.0, "critica": -28.0, "alta": -8.0})
+        r = data["resumen"]
+        self.assertEqual((r["onts"], r["en_linea"], r["caidas"], r["fibra"], r["atencion"], r["criticas"]), (3, 2, 1, 1, 1, 0))
+        self.assertEqual((r["con_contrato"], r["en_mapa"]), (3, 1))
+        self.assertEqual(len(data["pon"]), 1)
+        pon = data["pon"][0]
+        self.assertEqual((pon["interfaz"], pon["onts"], pon["en_linea"], pon["fibra"], pon["estado"]), ("0/19/3", 3, 2, 1, "bien"))
+        self.assertAlmostEqual(pon["rx_prom"], -23.415, delta=0.011)
+        self.assertEqual((pon["rx_min"], pon["rx_max"], pon["ultima_caida"]), (-25.53, -21.3, "2026-10-13T22:00:00Z"))
+        por_id = {o["panel_id"]: o for o in data["onts"]}
+        self.assertEqual(set(por_id), {5, 6, 7})  # la ONT de la otra empresa (99) no aparece
+        uno = por_id[5]
+        self.assertEqual((uno["descripcion"], uno["sn"], uno["interfaz"], uno["ont_id"], uno["nivel"], uno["rx"]),
+                         ("#391 Gómez Ana", "HWTC90BCF28A", "0/19/3", 0, "bien", -21.3))
+        self.assertEqual((uno["contrato"], uno["titular"], uno["nap"], uno["caja"], uno["cliente"]),
+                         (391, "Gómez, Ana", "P5C4", nap["id"], ana["id"]))
+        self.assertEqual((por_id[6]["nivel"], por_id[6].get("cliente")), ("atencion", None))
+        # La que no tiene serie en Wispro se encuentra por el «#405» de su descripción.
+        self.assertEqual((por_id[7]["nivel"], por_id[7]["motivo"], por_id[7]["contrato"]), ("caida", "fibra", 405))
+        self.assertEqual(data["novedades"][0]["tipo"], "lectura-vieja")  # el panel falso leyó en 2026-10-14
+        # La historia de una ONT: solo de las de esta red.
+        h = self.ok("GET", f"/api/olt/ont?red={red}&ont=5")
+        self.assertEqual((h["horas"], h["puntos"], h["tendencia"]["db_semana"]), (168, [], -0.2))
+        self.assertEqual(h["eventos"][0], {"cuando": "2026-10-13T22:00:00Z", "tipo": "offline", "causa": "LOS"})
+        self.assertEqual(self.ok("GET", f"/api/olt/ont?red={red}&ont=5&horas=24")["horas"], 24)
+        self.assertEqual(self.ok("GET", f"/api/olt/ont?red={red}&ont=5&horas=99999")["horas"], 168)
+        self.assertEqual(self.pedir("GET", f"/api/olt/ont?red={red}&ont=99")[0], 404)
+        self.assertEqual(self.pedir("GET", f"/api/olt/ont?red={red}&ont=0")[0], 400)
+        self.assertEqual(self.pedir("GET", f"/api/olt/ont?red={red}")[0], 400)
+        # Sin Wispro: por la ONT anotada en el cliente. Sin panel: solo dice que no está conectada.
+        otra, _ = self.red_con_caja("Tablero B")
+        self.configurar(otra, wispro=False)
+        b = self.cliente(otra, "Luis", -58.17, -26.17, ont="48575443D87F4EB6")
+        data = self.ok("GET", f"/api/olt?red={otra}")
+        por_id = {o["panel_id"]: o for o in data["onts"]}
+        self.assertEqual((por_id[6]["cliente"], por_id[6].get("contrato"), por_id[5].get("cliente")), (b["id"], None, None))
+        sin, _ = self.red_con_caja("Tablero C")
+        self.configurar(sin, panel=False)
+        self.assertEqual(self.ok("GET", f"/api/olt?red={sin}"), {"configurada": {"wispro": True, "panel": False}, "errores": []})
+        self.assertEqual(self.pedir("GET", f"/api/olt/ont?red={sin}&ont=5")[0], 404)
+        self.assertEqual(self.pedir("GET", "/api/olt?red=todas")[0], 400)
+        self.assertEqual(self.pedir_como(f"/api/olt?red={red}", str(otra)), 403)
+        self.assertEqual(self.pedir_como(f"/api/olt/ont?red={red}&ont=5", str(otra)), 403)
+        self.assertEqual(self.pedir_como(f"/api/olt/historia?red={red}", str(otra)), 403)
+        self.assertEqual(self.pedir_como(f"/api/olt?red={otra}", str(otra)), 200)
+
+    @staticmethod
+    def ont_falsa(n, pon="0/1/0", estado="online", rx=-20.0, cae=None, causa=None, caja=None, cliente=None):
+        m = {"panel_id": n, "olt": "OLT", "sn": f"HWTC{n:08X}", "interfaz": pon, "ont_id": n, "descripcion": f"#{n} X",
+             "estado": estado, "rx": rx if estado == "online" else None, "tx": None, "cuando": None, "ultima_caida": cae,
+             "causa": causa}
+        m["nivel"] = api.nivel_ont(m, api.UMBRALES)
+        if m["nivel"] == "caida":
+            m["motivo"] = api.tipo_causa(causa)
+        if caja is not None:
+            m["caja"] = caja
+        if cliente is not None:
+            m["cliente"] = cliente
+        return m
+
+    def test_novedades_de_la_olt(self):
+        f = self.ont_falsa
+        ahora = time.time()
+        hace = lambda s: api.iso_de(ahora - s)  # noqa: E731
+        self.assertEqual([api.tipo_causa(x) for x in ("LOS", "LOSi/LOBi", "dying-gasp", "Dying Gasp", "LOFi", "deactivated", None)],
+                         ["fibra", "fibra", "energia", "energia", "fibra", "otra", "otra"])
+        self.assertEqual([api.nivel_ont({"estado": "online", "rx": rx}, api.UMBRALES) for rx in (-20, -25, -27.9, -28, -5, None)],
+                         ["bien", "atencion", "atencion", "critica", "alta", "sin-dato"])
+        onts = [
+            # 0/1/0: sano, con una ONT crítica.
+            f(1), f(2, rx=-28.4, cliente=902), f(3, rx=-26.0),
+            # 0/1/1: caído entero por fibra.
+            f(11, "0/1/1", "offline", cae=hace(600), causa="LOS", caja=71), f(12, "0/1/1", "offline", cae=hace(590), causa="LOS", caja=71),
+            # 0/1/2: cuatro cayeron juntas (la caja 72 entera), una cayó sola ayer y el resto anda.
+            *(f(20 + i, "0/1/2", "offline", cae=hace(3600 + i * 20), causa="LOS", caja=72, cliente=920 + i) for i in range(4)),
+            f(25, "0/1/2", "offline", cae=hace(90000), causa="dying-gasp", caja=73), *(f(26 + i, "0/1/2", caja=73) for i in range(6)),
+            # 0/1/3: tres sin energía a la vez, de cajas distintas.
+            *(f(40 + i, "0/1/3", "offline", cae=hace(1200 + i), causa="dying-gasp", caja=80 + i) for i in range(3)),
+            *(f(45 + i, "0/1/3") for i in range(5)),
+            # 0/2/0: una caja sin señal, caídas a destiempo (sin hora en una).
+            f(50, "0/2/0", "offline", cae=hace(86400), causa="LOS", caja=74), f(51, "0/2/0", "offline", caja=74),
+            *(f(52 + i, "0/2/0") for i in range(4)),
+        ]
+        pon = api.resumen_pon(onts)
+        self.assertEqual([(p["interfaz"], p["onts"], p["en_linea"], p["estado"]) for p in pon],
+                         [("0/1/0", 3, 3, "atencion"), ("0/1/1", 2, 0, "caido"), ("0/1/2", 11, 6, "bien"),
+                          ("0/1/3", 8, 5, "bien"), ("0/2/0", 6, 4, "bien")])
+        self.assertEqual((pon[0]["rx_min"], pon[0]["rx_max"], pon[0]["criticas"], pon[0]["atencion"]), (-28.4, -20.0, 1, 1))
+        self.assertEqual((pon[2]["fibra"], pon[2]["energia"], pon[3]["energia"]), (4, 1, 3))
+        nombres = {71: "NAP-71", 72: "NAP-72", 73: "NAP-73", 74: "NAP-74"}
+        nov = api.novedades_olt(onts, pon, nombres, api.iso_de(ahora - 60), api.UMBRALES)
+        por_tipo = {}
+        for n in nov:
+            por_tipo.setdefault(n["tipo"], []).append(n)
+        self.assertEqual(sorted(por_tipo), ["caida-grupal", "caja-caida", "pon-caido", "senal-critica"])
+        caido = por_tipo["pon-caido"][0]
+        self.assertEqual((caido["interfaz"], caido["cantidad"], caido["motivo"], caido["onts"]), ("0/1/1", 2, "fibra", [11, 12]))
+        self.assertIn("ninguna de sus 2 ONT está en línea (sin luz", caido["texto"])
+        grupales = {n["interfaz"]: n for n in por_tipo["caida-grupal"]}
+        self.assertEqual(set(grupales), {"0/1/2", "0/1/3"})
+        g = grupales["0/1/2"]
+        self.assertEqual((g["cantidad"], g["motivo"], g["caja"], g["nivel"], g["clientes"]), (4, "fibra", 72, "grave", [923, 922, 921, 920]))
+        self.assertEqual(g["texto"], "PON 0/1/2: 4 ONT cayeron juntas (sin luz: corte de fibra) · son de NAP-72 (la caja entera)")
+        self.assertEqual((grupales["0/1/3"]["motivo"], grupales["0/1/3"]["nivel"], grupales["0/1/3"].get("caja")), ("energia", "atencion", None))
+        # La caja del PON caído y la que cayó junta ya se nombraron: queda la que cayó a destiempo.
+        self.assertEqual([(n["caja"], n["cantidad"]) for n in por_tipo["caja-caida"]], [(74, 2)])
+        self.assertEqual((por_tipo["senal-critica"][0]["onts"], por_tipo["senal-critica"][0]["clientes"]), ([2], [902]))
+        self.assertIn("1 ONT recibe −28,0 dBm o menos", por_tipo["senal-critica"][0]["texto"])
+        self.assertEqual([n["nivel"] for n in nov], sorted((n["nivel"] for n in nov), key=["grave", "atencion"].index))
+        # Dentro de lo grave, lo más reciente primero: el PON caído hace 10 minutos, antes que lo de hace una hora.
+        self.assertEqual([(n["tipo"], n.get("interfaz")) for n in nov if n["nivel"] == "grave"],
+                         [("pon-caido", "0/1/1"), ("caida-grupal", "0/1/2"), ("caja-caida", None)])
+        # Una lectura vieja del panel va primero.
+        nov = api.novedades_olt(onts, pon, nombres, api.iso_de(ahora - 7200), api.UMBRALES)
+        self.assertEqual((nov[0]["tipo"], nov[0]["texto"]),
+                         ("lectura-vieja", "El panel leyó la OLT por última vez hace 2 h: lo que se ve puede haber cambiado."))
+
+    def test_historial_de_la_olt(self):
+        h = api.HistoriaOlt(os.path.join(self.tmp.name, "olt-prueba.db"))
+        self.addCleanup(h.close)
+        ahora = int(time.time())
+
+        def lectura(t, caidas=(), rx=-20.0):
+            onts = []
+            for i in range(6):
+                ont = {"id": 100 + i, "slot": 1, "port": i // 3, "ont_id": i, "sn": f"48575443000000{i:02X}",
+                       "description": f"#{i} X", "run_state": "online", "rx_power_dbm": f"{rx - i:.2f}", "last_seen": api.iso_de(t)}
+                if i in caidas:
+                    ont.update(run_state="offline", rx_power_dbm=None, last_seen=api.iso_de(t - 400),
+                               last_down_time=api.iso_de(t - 100), last_down_cause="LOS")
+                onts.append(ont)
+            return api.DatosPanel([{"id": 1, "name": "OLT-X"}], {1: onts}, None)
+
+        t0 = ahora - 3600
+        self.assertEqual(h.anotar(7, lectura(t0)), {"muestras": 3, "eventos": 0})  # dos PON y toda la red
+        self.assertEqual(h.anotar(7, lectura(t0)), {"muestras": 0, "eventos": 0})  # la misma lectura no se repite
+        self.assertEqual(h.anotar(7, lectura(t0 + 300, caidas=(3, 4, 5)))["eventos"], 3)
+        self.assertEqual(h.anotar(7, lectura(t0 + 600, caidas=(3, 4, 5)))["eventos"], 0)
+        self.assertEqual(h.anotar(7, lectura(t0 + 900, caidas=(5,)))["eventos"], 2)
+        self.assertEqual(h.anotar(8, lectura(t0 + 900))["eventos"], 0)  # otra red: aparte
+        red = h.serie(7, 24)
+        self.assertEqual(red["tramo"], 300)
+        self.assertEqual([(p["onts"], p["en_linea"], p["minimo"]) for p in red["puntos"]], [(6, 6.0, 6), (6, 3.0, 3), (6, 3.0, 3), (6, 5.0, 5)])
+        self.assertEqual((red["puntos"][0]["rx_prom"], red["puntos"][0]["rx_min"]), (-22.5, -25.0))
+        pon = h.serie(7, 24, "OLT-X", "0/1/1")
+        self.assertEqual([(p["onts"], p["minimo"], p["rx_prom"]) for p in pon["puntos"]], [(3, 3, -24.0), (3, 0, None), (3, 0, None), (3, 2, -23.5)])
+        self.assertEqual(h.serie(7, 720)["tramo"], 10800)
+        inc = h.incidentes(7)
+        self.assertEqual([(g["tipo"], g["interfaz"], g["cantidad"], g["motivo"]) for g in inc],
+                         [("vuelve", "0/1/1", 2, None), ("cae", "0/1/1", 3, "fibra")])
+        self.assertEqual(inc[1]["t"], api.iso_de(t0 + 200))  # la hora de la caída según la OLT, no la de la anotación
+        self.assertEqual(len(inc[1]["sns"]), 3)
+        self.assertEqual(h.incidentes(8), [])
+        self.assertEqual((h.desde(7)["muestras"], h.desde(7)["cada_s"], h.desde(99)), (4, 300, {"desde": None, "muestras": 0, "cada_s": 300}))
+        # Comparar con antes: la mediana de lo anotado en la ventana.
+        self.assertIsNone(h.antes(7, "OLT-X", "0/1/0", 2, 3))
+        c = h.conn()
+        for i in range(5):
+            c.execute("INSERT INTO muestras VALUES (7, 'OLT-X', '0/1/0', ?, 3, 3, ?, -25)", (ahora - 7 * 86400 + i * 300, -21.0 + i * 0.1))
+        self.assertEqual(h.antes(7, "OLT-X", "0/1/0", 24 * 6, 24 * 8), (-20.8, 3))
+        f = self.ont_falsa
+        onts = [f(1, rx=-22.0), f(2, rx=-22.4), f(3, rx=-22.2)]
+        for o in onts:
+            o["olt"] = "OLT-X"
+        nov = api.novedades_olt(onts, api.resumen_pon(onts), {}, api.iso_de(ahora), api.UMBRALES, h, 7)
+        self.assertEqual([(n["tipo"], n["interfaz"], n["baja"]) for n in nov], [("pon-degradado", "0/1/0", 1.4)])
+        self.assertEqual(nov[0]["texto"], "PON 0/1/0: la potencia promedio bajó 1,4 dB en una semana (de −20,8 a −22,2 dBm)")
+        # Con otra cantidad de ONT en línea no se compara (cambió quiénes son, no la potencia).
+        self.assertEqual(api.novedades_olt(onts[:1], api.resumen_pon(onts[:1]), {}, api.iso_de(ahora), api.UMBRALES, h, 7), [])
+        # Podar: lo de hace más de ocho días queda con una anotación por hora.
+        base = (ahora - 20 * 86400) // 3600 * 3600
+        for i in range(12):
+            c.execute("INSERT INTO muestras VALUES (7, '', '', ?, 6, 6, -20, -25)", (base + i * 300,))
+        c.execute("INSERT INTO muestras VALUES (7, '', '', ?, 6, 6, -20, -25)", (ahora - 500 * 86400,))
+        c.execute("INSERT INTO eventos (red, t, sn, tipo) VALUES (7, ?, 'X', 'cae')", (ahora - 500 * 86400,))
+        self.assertEqual(h.podar(), 2)  # lo muy viejo se va siempre; lo de hace 20 días ya se había mirado
+        self.assertEqual(h.podar(todo=True), 11)
+        self.assertEqual([r[0] for r in c.execute("SELECT t FROM muestras WHERE red = 7 AND pon = '' AND t < ? ORDER BY t", (ahora - 86400 * 9,))], [base])
+        self.assertEqual(h.desde(7)["muestras"], 5)
+        # Por la API: la pasada anota las redes con panel, y el tablero trae lo reciente.
+        red_id, _ = self.red_con_caja("Historial A")
+        self.configurar(red_id)
+        api.Handler.historia = h
+        normal = self.panel.rutas["/api/olts/1/onts"]
+        recien = api.iso_de(ahora - 30)  # el panel falso, con una lectura de este momento
+        self.panel.rutas["/api/olts/1/onts"] = lambda q, cab: (200, [dict(o, last_seen=recien) for o in ONTS] if q.get("offset") == ["0"] else [])
+        try:
+            self.assertGreaterEqual(api.anotar_olts(api.Handler.integraciones, api.Handler.store, h), 1)
+            self.assertEqual(api.anotar_olts(api.Handler.integraciones, api.Handler.store, h), 0)
+            api.Handler.store.close()
+            data = self.ok("GET", f"/api/olt?red={red_id}")
+            self.assertEqual((data["recientes"], data["historia"]["muestras"], data["historia"]["desde"][:16]), ([], 1, recien[:16]))
+            self.assertNotIn("lectura-vieja", [n["tipo"] for n in data["novedades"]])
+            serie = self.ok("GET", f"/api/olt/historia?red={red_id}&horas=24")
+            self.assertEqual((serie["horas"], [(p["onts"], p["en_linea"]) for p in serie["puntos"]]), (24, [(3, 2.0)]))
+            self.assertEqual(self.ok("GET", f"/api/olt/historia?red={red_id}&olt=ALVATIC-MA5800-01&pon=0/19/3")["puntos"][0]["rx_min"], -25.53)
+            self.assertEqual(self.ok("GET", f"/api/olt/historia?red={red_id}&pon=0/19/9")["puntos"], [])
+            self.assertEqual(self.pedir("GET", f"/api/olt/historia?red={red_id}&pon=../x")[0], 400)
+        finally:
+            api.Handler.historia = None
+            self.panel.rutas["/api/olts/1/onts"] = normal
+        self.assertEqual(self.pedir("GET", f"/api/olt/historia?red={red_id}")[0], 503)
+        self.assertNotIn("recientes", self.ok("GET", f"/api/olt?red={red_id}"))
+
+    def test_puntos_de_una_serie(self):
+        self.assertEqual(api.puntos_panel({"points": [
+            {"t": "2026-10-14T12:00:00Z", "rx_avg": "-21.40", "rx_min": "-21.9", "rx_max": -21.1},
+            {"bucket": "2026-10-14T11:00:00+00:00", "rx": -21.2},
+            {"ts": 1792000000, "rx_power_dbm": "-22"},
+            {"t": "2026-10-14T13:00:00", "rx_avg": None},   # sin lectura
+            {"t": "ayer", "rx_avg": -20}, {"t": "2026-10-14T13:00:00Z", "rx_avg": -99}, "x", None]}),
+            [{"t": "2026-10-14T11:00:00Z", "rx": -21.2, "min": None, "max": None},
+             {"t": "2026-10-14T12:00:00Z", "rx": -21.4, "min": -21.9, "max": -21.1},
+             {"t": "2026-10-14T17:46:40Z", "rx": -22.0, "min": None, "max": None}])
+        self.assertEqual(api.puntos_panel([["2026-10-14T12:00:00Z", "-20.5"], [1792000000000, -21]]),
+                         [{"t": "2026-10-14T12:00:00Z", "rx": -20.5, "min": None, "max": None},
+                          {"t": "2026-10-14T17:46:40Z", "rx": -21.0, "min": None, "max": None}])
+        self.assertEqual(api.puntos_panel(None), [])
+        self.assertEqual(api.puntos_panel({"points": "x"}), [])
+        self.assertEqual((api.momento("2026-10-14T13:00:00Z"), api.momento("2026-10-14T13:00:00"), api.momento(""), api.momento(True)),
+                         (1791982800.0, 1791982800.0, None, None))
 
 
 if __name__ == "__main__":

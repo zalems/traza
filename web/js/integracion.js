@@ -153,6 +153,98 @@ export function medicionVirtual(state, nap, contratos) {
   };
 }
 
+// Una caja de un vistazo: sus bocas (cuántas tiene, ocupadas y libres) y cómo
+// reciben sus clientes (promedio, el peor, cuántos en línea y sin señal). Con
+// Wispro (la entrada de /api/integracion/cajas) valen su capacidad y sus contratos;
+// sin Wispro, la carta: las salidas del splitter y los clientes cuya bajada sale de
+// la caja, con el estado de su ONT (los estados de la señal).
+//   nivel: caida (con lecturas y nadie en línea) | mal | atencion | bien | ninguno (sin lecturas)
+export function resumenCaja(state, nap, entrada, estados) {
+  let fuente = 'carta';
+  let capacidad = null;
+  let ocupados = 0;
+  let lecturas = [];
+  let sinLectura = 0;
+  if (entrada?.nap) {
+    fuente = 'wispro';
+    capacidad = Number.isFinite(entrada.nap.capacidad) && entrada.nap.capacidad > 0 ? entrada.nap.capacidad : null;
+    ocupados = entrada.nap.contratos ?? 0;
+    lecturas = entrada.lecturas ?? [];
+    sinLectura = entrada.sin_lectura ?? 0;
+  } else {
+    const clientes = F.clientesPorCaja(state).get(nap.id) ?? [];
+    const spl = splitterDe(state, nap);
+    ocupados = clientes.length;
+    if (spl) {
+      const { usado } = F.indice(state);
+      let enUso = 0;
+      for (let n = 1; n <= spl.salidas; n += 1) if (usado.has(`${nap.id}|${F.extremoEquipo(spl.id, 's', n)}`)) enUso += 1;
+      capacidad = spl.salidas;
+      ocupados = Math.max(ocupados, enUso);
+    }
+    for (const id of clientes) {
+      const e = estados?.get(id);
+      if (e) lecturas.push({ rx: e.rx, estado: e.estado });
+      else sinLectura += 1;
+    }
+  }
+  if (capacidad === null) {
+    const anotados = Number(nap.properties.datos?.puertos);
+    if (Number.isFinite(anotados) && anotados > 0) capacidad = anotados;
+  }
+  const enLinea = lecturas.filter((l) => l.estado === 'online');
+  const rx = enLinea.map((l) => l.rx).filter(Number.isFinite);
+  const sinSenal = lecturas.length - enLinea.length;
+  let nivel = 'ninguno';
+  if (lecturas.length && !enLinea.length) nivel = 'caida';
+  else if (lecturas.length) {
+    const niveles = rx.map((v) => evaluarPotencia(v).nivel);
+    nivel = niveles.includes('mal') ? 'mal' : niveles.includes('atencion') ? 'atencion' : 'bien';
+    // La mitad o más sin señal no es una caja que esté bien.
+    if (nivel === 'bien' && sinSenal * 2 >= lecturas.length) nivel = 'atencion';
+  }
+  const libres = capacidad === null ? null : capacidad - ocupados;
+  return {
+    fuente,
+    capacidad,
+    ocupados,
+    libres: libres === null ? null : Math.max(0, libres),
+    sobrecargada: libres !== null && libres < 0,
+    clientes: lecturas.length + sinLectura,
+    conLectura: lecturas.length,
+    enLinea: enLinea.length,
+    sinSenal,
+    promedio: rx.length ? rx.reduce((a, b) => a + b, 0) / rx.length : null,
+    peor: rx.length ? Math.min(...rx) : null,
+    nivel,
+  };
+}
+
+// "5 de 16 (según Wispro)": las bocas libres de una caja, en palabras. null si no se sabe.
+export function textoBocas(r) {
+  if (!r) return null;
+  if (r.capacidad === null) return r.ocupados ? `falta anotar cuántas bocas tiene (${r.ocupados} en uso)` : null;
+  const segun = r.fuente === 'wispro' ? 'según Wispro' : 'según la carta';
+  if (r.sobrecargada) return `ninguna: ${r.ocupados} clientes para ${r.capacidad} bocas (${segun})`;
+  return `${r.libres} de ${r.capacidad} (${segun})`;
+}
+
+// "8 clientes · 7 en línea, 1 sin señal · reciben −21,3 dBm en promedio (el peor, −25,5)".
+export function textoClientesCaja(r) {
+  if (!r || !r.clientes) return null;
+  const partes = [`${r.clientes} ${r.clientes === 1 ? 'cliente' : 'clientes'}`];
+  if (r.conLectura) partes.push(`${r.enLinea} en línea${r.sinSenal ? `, ${r.sinSenal} sin señal` : ''}`);
+  if (r.promedio !== null) {
+    partes.push(r.enLinea > 1
+      ? `reciben ${dbTexto(r.promedio)} dBm en promedio (el peor, ${dbTexto(r.peor)})`
+      : `recibe ${dbTexto(r.promedio)} dBm`);
+  }
+  return partes.join(' · ');
+}
+
+// -21.34 -> '−21,3' (como se escribe acá); null -> '—'.
+export const dbTexto = (v, decimales = 1) => (Number.isFinite(v) ? v.toFixed(decimales).replace('-', '−').replace('.', ',') : '—');
+
 // Cuánto abarca la serie de una ONT (el panel pudo haber dejado de leer un tiempo).
 export function lapsoSerie(tend) {
   const d = tiempo(tend?.desde);

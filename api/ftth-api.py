@@ -45,7 +45,19 @@ Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
   GET    /api/integracion/cliente?elemento=ID   el contrato de un cliente y su ONT
   GET    /api/integracion/estados?red=ID|todas  el estado de la ONT de cada cliente del mapa, según el
                                        panel de la OLT (para la vista de señal): {clientes: {ID: {estado,
-                                       rx, cuando, causa}}, leido, conectadas, errores}
+                                       rx, cuando, causa, interfaz}}, leido, conectadas, errores}
+  GET    /api/integracion/cajas?red=ID|todas    cada NAP del mapa con su NAP de Wispro (bocas, contratos) y
+                                       la lectura de la ONT de cada contrato: {cajas: {ID: {nap, lecturas:
+                                       [{rx, estado, interfaz}], sin_lectura}}, leido, conectadas, errores}
+  GET    /api/olt?red=ID               el tablero de la OLT de la red, con lo que leyó el panel: onts (estado,
+                                       potencia, última caída, contrato, cliente y caja del mapa), pon (ONT
+                                       y en línea por puerto, potencia promedio y peor), resumen, novedades
+                                       (PON caído, caídas juntas, caja sin señal, señal crítica, PON que
+                                       perdió potencia), recientes (lo que cayó y volvió en dos días)
+  GET    /api/olt/ont?red=ID&ont=N[&horas=24|168|720]   la potencia de una ONT en el tiempo y sus eventos
+  GET    /api/olt/historia?red=ID[&horas=24|168|720][&olt=NOMBRE&pon=0/1/3]   lo que traza anotó cada 5
+                                       minutos (olt.db): ONT y en línea, potencia promedio y peor, de toda
+                                       la red o de un puerto PON
   POST   /api/integracion/nap/medir    {elemento}: potencia en vivo de las ONTs de la NAP, por Wispro
   POST   /api/integracion/cliente/medir  {elemento}
   POST   /api/integracion/nap/importar {elemento, contratos}: agrega al mapa los clientes que faltan
@@ -2243,6 +2255,16 @@ class Panel:
         eventos = self.get(f"/api/onts/{ont_id}/events", limit=20)
         return {"tendencia": tendencia_panel(serie), "eventos": eventos_panel(eventos)}
 
+    def serie(self, ont_id: int, horas: int) -> dict:
+        """La potencia de una ONT en el tiempo, su tendencia y sus eventos."""
+        serie = self.get(f"/api/onts/{ont_id}/series", hours=horas, buckets=96)
+        try:
+            eventos = self.get(f"/api/onts/{ont_id}/events", limit=50)
+        except IntegracionError:
+            eventos = []
+        return {"horas": horas, "puntos": puntos_panel(serie), "tendencia": tendencia_panel(serie),
+                "eventos": eventos_panel(eventos, 50)}
+
     def umbrales(self):
         data = self.get("/api/thresholds")
         return data if isinstance(data, dict) else None
@@ -2268,6 +2290,7 @@ def medida_panel(ont: dict, olt_nombre=None) -> dict:
         "ultima_caida": texto_corto(ont.get("last_down_time"), 40),
         "causa": texto_corto(ont.get("last_down_cause"), 60),
         "tecnologia": texto_corto(ont.get("technology"), 40),
+        "descripcion": texto_corto(ont.get("description"), 120),
     }
 
 
@@ -2294,7 +2317,7 @@ def tendencia_panel(serie):
             "desde": texto_corto(t.get("first_at"), 40), "hasta": texto_corto(t.get("last_at"), 40)}
 
 
-def eventos_panel(eventos) -> list:
+def eventos_panel(eventos, limite: int = 20) -> list:
     out = []
     for e in eventos if isinstance(eventos, list) else []:
         if not isinstance(e, dict):
@@ -2302,7 +2325,56 @@ def eventos_panel(eventos) -> list:
         det = e.get("details") if isinstance(e.get("details"), dict) else {}
         out.append({"cuando": texto_corto(e.get("occurred_at"), 40), "tipo": texto_corto(e.get("event_type"), 40),
                     "causa": texto_corto(det.get("cause") or det.get("reason") or det.get("down_cause"), 60)})
-    return out[:20]
+    return out[:limite]
+
+
+def momento(valor):
+    """Un instante como lo da el panel ('2026-10-14T13:00:00Z', con o sin zona, o
+    segundos desde 1970) en segundos desde 1970; None si no se entiende."""
+    if isinstance(valor, bool) or valor in (None, ""):
+        return None
+    if isinstance(valor, (int, float)):
+        v = float(valor)
+        if v > 1e11:  # milisegundos
+            v /= 1000
+        return v if 1e9 < v < 4e9 else None
+    try:
+        d = datetime.fromisoformat(str(valor).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.timestamp()
+
+
+def iso_de(segundos) -> str:
+    return datetime.fromtimestamp(segundos, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+TIEMPO_PUNTO = ("t", "ts", "time", "at", "bucket", "bucket_start", "start", "timestamp", "sampled_at")
+RX_PUNTO = ("rx_avg", "rx", "rx_power_dbm", "rx_dbm", "rx_power", "rx_mean", "avg")
+
+
+def puntos_panel(serie) -> list:
+    """Los puntos de la serie de una ONT como [{t, rx, min, max}], del más viejo al
+    más nuevo, para dibujarla. Se toman el instante y la potencia de los campos que
+    traiga cada punto (objeto o par [instante, potencia]); lo que no se entiende se saltea."""
+    puntos = serie.get("points") if isinstance(serie, dict) else serie
+    out = []
+    for p in puntos if isinstance(puntos, list) else []:
+        if isinstance(p, dict):
+            t = next((momento(p[k]) for k in TIEMPO_PUNTO if momento(p.get(k)) is not None), None)
+            rx = next((numero(p[k]) for k in RX_PUNTO if numero(p.get(k)) is not None), None)
+            bajo, alto = numero(p.get("rx_min")), numero(p.get("rx_max"))
+        elif isinstance(p, (list, tuple)) and len(p) >= 2:
+            t, rx, bajo, alto = momento(p[0]), numero(p[1]), None, None
+        else:
+            continue
+        if t is None or rx is None or not -60 <= rx <= 20:
+            continue
+        out.append({"t": iso_de(t), "rx": round(rx, 2), "min": bajo, "max": alto})
+    out.sort(key=lambda x: x["t"])
+    return out[-1000:]
 
 
 class DatosWispro:
@@ -2372,12 +2444,14 @@ class DatosPanel:
         self.olts = [texto_corto(nombres.get(i), 80) or f"OLT {i}" for i in onts_por_olt]
         self.umbrales = umbrales
         por_sn, self.por_numero = {}, {}
-        leidas = []
+        leidas, sin_sn = [], []
         for olt_id, onts in onts_por_olt.items():
             for ont in onts:
                 m = medida_panel(ont, nombres.get(olt_id))
                 if m["sn"]:
                     por_sn.setdefault(m["sn"], []).append(m)
+                else:
+                    sin_sn.append(m)
                 n = numero_de_descripcion(ont.get("description"))
                 if n is not None:
                     self.por_numero.setdefault(n, []).append(m)
@@ -2389,6 +2463,9 @@ class DatosPanel:
                        for sn, lista in por_sn.items()}
         self.leido = max(leidas) if leidas else None
         self.total = sum(len(v) for v in onts_por_olt.values())
+        # Todas las ONT de la red, una vez cada una (para el tablero de la OLT).
+        self.onts = list(self.por_sn.values()) + sin_sn
+        self.por_id = {m["panel_id"]: m for m in self.onts if m["panel_id"] is not None}
 
     def ont(self, sn=None, numero_contrato=None, sns_ajenos=()):
         """La ONT de un contrato: por su número de serie o, si el contrato no lo
@@ -2655,6 +2732,226 @@ def candidatas(dw: DatosWispro, row) -> list:
                 elegidas[n.get("id")] = (haversine_m(aca, u) if u else None, n)
     orden = sorted(elegidas.values(), key=lambda x: (x[0] is None, x[0] or 0))
     return [dw.nap(n, d) for d, n in orden]
+
+
+# ------------------------------------------------------------ tablero de la OLT
+#
+# Lo que el panel leyó de la OLT de una red, mirado como red: cuentas, puertos PON
+# y novedades (qué se cayó, qué está al límite, qué empeoró).
+
+UMBRALES = {"atencion": -25.0, "critica": -28.0, "alta": -8.0}  # dBm que recibe la ONT (GPON), como en el panel
+JUNTAS_S = 180  # ONT de un mismo PON que cayeron con menos de esto entre una y otra: cayeron juntas
+MIN_JUNTAS = 3  # cuántas hacen falta para avisarlo
+BAJA_PON_DB = 1.0  # un PON cuya potencia promedio bajó esto respecto de antes
+VIEJO_PANEL_H = 0.25  # una lectura del panel de hace más de esto ya no es "ahora"
+MAX_REFS = 200  # ONT o clientes que se nombran en una novedad
+
+
+def umbrales_de(u) -> dict:
+    """Los umbrales del panel ({"gpon": {"warn", "crit", "high"}}) o, si no los da, los de siempre."""
+    g = u.get("gpon") if isinstance(u, dict) and isinstance(u.get("gpon"), dict) else {}
+    out = dict(UMBRALES)
+    for clave, campo in (("atencion", "warn"), ("critica", "crit"), ("alta", "high")):
+        v = numero(g.get(campo))
+        if v is not None and -50 < v < 10:
+            out[clave] = v
+    return out
+
+
+def nivel_ont(m: dict, u: dict) -> str:
+    """caida (sin señal), critica, atencion, alta (satura), bien o sin-dato (en línea, sin lectura)."""
+    if m["estado"] != "online":
+        return "caida"
+    rx = m["rx"]
+    if rx is None:
+        return "sin-dato"
+    if rx <= u["critica"]:
+        return "critica"
+    if rx <= u["atencion"]:
+        return "atencion"
+    return "alta" if rx > u["alta"] else "bien"
+
+
+def tipo_causa(causa) -> str:
+    """Por qué cayó una ONT, en tres grupos: energia (dying gasp: se quedó sin
+    corriente), fibra (LOS, LOF…: dejó de llegarle luz) u otra (o no se sabe)."""
+    t = normalizado(causa)
+    if re.search(r"gasp|power|energ|apag", t):
+        return "energia"
+    if re.search(r"\blo[sfba]|fibra|fiber", t):
+        return "fibra"
+    return "otra"
+
+
+def contrato_de_ont(dw, m: dict):
+    """El contrato de Wispro de una ONT del panel: por su número de serie o, si
+    ningún contrato lo tiene, por el número con que empieza su descripción
+    ('#394 …') cuando ese contrato no tiene serie cargada. None si no hay o hay
+    más de uno."""
+    lista = dw.por_sn.get(m["sn"], []) if m["sn"] else []
+    if not lista:
+        n = numero_de_descripcion(m.get("descripcion"))
+        if n is not None:
+            lista = [c for c in dw.por_numero.get(str(n), []) if not sn_canonico(c.get("ont_serial_number"))]
+    return lista[0] if len(lista) == 1 else None
+
+
+def orden_interfaz(valor) -> list:
+    """'0/2/10' -> [0, 2, 10], para ordenar los puertos como números."""
+    return [int(x) for x in re.findall(r"\d+", str(valor or ""))] or [10 ** 9]
+
+
+def db_texto(valor) -> str:
+    """-21.34 -> '−21,3' (como se escribe acá)."""
+    return f"{valor:.1f}".replace("-", "−").replace(".", ",")
+
+
+def resumen_pon(onts: list) -> list:
+    """Los puertos PON según sus ONT: cuántas tiene, cuántas en línea y la potencia que reciben."""
+    grupos = {}
+    for o in onts:
+        g = grupos.setdefault((o["olt"], o["interfaz"]), {
+            "olt": o["olt"], "interfaz": o["interfaz"], "onts": 0, "en_linea": 0, "atencion": 0, "criticas": 0,
+            "fibra": 0, "energia": 0, "otras": 0, "ultima_caida": None, "_rx": []})
+        g["onts"] += 1
+        if o["nivel"] == "caida":
+            g[{"fibra": "fibra", "energia": "energia"}.get(o.get("motivo"), "otras")] += 1
+            if momento(o["ultima_caida"]) is not None and (
+                    g["ultima_caida"] is None or momento(o["ultima_caida"]) > momento(g["ultima_caida"])):
+                g["ultima_caida"] = o["ultima_caida"]
+            continue
+        g["en_linea"] += 1
+        if o["rx"] is not None:
+            g["_rx"].append(o["rx"])
+        if o["nivel"] == "critica":
+            g["criticas"] += 1
+        elif o["nivel"] == "atencion":
+            g["atencion"] += 1
+    out = []
+    for g in grupos.values():
+        rx = g.pop("_rx")
+        g["rx_prom"] = round(sum(rx) / len(rx), 2) if rx else None
+        g["rx_min"] = min(rx) if rx else None
+        g["rx_max"] = max(rx) if rx else None
+        caidas = g["onts"] - g["en_linea"]
+        g["estado"] = ("caido" if g["onts"] >= 2 and g["en_linea"] == 0
+                       else "parcial" if caidas >= MIN_JUNTAS and caidas * 2 >= g["onts"]
+                       else "atencion" if g["criticas"] else "bien")
+        out.append(g)
+    out.sort(key=lambda g: (str(g["olt"]), orden_interfaz(g["interfaz"])))
+    return out
+
+
+def resumen_onts(onts: list) -> dict:
+    niveles = Counter(o["nivel"] for o in onts)
+    motivos = Counter(o.get("motivo") for o in onts if o["nivel"] == "caida")
+    return {"onts": len(onts), "en_linea": len(onts) - niveles["caida"], "caidas": niveles["caida"],
+            "fibra": motivos["fibra"], "energia": motivos["energia"], "otras": motivos["otra"],
+            "atencion": niveles["atencion"], "criticas": niveles["critica"], "altas": niveles["alta"],
+            "sin_dato": niveles["sin-dato"], "con_contrato": sum(1 for o in onts if o.get("contrato") is not None),
+            "en_mapa": sum(1 for o in onts if o.get("cliente") is not None)}
+
+
+def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, historia=None, red_id=None) -> list:
+    """Lo que hay para mirar ahora, de lo más grave a lo menos y de lo más nuevo a lo más viejo: la lectura vieja del
+    panel, un PON sin ninguna ONT en línea, ONT de un PON que cayeron juntas, una
+    caja con todos sus clientes sin señal, ONT con señal crítica y un PON que
+    perdió potencia respecto de antes (con el historial propio)."""
+    out = []
+
+    def refs(lista) -> dict:
+        return {"cantidad": len(lista), "onts": [o["panel_id"] for o in lista if o["panel_id"] is not None][:MAX_REFS],
+                "clientes": [o["cliente"] for o in lista if o.get("cliente") is not None][:MAX_REFS]}
+
+    def motivo_mayor(lista):
+        cuenta = Counter(o.get("motivo") for o in lista)
+        motivo, n = cuenta.most_common(1)[0] if cuenta else (None, 0)
+        return motivo if motivo in ("fibra", "energia") and n * 2 > len(lista) else None
+
+    horas = horas_desde(leido) if leido else None
+    if horas is not None and horas > VIEJO_PANEL_H:
+        out.append({"tipo": "lectura-vieja", "nivel": "grave", "desde": leido,
+                    "texto": f"El panel leyó la OLT por última vez {hace_texto(leido)}: lo que se ve puede haber cambiado."})
+    por_pon, por_caja = {}, {}
+    for o in onts:
+        por_pon.setdefault((o["olt"], o["interfaz"]), []).append(o)
+        if o.get("caja") is not None:
+            por_caja.setdefault(o["caja"], []).append(o)
+    sin_senal = {caja for caja, suyas in por_caja.items() if len(suyas) >= 2 and all(o["nivel"] == "caida" for o in suyas)}
+    nombradas = set()
+    for p in pon:
+        suyas = por_pon[(p["olt"], p["interfaz"])]
+        caidas = [o for o in suyas if o["nivel"] == "caida"]
+        if p["estado"] == "caido":
+            motivo = motivo_mayor(caidas)
+            porque = {"fibra": " (sin luz: corte en la troncal o puerto apagado)",
+                      "energia": " (sin energía: corte de luz en la zona)"}.get(motivo, "")
+            out.append({"tipo": "pon-caido", "nivel": "grave", "olt": p["olt"], "interfaz": p["interfaz"], "motivo": motivo,
+                        "desde": p["ultima_caida"], **refs(caidas),
+                        "texto": f"PON {p['interfaz']}: ninguna de sus {len(caidas)} ONT está en línea{porque}"})
+            nombradas.update(o["caja"] for o in caidas if o.get("caja") is not None)
+            continue
+        con_hora = sorted(((momento(o["ultima_caida"]), o) for o in caidas if momento(o["ultima_caida"]) is not None),
+                          key=lambda x: x[0])
+        grupos, actual = [], []
+        for t, o in con_hora:
+            if actual and t - actual[-1][0] > JUNTAS_S:
+                grupos.append(actual)
+                actual = []
+            actual.append((t, o))
+        grupos.append(actual)
+        for grupo in grupos:
+            if len(grupo) < MIN_JUNTAS:
+                continue
+            juntas = [o for _, o in grupo]
+            motivo = motivo_mayor(juntas)
+            porque = {"fibra": " (sin luz: corte de fibra)", "energia": " (sin energía: corte de luz en la zona)"}.get(motivo, "")
+            texto = f"PON {p['interfaz']}: {len(juntas)} ONT cayeron juntas{porque}"
+            novedad = {"tipo": "caida-grupal", "nivel": "grave" if motivo != "energia" else "atencion", "olt": p["olt"],
+                       "interfaz": p["interfaz"], "motivo": motivo, "desde": iso_de(grupo[0][0]), **refs(juntas)}
+            de_cajas = {o.get("caja") for o in juntas}
+            if len(de_cajas) == 1 and None not in de_cajas:
+                caja = next(iter(de_cajas))
+                novedad["caja"] = caja
+                entera = caja in sin_senal and len(por_caja[caja]) == len(juntas)
+                texto += f" · son de {nombres_caja.get(caja) or 'una caja'}" + (" (la caja entera)" if entera else "")
+                if entera:
+                    nombradas.add(caja)
+            novedad["texto"] = texto
+            out.append(novedad)
+    for caja in sorted(sin_senal - nombradas, key=lambda c: str(nombres_caja.get(c) or "")):
+        suyas = por_caja[caja]
+        out.append({"tipo": "caja-caida", "nivel": "grave", "caja": caja, "motivo": motivo_mayor(suyas),
+                    "desde": max((o["ultima_caida"] for o in suyas if momento(o["ultima_caida"]) is not None),
+                                 key=momento, default=None), **refs(suyas),
+                    "texto": f"{nombres_caja.get(caja) or 'Una caja'}: sus {len(suyas)} clientes están sin señal"})
+    criticas = [o for o in onts if o["nivel"] == "critica"]
+    if criticas:
+        uno = len(criticas) == 1
+        out.append({"tipo": "senal-critica", "nivel": "atencion", **refs(criticas),
+                    "texto": f"{len(criticas)} ONT {'recibe' if uno else 'reciben'} {db_texto(u['critica'])} dBm o menos: "
+                             f"{'está' if uno else 'están'} al límite"})
+    if historia is not None:
+        for p in pon:
+            if p["rx_prom"] is None or p["estado"] == "caido":
+                continue
+            for desde_h, hasta_h, cuando in ((24 * 6, 24 * 8, "en una semana"), (20, 30, "desde ayer")):
+                antes = historia.antes(red_id, p["olt"], p["interfaz"], desde_h, hasta_h)
+                if antes is None:
+                    continue
+                rx_antes, en_linea_antes = antes
+                parecidas = en_linea_antes and abs(p["en_linea"] - en_linea_antes) <= max(1, 0.2 * en_linea_antes)
+                if parecidas and rx_antes - p["rx_prom"] >= BAJA_PON_DB:
+                    suyas = [o for o in por_pon[(p["olt"], p["interfaz"])] if o["nivel"] != "caida"]
+                    out.append({"tipo": "pon-degradado", "nivel": "atencion", "olt": p["olt"], "interfaz": p["interfaz"],
+                                "baja": round(rx_antes - p["rx_prom"], 2), **refs(suyas),
+                                "texto": f"PON {p['interfaz']}: la potencia promedio bajó {db_texto(rx_antes - p['rx_prom'])} dB "
+                                         f"{cuando} (de {db_texto(rx_antes)} a {db_texto(p['rx_prom'])} dBm)"})
+                break
+    # Primero lo grave y, dentro de cada grupo, lo más reciente (la lectura vieja, antes que todo).
+    orden = {"grave": 0, "atencion": 1}
+    out.sort(key=lambda n: (orden.get(n["nivel"], 2), n["tipo"] != "lectura-vieja", -(momento(n.get("desde")) or 0)))
+    return out
 
 
 class Integraciones:
@@ -2989,23 +3286,21 @@ class Integraciones:
                     out["errores"].append(f"Panel de la OLT: {err}.")
         return out
 
-    def estados(self, store, red_ids) -> dict:
-        """El estado de la ONT de cada cliente del mapa, para la vista de señal: en
-        línea o no, cuánto recibe y cuándo lo leyó el panel. Cada cliente se cruza con
-        su contrato de Wispro igual que en la ficha (y, si no, por la ONT anotada).
-        Varias redes (todas juntas) se leen a la vez; cuentan las que tienen el panel
-        conectado. leido: la lectura del panel más vieja de las que se usaron."""
-        out = {"clientes": {}, "errores": [], "leido": None, "conectadas": 0}
-        ids = [r for r in red_ids if self.panel(r) is not None]
-        out["conectadas"] = len(ids)
+    def _leer_redes(self, store, red_ids, out: dict, refrescar=False) -> list:
+        """Wispro y el panel de varias redes a la vez, con un solo plazo. Devuelve
+        [(red, DatosWispro o None, DatosPanel o None)]. Lo que falla o tarda queda
+        en out["errores"] (con el nombre de la red si son varias); si hay una
+        lectura anterior, se usa."""
         tareas = {}
-        for r in ids:
+        for r in red_ids:
             if self.wispro(r) is not None:
-                tareas[("wispro", r)] = _HILOS.submit(self.datos_wispro, r)
-            tareas[("panel", r)] = _HILOS.submit(self.datos_panel, r)
+                tareas[("wispro", r)] = _HILOS.submit(self.datos_wispro, r, refrescar)
+            if self.panel(r) is not None:
+                tareas[("panel", r)] = _HILOS.submit(self.datos_panel, r, refrescar)
         wait(list(tareas.values()), timeout=PLAZO_DATOS)
-        nombres = {n["id"]: n["nombre"] for n in store.networks()} if len(ids) > 1 else {}
-        for r in ids:
+        nombres = {n["id"]: n["nombre"] for n in store.networks()} if len(red_ids) > 1 else {}
+        res = []
+        for r in red_ids:
             prefijo = f"{nombres[r]}: " if r in nombres else ""
             leidos = {}
             for clave, etiqueta in (("wispro", "Wispro"), ("panel", "Panel de la OLT")):
@@ -3026,7 +3321,20 @@ class Integraciones:
                 if falla:
                     out["errores"].append(f"{prefijo}{etiqueta}: {falla}; se usa lo leído {hace_texto(valor.cuando)}.")
                 leidos[clave] = valor
-            dw, dp = leidos["wispro"], leidos["panel"]
+            res.append((r, leidos["wispro"], leidos["panel"]))
+        return res
+
+    def estados(self, store, red_ids) -> dict:
+        """El estado de la ONT de cada cliente del mapa, para la vista de señal: en
+        línea o no, cuánto recibe, en qué puerto PON está y cuándo lo leyó el panel.
+        Cada cliente se cruza con su contrato de Wispro igual que en la ficha (y, si
+        no, por la ONT anotada). Varias redes (todas juntas) se leen a la vez; cuentan
+        las que tienen el panel conectado. leido: la lectura del panel más vieja de
+        las que se usaron."""
+        out = {"clientes": {}, "errores": [], "leido": None, "conectadas": 0}
+        ids = [r for r in red_ids if self.panel(r) is not None]
+        out["conectadas"] = len(ids)
+        for r, dw, dp in self._leer_redes(store, ids, out):
             if dp is None:
                 continue
             if dp.leido and (out["leido"] is None or dp.leido < out["leido"]):
@@ -3046,8 +3354,104 @@ class Integraciones:
                 medida = dp.ont(sn, None if sn else numero, dw.por_sn if dw is not None else ())[0]
                 if medida:
                     out["clientes"][str(row["id"])] = {"estado": medida["estado"], "rx": medida["rx"],
-                                                       "cuando": medida["cuando"], "causa": medida["causa"]}
+                                                       "cuando": medida["cuando"], "causa": medida["causa"],
+                                                       "interfaz": medida["interfaz"]}
         return out
+
+    def cajas(self, store, red_ids) -> dict:
+        """Cada NAP del mapa con su NAP de Wispro (bocas y contratos) y lo que el
+        panel leyó de la ONT de cada contrato, para ver todas las cajas juntas:
+        potencia promedio, peor cliente y bocas libres. Cuentan las redes conectadas
+        con Wispro; sin el panel, quedan las bocas."""
+        out = {"cajas": {}, "errores": [], "leido": None, "conectadas": 0}
+        ids = [r for r in red_ids if self.wispro(r) is not None]
+        out["conectadas"] = len(ids)
+        for r, dw, dp in self._leer_redes(store, ids, out):
+            if dw is None:
+                continue
+            if dp is not None and dp.leido and (out["leido"] is None or dp.leido < out["leido"]):
+                out["leido"] = dp.leido
+            for row in store.naps_red(r):
+                nap, por = caja_de_wispro(dw, row)
+                if nap is None:
+                    continue
+                lecturas, sin_lectura = [], 0
+                for c in dw.por_nap.get(nap.get("id"), []):
+                    sn = sn_canonico(c.get("ont_serial_number"))
+                    numero = c.get("public_id") if isinstance(c.get("public_id"), int) else None
+                    m = dp.ont(sn, None if sn else numero, dw.por_sn)[0] if dp is not None else None
+                    if m is None:
+                        sin_lectura += 1
+                    else:
+                        lecturas.append({"rx": m["rx"], "estado": m["estado"], "interfaz": m["interfaz"]})
+                out["cajas"][str(row["id"])] = {"nap": dw.nap(nap, None, por), "lecturas": lecturas,
+                                                "sin_lectura": sin_lectura}
+        return out
+
+    def olt(self, store, red_id: int, historia=None, refrescar=False) -> dict:
+        """El tablero de la OLT de una red, con lo que el panel leyó de ella: cada
+        ONT (estado, potencia, última caída, su contrato de Wispro y su cliente y su
+        caja del mapa), los puertos PON, las cuentas y las novedades. Con el
+        historial propio, también lo que cayó y volvió en los últimos dos días."""
+        out = {"configurada": self.estado(red_id), "errores": []}
+        if self.panel(red_id) is None:
+            return out
+        _, dw, dp = self._leer_redes(store, [red_id], out, refrescar)[0]
+        if dp is None:
+            return out
+        u = umbrales_de(dp.umbrales)
+        filas = store.clientes_red(red_id)
+        cruce = Cruce(dw, filas) if dw is not None else None
+        por_ont = {}  # sin contrato de Wispro: el cliente del mapa que tiene anotada esa ONT
+        for row in filas:
+            for sn in set(sns_en_texto(datos_de(row).get("ont"))):
+                por_ont.setdefault(sn, []).append(row["id"])
+        cajas, nombres_caja = {}, {}
+        for row in store.naps_red(red_id) if dw is not None else []:
+            nap, _por = caja_de_wispro(dw, row)
+            if nap is not None:
+                cajas[nap.get("id")] = row["id"]
+                nombres_caja[row["id"]] = row["nombre"]
+        onts = []
+        for m in dp.onts:
+            o = {k: m[k] for k in ("panel_id", "olt", "sn", "interfaz", "ont_id", "descripcion", "estado", "rx", "tx",
+                                   "cuando", "ultima_caida", "causa")}
+            o["nivel"] = nivel_ont(m, u)
+            if o["nivel"] == "caida":
+                o["motivo"] = tipo_causa(m["causa"])
+            c = contrato_de_ont(dw, m) if dw is not None else None
+            if c is not None:
+                item = cruce.items.get(c.get("id")) or {}
+                o["contrato"] = item.get("numero")
+                o["titular"] = item.get("cliente") or None
+                o["nap"] = texto_corto((dw.naps_por_id.get(c.get("nap_id")) or {}).get("name"), 80)
+                if c.get("nap_id") in cajas:
+                    o["caja"] = cajas[c.get("nap_id")]
+                en_mapa = cruce.en_traza(c.get("id")) or {}
+                if en_mapa.get("id") is not None:
+                    o["cliente"] = en_mapa["id"]
+            if "cliente" not in o and m["sn"] and len(por_ont.get(m["sn"], [])) == 1:
+                o["cliente"] = por_ont[m["sn"]][0]
+            onts.append(o)
+        onts.sort(key=lambda o: (str(o["olt"]), orden_interfaz(o["interfaz"]), o["ont_id"] if o["ont_id"] is not None else 10 ** 9))
+        out.update({"olts": dp.olts, "leido": dp.leido, "umbrales": u, "onts": onts, "pon": resumen_pon(onts)})
+        out["resumen"] = resumen_onts(onts)
+        out["novedades"] = novedades_olt(onts, out["pon"], nombres_caja, dp.leido, u, historia, red_id)
+        if historia is not None:
+            out["recientes"] = historia.incidentes(red_id, 48)
+            out["historia"] = historia.desde(red_id)
+        return out
+
+    def olt_ont(self, red_id: int, panel_id: int, horas: int, refrescar=False) -> dict:
+        """La potencia de una ONT en el tiempo y sus eventos, del panel. Solo de una
+        ONT de la OLT de esta red (el panel puede tener las de otra empresa)."""
+        p = self.panel(red_id)
+        if p is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Esta red no está conectada al panel de la OLT.")
+        dp = self.datos_panel(red_id)[0]
+        if panel_id not in dp.por_id:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Esa ONT no está en la OLT de esta red.")
+        return self._guardado(("serie", red_id, panel_id, horas), VIVE_HISTORIA, lambda: p.serie(panel_id, horas), refrescar)
 
     def _wispro_o_error(self, red_id: int):
         """Wispro para una acción (medir, agregar, vincular): la última lectura si es de
@@ -3455,10 +3859,238 @@ def contrato_field(data: dict) -> str:
 
 # ----------------------------------------------------------------------- HTTP
 
+# ------------------------------------------------------ historial de la OLT
+#
+# Cada pocos minutos traza anota cómo está la OLT de cada red conectada al panel:
+# por puerto PON (y de toda la red), cuántas ONT hay y cuántas en línea, y la
+# potencia que reciben; y qué ONT cayó o volvió desde la anotación anterior. Va en
+# olt.db, junto a la base de la red. No guarda nombres: solo números de serie.
+
+MUESTREO_S = 300  # cada cuánto se anota
+GUARDA_FINA_DIAS = 8  # las anotaciones de cada pocos minutos; después queda una por hora
+GUARDA_DIAS = 400  # y nada más viejo que esto
+HORAS_HISTORIA = (24, 168, 720)  # lo que se puede pedir: un día, una semana, un mes
+
+
+class HistoriaOlt:
+    def __init__(self, ruta: str):
+        self.ruta = ruta
+        self.local = threading.local()
+        self._candado = threading.Lock()  # una anotación por vez
+        c = self.conn()
+        for sentencia in (
+            """CREATE TABLE IF NOT EXISTS muestras (
+                 red INTEGER NOT NULL, olt TEXT NOT NULL, pon TEXT NOT NULL, t INTEGER NOT NULL,
+                 onts INTEGER NOT NULL, en_linea INTEGER NOT NULL, rx_prom REAL, rx_min REAL,
+                 PRIMARY KEY (red, olt, pon, t)) WITHOUT ROWID""",
+            """CREATE TABLE IF NOT EXISTS estados (
+                 red INTEGER NOT NULL, sn TEXT NOT NULL, en_linea INTEGER NOT NULL, olt TEXT, pon TEXT,
+                 desde INTEGER NOT NULL, PRIMARY KEY (red, sn)) WITHOUT ROWID""",
+            """CREATE TABLE IF NOT EXISTS eventos (
+                 id INTEGER PRIMARY KEY, red INTEGER NOT NULL, t INTEGER NOT NULL, sn TEXT NOT NULL, olt TEXT,
+                 pon TEXT, tipo TEXT NOT NULL, causa TEXT)""",
+            "CREATE INDEX IF NOT EXISTS eventos_red_t ON eventos(red, t)",
+        ):
+            c.execute(sentencia)
+        self.close()
+
+    def conn(self) -> sqlite3.Connection:
+        c = getattr(self.local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self.ruta, timeout=10, isolation_level=None)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA busy_timeout=10000")
+            self.local.conn = c
+        return c
+
+    def close(self):
+        c = getattr(self.local, "conn", None)
+        if c is not None:
+            self.local.conn = None
+            c.close()
+
+    def anotar(self, red_id: int, dp) -> dict:
+        """Anota una lectura del panel. Lleva la hora en que el panel leyó la OLT,
+        así la misma lectura no se anota dos veces (ni una vieja, si el panel dejó
+        de leer). La primera vez que se ve una ONT se anota su estado, sin evento."""
+        t = int(momento(dp.leido) or time.time())
+        t -= t % 60
+        with self._candado:
+            c = self.conn()
+            if c.execute("SELECT 1 FROM muestras WHERE red = ? AND olt = '' AND pon = '' AND t >= ?", (red_id, t)).fetchone():
+                return {"muestras": 0, "eventos": 0}
+            grupos = {}
+            for m in dp.onts:
+                for clave in ((m["olt"] or "", m["interfaz"] or "?"), ("", "")):
+                    g = grupos.setdefault(clave, [0, 0, []])
+                    g[0] += 1
+                    if m["estado"] == "online":
+                        g[1] += 1
+                        if m["rx"] is not None:
+                            g[2].append(m["rx"])
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.executemany("INSERT OR IGNORE INTO muestras (red, olt, pon, t, onts, en_linea, rx_prom, rx_min) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              [(red_id, olt, pon, t, n, en, round(sum(rx) / len(rx), 2) if rx else None, min(rx) if rx else None)
+                               for (olt, pon), (n, en, rx) in grupos.items()])
+                antes = {r["sn"]: r for r in c.execute("SELECT sn, en_linea, desde FROM estados WHERE red = ?", (red_id,))}
+                eventos = []
+                for m in dp.onts:
+                    if not m["sn"]:
+                        continue
+                    en = 1 if m["estado"] == "online" else 0
+                    previo = antes.get(m["sn"])
+                    if previo is not None and previo["en_linea"] == en:
+                        continue
+                    cuando = t
+                    if not en:
+                        # La hora de la caída según la OLT, si es posterior a lo último que se anotó de esa ONT.
+                        cayo = momento(m["ultima_caida"])
+                        if cayo is not None and cayo <= t + 600 and (previo is None or cayo > previo["desde"]):
+                            cuando = int(cayo)
+                    if previo is not None:
+                        eventos.append((red_id, cuando, m["sn"], m["olt"], m["interfaz"], "vuelve" if en else "cae",
+                                        None if en else texto_corto(m["causa"], 60)))
+                    c.execute("INSERT INTO estados (red, sn, en_linea, olt, pon, desde) VALUES (?, ?, ?, ?, ?, ?) "
+                              "ON CONFLICT (red, sn) DO UPDATE SET en_linea = excluded.en_linea, olt = excluded.olt, "
+                              "pon = excluded.pon, desde = excluded.desde",
+                              (red_id, m["sn"], en, m["olt"], m["interfaz"], cuando))
+                c.executemany("INSERT INTO eventos (red, t, sn, olt, pon, tipo, causa) VALUES (?, ?, ?, ?, ?, ?, ?)", eventos)
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return {"muestras": len(grupos), "eventos": len(eventos)}
+
+    def serie(self, red_id: int, horas: int, olt: str = "", pon: str = "") -> dict:
+        """Las anotaciones de un puerto PON (o de toda la red, sin olt ni pon) de las
+        últimas horas, juntadas en hasta 240 tramos: ONT que había, en línea
+        (promedio y mínimo del tramo), potencia promedio y la peor."""
+        desde = int(time.time()) - horas * 3600
+        tramo = max(MUESTREO_S, horas * 3600 // 240 // MUESTREO_S * MUESTREO_S)
+        rows = self.conn().execute(
+            "SELECT t / :c * :c AS tc, MAX(onts) AS onts, ROUND(AVG(en_linea), 1) AS en_linea, MIN(en_linea) AS minimo, "
+            "ROUND(AVG(rx_prom), 2) AS rx_prom, MIN(rx_min) AS rx_min FROM muestras "
+            "WHERE red = :r AND olt = :o AND pon = :p AND t >= :d GROUP BY tc ORDER BY tc",
+            {"c": tramo, "r": red_id, "o": olt, "p": pon, "d": desde}).fetchall()
+        return {"horas": horas, "tramo": tramo, "puntos": [
+            {"t": iso_de(r["tc"]), "onts": r["onts"], "en_linea": r["en_linea"], "minimo": r["minimo"],
+             "rx_prom": r["rx_prom"], "rx_min": r["rx_min"]} for r in rows]}
+
+    def antes(self, red_id: int, olt, pon, horas_min: float, horas_max: float):
+        """(potencia promedio, ONT en línea) que tenía un PON entre horas_max y
+        horas_min atrás (las medianas de lo anotado), o None si no hay con qué comparar."""
+        ahora = time.time()
+        rows = self.conn().execute(
+            "SELECT rx_prom, en_linea FROM muestras WHERE red = ? AND olt = ? AND pon = ? AND t BETWEEN ? AND ? "
+            "AND rx_prom IS NOT NULL", (red_id, olt or "", pon or "?", int(ahora - horas_max * 3600),
+                                        int(ahora - horas_min * 3600))).fetchall()
+        if len(rows) < 3:
+            return None
+        medio = len(rows) // 2
+        return sorted(r["rx_prom"] for r in rows)[medio], sorted(r["en_linea"] for r in rows)[medio]
+
+    def incidentes(self, red_id: int, horas: int = 48, limite: int = 60) -> list:
+        """Lo que cayó y lo que volvió en las últimas horas, de lo más nuevo a lo más
+        viejo: las ONT de un mismo PON que cambiaron juntas van en un solo renglón."""
+        rows = self.conn().execute("SELECT t, sn, olt, pon, tipo, causa FROM eventos WHERE red = ? AND t >= ? ORDER BY t, id",
+                                   (red_id, int(time.time()) - horas * 3600)).fetchall()
+        grupos, abiertos = [], {}
+        for r in rows:
+            clave = (r["olt"], r["pon"], r["tipo"])
+            g = abiertos.get(clave)
+            if g is None or r["t"] - g["_hasta"] > JUNTAS_S:
+                g = {"t": iso_de(r["t"]), "olt": r["olt"], "interfaz": r["pon"], "tipo": r["tipo"], "cantidad": 0,
+                     "sns": [], "_hasta": r["t"], "_motivos": Counter()}
+                abiertos[clave] = g
+                grupos.append(g)
+            g["_hasta"] = r["t"]
+            g["cantidad"] += 1
+            if len(g["sns"]) < 40:
+                g["sns"].append(r["sn"])
+            if r["tipo"] == "cae":
+                g["_motivos"][tipo_causa(r["causa"])] += 1
+        out = []
+        for g in reversed(grupos[-limite:]):
+            motivos = g.pop("_motivos")
+            g.pop("_hasta")
+            motivo, n = motivos.most_common(1)[0] if motivos else (None, 0)
+            g["motivo"] = motivo if motivo in ("fibra", "energia") and n * 2 > g["cantidad"] else None
+            out.append(g)
+        return out
+
+    def desde(self, red_id: int) -> dict:
+        """Desde cuándo hay anotaciones de una red y cuántas."""
+        r = self.conn().execute("SELECT MIN(t) AS t, COUNT(*) AS n FROM muestras WHERE red = ? AND olt = '' AND pon = ''",
+                                (red_id,)).fetchone()
+        return {"desde": iso_de(r["t"]) if r["t"] is not None else None, "muestras": r["n"], "cada_s": MUESTREO_S}
+
+    def podar(self, ahora: float = None, todo: bool = False) -> int:
+        """Lo de más de GUARDA_FINA_DIAS queda con una anotación por hora; lo de más
+        de GUARDA_DIAS se borra. Se corre un par de veces por día: alcanza con mirar
+        lo que pasó ese límite en la última semana (todo=True revisa todo)."""
+        ahora = time.time() if ahora is None else ahora
+        fino, viejo = int(ahora - GUARDA_FINA_DIAS * 86400), int(ahora - GUARDA_DIAS * 86400)
+        desde = 0 if todo else fino - 7 * 86400
+        with self._candado:
+            c = self.conn()
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                n = c.execute("DELETE FROM muestras WHERE t < ?", (viejo,)).rowcount
+                n += c.execute(
+                    "DELETE FROM muestras WHERE t < :f AND t >= :d AND t > (SELECT MIN(m.t) FROM muestras m "
+                    "WHERE m.red = muestras.red AND m.olt = muestras.olt AND m.pon = muestras.pon "
+                    "AND m.t >= muestras.t / 3600 * 3600 AND m.t < muestras.t / 3600 * 3600 + 3600)",
+                    {"f": fino, "d": desde}).rowcount
+                n += c.execute("DELETE FROM eventos WHERE t < ?", (viejo,)).rowcount
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return n
+
+
+def anotar_olts(integ, store, historia) -> int:
+    """Una pasada: anota la OLT de cada red conectada al panel. Devuelve cuántas redes anotó."""
+    hechas = 0
+    for red in store.networks():
+        if integ.panel(red["id"]) is None:
+            continue
+        try:
+            dp, falla = integ.datos_panel(red["id"])
+        except IntegracionError as err:
+            log.debug("historial de la OLT, red %s: %s", red["id"], err)
+            continue
+        if falla is None and historia.anotar(red["id"], dp)["muestras"]:
+            hechas += 1
+    return hechas
+
+
+def muestreo(integ, store, historia, parar: threading.Event):
+    """El hilo que anota cada MUESTREO_S (la primera vez, a poco de arrancar)."""
+    ultima_poda = None
+    espera = 20
+    while not parar.wait(espera):
+        espera = MUESTREO_S
+        try:
+            anotar_olts(integ, store, historia)
+            if ultima_poda is None or time.time() - ultima_poda > 12 * 3600:
+                historia.podar(todo=ultima_poda is None)  # al arrancar, todo (pudo estar apagado unos días)
+                ultima_poda = time.time()
+        except Exception:  # noqa: BLE001 - el historial no tiene que voltear la API
+            log.exception("no se pudo anotar el historial de la OLT")
+        finally:
+            store.close()
+            historia.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ftth-api/1"
     store: Store = None
     integraciones: Integraciones = None
+    historia: HistoriaOlt = None  # el historial propio de la OLT (olt.db)
     secreto: str = ""  # vacío: no se exige (pruebas, desarrollo)
 
     def log_message(self, fmt, *args):
@@ -3615,6 +4247,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Error interno del servidor."})
         finally:
             self.store.close()
+            if self.historia is not None:
+                self.historia.close()
 
     def route(self, method, path, query, user):
         store = self.store
@@ -3740,8 +4374,32 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/integracion"):
             return self.route_integracion(method, path, q, user)
+        if path in ("/api/olt", "/api/olt/ont", "/api/olt/historia") and method == "GET":
+            return self.route_olt(path, q)
 
         raise ApiError(HTTPStatus.NOT_FOUND, "No existe esa ruta.")
+
+    def route_olt(self, path, q):
+        """El tablero de la OLT de una red (solo lectura)."""
+        integ = self.integraciones
+        if integ is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Las integraciones no están disponibles en este servidor.")
+        red_id = self.red_param(q("red"))
+        if path == "/api/olt":
+            return HTTPStatus.OK, integ.olt(self.store, red_id, self.historia, q("refrescar") == "1")
+        horas = q("horas", "168")
+        horas = int(horas) if horas.isascii() and horas.isdigit() and int(horas) in HORAS_HISTORIA else 168
+        if path == "/api/olt/ont":
+            ont = int_value(q("ont"), "ont")
+            if ont <= 0:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Falta indicar la ONT.")
+            return HTTPStatus.OK, integ.olt_ont(red_id, ont, horas, q("refrescar") == "1")
+        if self.historia is None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "El historial de la OLT no está disponible en este servidor.")
+        olt, pon = q("olt")[:80], q("pon")[:20]
+        if pon and not re.fullmatch(r"[0-9?]{1,4}(/[0-9]{1,4}){0,3}", pon):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Puerto PON inválido.")
+        return HTTPStatus.OK, self.historia.serie(red_id, horas, olt if pon else "", pon)
 
     def route_integracion(self, method, path, q, user):
         """Wispro y el panel de la OLT (solo lectura, salvo agregar clientes al mapa)."""
@@ -3786,10 +4444,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/integracion/cliente" and method == "GET":
             return HTTPStatus.OK, integ.cliente(self.store, self.element_of_type(q("elemento"), "cliente"),
                                                q("refrescar") == "1")
-        if path == "/api/integracion/estados" and method == "GET":
+        if path in ("/api/integracion/estados", "/api/integracion/cajas") and method == "GET":
             red_id = self.red_param(q("red"), todas=True)
             ids = [r["id"] for r in self.store.networks()] if red_id is None else [red_id]
-            return HTTPStatus.OK, integ.estados(self.store, ids)
+            leer = integ.estados if path.endswith("/estados") else integ.cajas
+            return HTTPStatus.OK, leer(self.store, ids)
         if method == "POST" and path in ("/api/integracion/nap/medir", "/api/integracion/cliente/medir",
                                          "/api/integracion/nap/importar", "/api/integracion/vincular",
                                          "/api/integracion/desvincular"):
@@ -3844,6 +4503,14 @@ def serve(db_path: str, host: str, port: int, secret_path: str = "", integracion
     Handler.secreto = read_secret(secret_path) if secret_path else ""
     Handler.store = Store(db_path)
     Handler.integraciones = Integraciones(ruta_integraciones(db_path, integraciones))
+    try:
+        Handler.historia = HistoriaOlt(os.path.join(os.path.dirname(os.path.abspath(db_path)), "olt.db"))
+    except (sqlite3.Error, OSError) as err:  # sin historial se sigue atendiendo
+        log.warning("sin historial de la OLT (olt.db): %s", err)
+    parar = threading.Event()
+    if Handler.historia is not None:
+        threading.Thread(target=muestreo, args=(Handler.integraciones, Handler.store, Handler.historia, parar),
+                         name="historial-olt", daemon=True).start()
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     log.info("escuchando en http://%s:%d, base %s", host, port, db_path)
@@ -3851,6 +4518,8 @@ def serve(db_path: str, host: str, port: int, secret_path: str = "", integracion
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        parar.set()
 
 
 # --------------------------------------------------- comando "integraciones"

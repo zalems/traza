@@ -119,6 +119,9 @@ if [[ -d /srv/ftth ]]; then
     # Lo último puede estar todavía en el archivo -wal: se cuentan los dos.
     row "  base de la red" "$(du -ch --apparent-size /srv/ftth/data/red.db* 2>/dev/null | tail -n1 | cut -f1) (respaldo: sudo /srv/ftth/bin/respaldo)"
   fi
+  if [[ -f /srv/ftth/data/olt.db ]]; then
+    row "  historial de la OLT" "$(du -ch --apparent-size /srv/ftth/data/olt.db* 2>/dev/null | tail -n1 | cut -f1), última anotación $(date -r /srv/ftth/data/olt.db '+%d/%m %H:%M' 2>/dev/null || echo '?')"
+  fi
   if [[ -d /run/systemd/system ]] && have systemctl; then
     row "  copia diaria" "ftth-respaldo.timer: $(systemctl is-active ftth-respaldo.timer 2>/dev/null || true)"
   fi

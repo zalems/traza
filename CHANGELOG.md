@@ -1,5 +1,53 @@
 # Cambios
 
+## 0.11.0 · 13/11/2026
+
+La OLT de cada red, dentro de traza: tablero con resumen y novedades, puertos
+PON, ONT, cajas con potencia promedio y bocas libres, e historial propio.
+
+- Botón de la OLT en el mapa (debajo del de la señal). Abre el tablero de la
+  OLT de la red, con lo que el panel leyó de ella; solo lee. Cuatro partes:
+  - *Resumen*: ONT en la OLT, en línea, sin señal (sin luz o sin energía), con
+    señal baja y sin su cliente en el mapa. "Para mirar ahora": un puerto PON
+    sin ninguna ONT en línea, ONT de un puerto que cayeron juntas (y si son
+    todas de una caja), una caja con todos sus clientes sin señal, ONT al
+    límite, un puerto que perdió 1 dB o más respecto de la semana pasada o de
+    ayer, y la lectura vieja del panel. Si los clientes caídos tienen su
+    recorrido dibujado, dice dónde se juntan (el corte está ahí o antes) y
+    lleva al mapa. Curva de ONT en línea (24 h, 7 y 30 días) y lo que cayó y
+    volvió en dos días.
+  - *Puertos PON*: ONT, en línea, sin señal con su causa, potencia promedio y
+    la peor de cada puerto, y la historia de cada uno (ONT en línea y
+    potencia, con los umbrales).
+  - *ONT*: buscar (nombre, serie, contrato, puerto, caja), filtrar y ordenar;
+    cada una con su estado, lo que recibe y emite, contrato, caja, la curva de
+    su potencia, la tendencia y sus eventos, y el salto a su cliente o a su
+    caja en el mapa.
+  - *Cajas*: todas las NAP con bocas libres, clientes en línea, potencia
+    promedio y la peor; filtros, orden y copiar la lista. Con Wispro valen su
+    capacidad y sus contratos; sin Wispro, la carta de empalme.
+- Con la señal prendida, cada NAP lleva en el mapa un anillo del color de cómo
+  reciben sus clientes y, de cerca, la potencia promedio y las bocas libres.
+  La ficha de la NAP suma "Bocas libres" y "Sus clientes".
+- Historial propio: cada 5 minutos traza anota, por puerto PON y de toda la
+  red, las ONT que hay y las que están en línea, la potencia promedio y la
+  peor, y qué ONT cayó o volvió (con la hora que da la OLT). Va en
+  `data/olt.db` (sin nombres), entra en la copia diaria, a los ocho días queda
+  una anotación por hora y se guarda poco más de un año.
+- En "todas las redes" se elige de qué red se mira la OLT; una red sin OLT
+  conectada dice cómo conectarla y muestra igual sus cajas. Un usuario no ve
+  la OLT de una red que no tiene asignada, ni las ONT de otra OLT del panel.
+- API: `GET /api/olt?red=N`, `GET /api/olt/ont?red=N&ont=ID[&horas=]`,
+  `GET /api/olt/historia?red=N[&horas=][&olt=&pon=]`,
+  `GET /api/integracion/cajas?red=N|todas`; `estados` suma el puerto PON de
+  cada cliente.
+- `herramientas/muestras-panel.py`: lista todo lo que entrega el panel y
+  muestra la forma de cada respuesta de lectura (sin llamar nada que cambie
+  algo ni que lea la OLT en el momento), para sumar lo que falta: potencia de
+  salida de cada puerto (SFP), placas, uplinks y tráfico.
+- Las pruebas en navegador quedan en el repositorio (`pruebas/navegador/`),
+  con el Wispro y el panel falsos y los datos de prueba.
+
 ## 0.10.0 · 31/10/2026 · commit 4236289
 
 Señal: qué fibras tienen luz, hacia dónde va y si hay tráfico.

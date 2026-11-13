@@ -9,6 +9,7 @@ import { setupRed } from './red.js';
 import { setupFicha } from './ficha.js';
 import { setupCarta } from './carta.js';
 import { setupSenal } from './senal.js';
+import { setupOlt } from './olt.js';
 import { recorrido } from './fibras.js';
 
 const RED_KEY = 'ftth.red';
@@ -421,11 +422,49 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
       map.jumpTo({ center: f.geometry.coordinates, zoom: Math.max(map.getZoom(), 18) });
       acciones.seleccionar('elemento', id);
     },
+    abrirOlt: (pestana) => olt.abrir(pestana),
   });
-  acciones.senal = { estados: () => senal.estados(), pedir: () => senal.pedirEstados(), on: (fn) => senal.on(fn) };
+  acciones.senal = {
+    estados: () => senal.estados(),
+    caja: (id) => senal.caja(id),
+    pedir: () => senal.pedirTodo(),
+    on: (fn) => senal.on(fn),
+  };
 
   const ficha = setupFicha({ root: $('ficha'), red, acciones });
   const carta = setupCarta({ root: $('carta'), red, acciones, toast });
+  // El tablero de la OLT: desde ahí se salta a una caja, a un cliente o a varios.
+  const olt = setupOlt({
+    root: $('olt'),
+    red,
+    senal,
+    toast,
+    acciones: {
+      redActual: () => redActual,
+      redes: () => redes,
+      irAElemento(id) {
+        const f = red.state.elementos.get(id);
+        if (!f) return;
+        olt.cerrar({ devolverFoco: false });
+        setModo('ver');
+        map.jumpTo({ center: f.geometry.coordinates, zoom: Math.max(map.getZoom(), 17) });
+        acciones.seleccionar('elemento', id);
+      },
+      irAClientes(ids) {
+        const puntos = ids.map((id) => red.state.elementos.get(id)?.geometry.coordinates).filter(Boolean);
+        if (!puntos.length) return;
+        olt.cerrar({ devolverFoco: false });
+        setModo('ver');
+        ficha.cerrar();
+        red.seleccionar(null);
+        const lons = puntos.map((p) => p[0]);
+        const lats = puntos.map((p) => p[1]);
+        map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+          { padding: 70, maxZoom: 18, duration: 0 });
+        if (!senal.activa()) senal.alternar(true); // para verlos en rojo o en verde
+      },
+    },
+  });
   // Cuando llega el estado de las ONT, la ficha abierta se rehace (cuentas de tráfico).
   senal.on(() => {
     const sel = red.seleccionado();
@@ -1008,8 +1047,8 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   const escribiendo = (el) => el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 
   document.addEventListener('keydown', (event) => {
-    // Con la carta de empalme abierta, las teclas son de ella.
-    if (carta.abierta()) return;
+    // Con la carta de empalme o el tablero de la OLT abiertos, las teclas son de ellos.
+    if (carta.abierta() || olt.abierta()) return;
     // Se mira dónde se apretó la tecla (el buscador, por ejemplo, se suelta
     // solo con Escape antes de que el aviso llegue acá).
     const foco = event.target instanceof Element ? event.target : document.activeElement;
@@ -1094,6 +1133,7 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     const elegida = id === TODAS ? (administra ? RED_TODAS : null) : redes.find((r) => r.id === id);
     if (!elegida) return;
     carta.cerrar({ silencioso: true });
+    olt.cerrar({ devolverFoco: false });
     setModo('ver');
     pintarRed(elegida);
     try {
@@ -1169,5 +1209,5 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
   pista();
   iniciar();
 
-  return { red, ficha, carta, senal, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed, abrirUsuarios };
+  return { red, ficha, carta, senal, olt, setModo, modo: () => modo, redActual: () => redActual, buscarEnRed, abrirUsuarios };
 }
