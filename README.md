@@ -326,7 +326,11 @@ claves ni datos de los clientes:
 `python3 herramientas/muestras-olt-wispro.py`. Para ver todo lo que entrega
 el panel (todas sus rutas y la forma de cada respuesta de lectura: placas,
 puertos, uplinks, tráfico), sin llamar nada que cambie algo ni que lea la
-OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para ver cómo están las
+OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para leer por
+SNMP, directo de la OLT, la óptica de cada puerto PON (potencia de salida del
+SFP, temperatura, corriente, tensión) y su tráfico, y comprobar así que desde
+el servidor se llega a la OLT: `python3 herramientas/muestras-snmp.py --olt N`
+(pide la community sin mostrarla; solo lee). Para ver cómo están las
 ubicaciones de las NAPs y de los contratos en Wispro, por OLT (solo cuentas y
 distancias): `python3 herramientas/ubicaciones-wispro.py RED` (el número de la
 red).

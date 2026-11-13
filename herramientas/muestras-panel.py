@@ -35,10 +35,11 @@ PERSONAL = re.compile(r"desc|name|nombre|client|alias|titular|abonado|address|di
                       r"national|taxpayer|dni|cuit|details|city|neighborhood", re.I)
 UBICACION = re.compile(r"^(lat|lon|lng)", re.I)
 # Nombres de equipos o de la red: se muestran.
-VISIBLE = re.compile(r"(^|_)id$|^(node|olt|zone|server|board|port|vendor|model|type|profile|vlan|line|srv)_?(name|type)?$|"
+VISIBLE = re.compile(r"(^|_)id$|^(node|olt|zone|server|board|port|vendor|model|type|profile|vlan|line|srv|if)_?(name|type)?$|"
                      r"^(event_type|run_state|rx_status|technology|status|state|kind|unit)$", re.I)
 # Un GET con esto en la ruta o en su descripción puede abrir una sesión en la OLT: no se llama.
 NO_LLAMAR = re.compile(r"live|vivo|ssh|cli\b|command|comando|exec|action|accion|diag|reboot|reinici|reset|authori|autoriz|"
+                       r"profile|autofind|"  # en el panel de ALVATIC leen la OLT en el momento (perfiles, ONT sin autorizar)
                        r"sweep|barrid|refresh|refresc|poll|sync|ping|test|trace|\brun\b|start|stop|export|download|descarg|"
                        r"apply|aplic|provision|delete|borr|write|config", re.I)
 MAX_LLAMADAS = 60
@@ -212,6 +213,39 @@ def main():
         for n in nombres:
             valores[n] = valor
 
+    # Las interfaces (uplinks y, si están, los puertos PON), en una línea cada una: no son datos de personas.
+    estado, ifs, s = pedir(f"{base}/api/olts/{oid}/interfaces")
+    interfaces = [x for x in lista(ifs) if isinstance(x, dict)]
+    if interfaces:
+        print(f"\n== Interfaces de la OLT {oid}: {len(interfaces)} ({s:.1f} s)")
+        print("id     nombre             placa/puerto  uplink  Mbps     estado  entra bps      sale bps")
+        for x in interfaces:
+            print(f"{str(x.get('id')):6} {str(x.get('if_name'))[:18]:18} {str(x.get('slot'))}/{str(x.get('port')):11} "
+                  f"{'sí' if x.get('is_uplink') else 'no':7} {str(x.get('speed_mbps')):8} {str(x.get('oper_status')):7} "
+                  f"{str(x.get('in_bps')):14} {str(x.get('out_bps'))}")
+    del_puerto = next((x for x in interfaces if x.get("slot") == ont.get("slot") and x.get("port") == ont.get("port")
+                       and not x.get("is_uplink")), None)
+    uplink = next((x for x in interfaces if x.get("is_uplink")), None)
+    for n in ("if_ref", "if_id", "interface_id", "iface_id"):
+        valores[n] = (del_puerto or uplink or {}).get("id")
+
+    def de_la_muestra(dato):
+        """De una lista (o de las placas del chasis), lo de la placa y el puerto de la ONT de muestra."""
+        items = dato if isinstance(dato, list) else dato.get("boards") if isinstance(dato, dict) else None
+        for x in items if isinstance(items, list) else []:
+            if not isinstance(x, dict) or x is items[0] or x.get("slot", x.get("slot_id")) != ont.get("slot"):
+                continue
+            if "port" in x and x.get("port") != ont.get("port"):
+                continue
+            copia = dict(x)
+            puertos = x.get("ports")
+            if isinstance(puertos, list) and puertos:
+                suyo = next((q for q in puertos if isinstance(q, dict) and ont.get("port") in (q.get("port"), q.get("port_id"))), puertos[0])
+                copia["ports"] = [suyo]
+                copia["(puertos en total)"] = len(puertos)
+            return copia
+        return None
+
     hechas, salteadas = 0, []
     for ruta, op, comunes in lecturas:
         if ruta in ("/openapi.json", "/docs", "/redoc") or not ruta.startswith("/api"):
@@ -241,7 +275,7 @@ def main():
             elif nombre == "hours":
                 consulta[nombre] = 24
             elif nombre == "buckets":
-                consulta[nombre] = 6
+                consulta[nombre] = 20  # el panel no acepta menos
             elif p.get("required"):
                 falta = nombre
         if falta:
@@ -257,6 +291,10 @@ def main():
         if isinstance(dato, list):
             print(f"lista de {len(dato)}" + (f"; campos: {', '.join(sorted({k for x in dato if isinstance(x, dict) for k in x}))}" if dato else ""))
         imprimir(resumir(dato))
+        suyo = de_la_muestra(dato)
+        if suyo is not None:
+            print(f"(lo de la placa {ont.get('slot')}{', puerto ' + str(ont.get('port')) if 'port' in suyo else ''}, donde está la ONT de muestra:)")
+            imprimir(resumir(suyo), 2500)
         time.sleep(0.2)
 
     if salteadas:

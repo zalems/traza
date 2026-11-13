@@ -98,7 +98,8 @@ def onts_ahora():
     for b in BASE_ONTS:
         o = {"id": b["id"], "slot": b["slot"], "port": b["port"], "ont_id": b["ont_id"], "sn": b["sn"],
              "description": b["description"], "run_state": "online", "rx_power_dbm": f"{b['rx']:.2f}",
-             "tx_power_dbm": "2.31", "last_seen": visto, "technology": "gpon",
+             "tx_power_dbm": "2.31", "last_seen": visto, "technology": "gpon", "vendor": "HWTC", "ont_type": None,
+             "distance_m": None, "last_up_time": None, "last_down_time": None, "last_down_cause": None,
              "rx_status": "critical" if b["rx"] <= -28 else "warning" if b["rx"] <= -25 else "ok"}
         cae, causa = None, None
         if b["nap"] == 4:  # HP1C5
@@ -138,31 +139,97 @@ def serie(ont_id, horas, cubos):
         "rx_avg": f"{b['rx'] + 0.1:.2f}", "first_at": iso(t - timedelta(hours=horas)), "last_at": iso(t)}}
 
 
-OPENAPI = {"openapi": "3.1.0", "info": {"title": "SmartOLT libre", "version": "0.9"}, "paths": {
-    "/api/olts": {"get": {"summary": "Lista de OLTs"}},
-    "/api/olts/{olt_id}": {"get": {"summary": "Una OLT", "parameters": [{"name": "olt_id", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/olts/{olt_id}/onts": {"get": {"summary": "ONTs de una OLT", "parameters": [
-        {"name": "olt_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 200}},
-        {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}}]}},
-    "/api/olts/{olt_id}/boards": {"get": {"summary": "Placas", "parameters": [{"name": "olt_id", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/olts/{olt_id}/uplinks": {"get": {"summary": "Uplinks con tráfico", "parameters": [{"name": "olt_id", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/olts/{olt_id}/ports/{slot}/{port}/series": {"get": {"summary": "Serie de un puerto PON", "parameters": [
-        {"name": "olt_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-        {"name": "slot", "in": "path", "required": True, "schema": {"type": "integer"}},
-        {"name": "port", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/onts/{ont_id}/series": {"get": {"summary": "Serie óptica", "parameters": [
-        {"name": "ont_id", "in": "path", "required": True, "schema": {"type": "integer"}},
-        {"name": "hours", "in": "query", "schema": {"type": "integer", "default": 168}},
-        {"name": "buckets", "in": "query", "schema": {"type": "integer", "default": 120}}]}},
-    "/api/onts/{ont_id}/events": {"get": {"summary": "Eventos", "parameters": [{"name": "ont_id", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/onts/{ont_id}/live": {"get": {"summary": "Lectura en vivo por SSH", "parameters": [{"name": "ont_id", "in": "path", "required": True, "schema": {"type": "integer"}}]}},
-    "/api/onts/{ont_id}/actions/reboot": {"post": {"summary": "Reiniciar la ONT", "parameters": [{"name": "ont_id", "in": "path", "required": True, "schema": {"type": "integer"}}],
-                                                   "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Confirmar"}}}}}},
-    "/api/thresholds": {"get": {"summary": "Umbrales"}},
-}, "components": {"schemas": {"Confirmar": {"type": "object", "properties": {"confirm": {"type": "boolean"}, "dry_run": {"type": "boolean"}}}}}}
+def _ruta(resumen, *params, cuerpo=None, descripcion=None):
+    op = {"summary": resumen, "parameters": [
+        {"name": n, "in": "path" if n in ("olt_id", "ont_ref", "slot", "port", "if_ref") else "query",
+         **({"required": True} if n in ("olt_id", "ont_ref", "slot", "port", "if_ref", "q") else {}),
+         "schema": {"type": "integer", **({"default": d} if d is not None else {})}} for n, d in params]}
+    if descripcion:
+        op["description"] = descripcion
+    if cuerpo:
+        op["requestBody"] = {"content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{cuerpo}"}}}}
+    return op
+
+
+# Las rutas del panel de verdad (OLT Panel API 1.0), como las mostró herramientas/muestras-panel.py el 13/11/2026.
+OPENAPI = {"openapi": "3.1.0", "info": {"title": "OLT Panel API", "version": "1.0"}, "paths": {
+    "/api/health": {"get": _ruta("Health")},
+    "/api/olts": {"get": _ruta("Olts")},
+    "/api/olts/{olt_id}": {"get": _ruta("Olt", ("olt_id", None))},
+    "/api/olts/{olt_id}/chassis": {"get": _ruta("Chassis", ("olt_id", None))},
+    "/api/olts/{olt_id}/summary": {"get": _ruta("Summary", ("olt_id", None))},
+    "/api/olts/{olt_id}/onts": {"get": _ruta("Onts", ("olt_id", None), ("slot", None), ("port", None), ("state", None),
+                                             ("search", None), ("limit", 500), ("offset", 0))},
+    "/api/onts/{ont_ref}": {"get": _ruta("Ont", ("ont_ref", None))},
+    "/api/onts/{ont_ref}/optical": {"get": _ruta("Ont Optical", ("ont_ref", None), ("hours", 168))},
+    "/api/olts/{olt_id}/ports/{slot}/{port}/series": {"get": _ruta("Port Series", ("olt_id", None), ("slot", None), ("port", None),
+                                                                  ("hours", 168), ("buckets", 300))},
+    "/api/onts/{ont_ref}/series": {"get": _ruta("Ont Series", ("ont_ref", None), ("hours", 168), ("buckets", 300))},
+    "/api/onts/{ont_ref}/events": {"get": _ruta("Ont Events", ("ont_ref", None), ("limit", 50))},
+    "/api/olts/{olt_id}/profiles": {"get": _ruta("Profiles", ("olt_id", None))},
+    "/api/olts/{olt_id}/autofind": {"get": _ruta("Autofind", ("olt_id", None), descripcion="ONTs sin autorizar, leídas por SSH en vivo.")},
+    "/api/olts/{olt_id}/actions/authorize": {"post": _ruta("Action Authorize", ("olt_id", None), cuerpo="AuthorizeBody")},
+    "/api/onts/{ont_ref}/actions/reboot": {"post": _ruta("Action Reboot", ("ont_ref", None), cuerpo="OntActionBody")},
+    "/api/onts/{ont_ref}/actions/deauthorize": {"post": _ruta("Action Deauthorize", ("ont_ref", None), cuerpo="OntActionBody")},
+    "/api/diagnostics": {"get": _ruta("Diagnostics Catalog")},
+    "/api/onts/{ont_ref}/diagnostic": {"post": _ruta("Ont Diagnostic", ("ont_ref", None), cuerpo="DiagnosticBody")},
+    "/api/onts/{ont_ref}/traffic": {"get": _ruta("Ont Traffic", ("ont_ref", None), ("hours", 168), descripcion="Tráfico medido por SSH (watch).")},
+    "/api/onts/{ont_ref}/watch": {"post": _ruta("Ont Watch", ("ont_ref", None), cuerpo="WatchBody")},
+    "/api/olts/{olt_id}/ports/{slot}/{port}/traffic": {"get": _ruta("Port Traffic", ("olt_id", None), ("slot", None), ("port", None),
+                                                                   ("hours", 24), ("buckets", 300))},
+    "/api/olts/{olt_id}/interfaces": {"get": _ruta("Interfaces", ("olt_id", None), ("uplinks_only", None))},
+    "/api/interfaces/{if_ref}/series": {"get": _ruta("Interface Series", ("if_ref", None), ("hours", 24), ("buckets", 300))},
+    "/api/olts/{olt_id}/refresh": {"post": _ruta("Refresh Onts", ("olt_id", None))},
+    "/api/olts/{olt_id}/boards/refresh": {"post": _ruta("Refresh Boards", ("olt_id", None))},
+    "/api/olts/{olt_id}/boards": {"get": _ruta("Boards Detail", ("olt_id", None))},
+    "/api/search": {"get": _ruta("Search", ("q", None), ("olt_id", None), ("limit", 30))},
+    "/api/thresholds": {"get": _ruta("Thresholds")},
+    "/api/audit": {"get": _ruta("Audit", ("limit", 100), descripcion="Bitácora de acciones y comandos.")},
+}, "components": {"schemas": {
+    "AuthorizeBody": {"type": "object", "properties": {"slot": {"type": "integer"}, "port": {"type": "integer"}, "sn": {"type": "string"},
+                                                       "execute": {"type": "boolean"}, "confirm": {"type": "boolean"}}},
+    "OntActionBody": {"type": "object", "properties": {"execute": {"type": "boolean"}, "confirm": {"type": "boolean"}}},
+    "DiagnosticBody": {"type": "object", "properties": {"command": {"type": "string"}}},
+    "WatchBody": {"type": "object", "properties": {"watching": {"type": "boolean"}}}}}}
 
 pedidos = []  # (método, ruta) de lo que se le pidió al panel, para comprobar que no se toca lo que no se debe
+PUERTOS = sorted({(1, 0), (1, 1), (1, 2), (1, 3), (2, 0)})
+
+
+def _olt(con_cuentas=True):
+    o = {"id": 1, "name": "ALVATIC-MA5800-01", "model": "MA5800-X17", "firmware": None, "host": "10.0.0.1", "enabled": True,
+         "last_poll_at": iso(ahora() - timedelta(seconds=45 + estado["atraso"])), "last_error": None, "last_error_at": None}
+    if con_cuentas:
+        onts = onts_ahora()
+        o.update(ont_count=len(onts), ont_online=sum(1 for x in onts if x["run_state"] == "online"))
+    return o
+
+
+def _interfaces():
+    """Los uplinks (placa 9) y los puertos PON, con su tráfico: como /api/olts/N/interfaces."""
+    t = iso(ahora())
+    out = [{"id": 1, "if_index": 234954752, "if_name": "ethernet0/9/0", "slot": 9, "port": 0, "speed_mbps": 10000,
+            "admin_status": "up", "oper_status": "up", "is_uplink": True, "last_seen": t, "in_bps": 1153039023,
+            "out_bps": 100470145, "in_octets": 931012373793951, "out_octets": 88654309487240, "sampled_at": t},
+           {"id": 2, "if_index": 234954816, "if_name": "ethernet0/9/1", "slot": 9, "port": 1, "speed_mbps": 10000,
+            "admin_status": "up", "oper_status": "down", "is_uplink": True, "last_seen": t, "in_bps": 0, "out_bps": 0,
+            "in_octets": 0, "out_octets": 0, "sampled_at": t}]
+    onts = onts_ahora()
+    for n, (slot, port) in enumerate(PUERTOS):
+        en_linea = sum(1 for o in onts if (o["slot"], o["port"]) == (slot, port) and o["run_state"] == "online")
+        out.append({"id": 10 + n, "if_index": 4194304000 + slot * 8192 + port * 256, "if_name": f"GPON 0/{slot}/{port}",
+                    "slot": slot, "port": port, "speed_mbps": 2500, "admin_status": "up",
+                    "oper_status": "up" if en_linea else "down", "is_uplink": False, "last_seen": t,
+                    "in_bps": en_linea * 900_000, "out_bps": en_linea * 8_500_000, "in_octets": 10 ** 12 + n,
+                    "out_octets": 10 ** 13 + n, "sampled_at": t})
+    return out
+
+
+def _serie_trafico(horas, cubos):
+    paso = horas * 3600 / cubos
+    return {"bucket_seconds": round(paso), "points": [
+        {"t": iso(ahora() - timedelta(seconds=paso * (cubos - i))), "in_bps": 9_000_000 + i * 1000, "out_bps": 85_000_000 + i * 9000}
+        for i in range(cubos)]}
 
 
 def panel(path, q, method="GET"):
@@ -178,14 +245,22 @@ def panel(path, q, method="GET"):
             if "atraso" in q:
                 estado["atraso"] = int(q["atraso"][0])
             return 200, {"caidos": sorted(estado["caidos"]), "atraso": estado["atraso"]}
+    if method != "GET":
+        return 200, {"aviso": "esto cambia algo: ni traza ni las muestras tienen que pedirlo"}
+    cubos = int(q.get("buckets", ["300"])[0])
+    if cubos < 20:  # como el panel de verdad
+        return 422, {"detail": [{"type": "greater_than_equal", "loc": ["query", "buckets"],
+                                 "msg": "Input should be greater than or equal to 20", "input": str(cubos), "ctx": {"ge": 20}}]}
     if path == "/openapi.json":
         return 200, OPENAPI
+    if path == "/api/health":
+        return 200, {"status": "ok"}
     if path == "/api/olts":
-        return 200, [{"id": 1, "name": "ALVATIC-MA5800-01", "ont_count": len(BASE_ONTS), "snmp_community": "no-mostrar",
-                      "host": "10.0.0.1", "vendor": "huawei", "model": "MA5800-X17"},
-                     {"id": 1362, "name": "ONSYS-MA5800-01", "ont_count": 1}]
+        return 200, [_olt(), {"id": 1362, "name": "ONSYS-MA5800-01", "model": "MA5800-X17", "firmware": None, "host": "203.0.113.9",
+                              "enabled": True, "last_poll_at": iso(ahora()), "last_error": None, "last_error_at": None,
+                              "ont_count": 1, "ont_online": 1}]
     if path == "/api/olts/1":
-        return 200, {"id": 1, "name": "ALVATIC-MA5800-01", "uptime_s": 8640000, "temperature_c": 41}
+        return 200, _olt(con_cuentas=False)
     if path == "/api/olts/1/onts":
         desde = int(q.get("offset", ["0"])[0])
         return 200, onts_ahora()[desde:desde + int(q.get("limit", ["500"])[0])]
@@ -193,33 +268,61 @@ def panel(path, q, method="GET"):
         return 200, [{"id": 5000, "slot": 1, "port": 0, "ont_id": 0, "sn": BASE_ONTS[0]["sn"],
                       "description": "#1001 De otra empresa", "run_state": "online", "rx_power_dbm": "-30.00",
                       "last_seen": iso(ahora())}]
+    if path == "/api/olts/1/summary":
+        onts = onts_ahora()
+        return 200, {"total": len(onts), "online": sum(1 for o in onts if o["run_state"] == "online"),
+                     "offline": sum(1 for o in onts if o["run_state"] != "online"), "worst_rx": []}
     if path == "/api/olts/1/boards":
-        return 200, [{"slot": 1, "type": "H901GPSF", "ports": 16, "status": "Normal"},
-                     {"slot": 2, "type": "H901GPSF", "ports": 16, "status": "Normal"}]
-    if path == "/api/olts/1/uplinks":
-        return 200, [{"slot": 9, "port": 0, "name": "10GE 0/9/0", "rx_bps": 152000000, "tx_bps": 31000000}]
+        return 200, [{"slot_id": s, "board_name": n, "status": "Normal" if r == "service" else "Active_normal", "role": r,
+                      "technology": "gpon" if r == "service" else None,
+                      "details": {"powered": True, "board_name": n, "board_status": "Normal"}, "updated_at": iso(ahora())}
+                     for s, n, r in ((1, "H901GPSF", "service"), (2, "H901GPSF", "service"), (9, "H903MPLA", "control"))]
+    if path == "/api/olts/1/chassis":
+        return 200, {"olt_id": 1, "boards": [{"slot_id": 0, "board_name": None, "status": None, "role": None, "technology": None, "ports": []}] + [
+            {"slot_id": s, "board_name": "H901GPSF", "status": "Normal", "role": "service", "technology": "gpon",
+             "ports": [{"port": p, "ont_total": sum(1 for b in BASE_ONTS if (b["slot"], b["port"]) == (s, p))} for p in range(16)]}
+            for s in (1, 2)]}
+    if path == "/api/olts/1/interfaces":
+        return 200, _interfaces()
+    if path in ("/api/olts/1/profiles", "/api/olts/1/autofind"):
+        time.sleep(3)  # en el panel de verdad abre una sesión en la OLT: nadie tiene que pedirlo
+        return 200, []
     if path == "/api/thresholds":
-        return 200, {"gpon": {"warn": -25.0, "crit": -28.0, "high": -8.0}}
+        return 200, {"gpon": {"warn": -25.0, "crit": -28.0, "high": -8.0}, "xgpon": {"warn": -24.0, "crit": -28.0, "high": -8.0}}
     partes = path.strip("/").split("/")
+    horas = int(q.get("hours", ["168"])[0])
     if len(partes) == 7 and partes[:2] == ["api", "olts"] and partes[3] == "ports" and partes[6] == "series":
         return 200, {"bucket_seconds": 3600, "points": [{"t": iso(ahora()), "online": 12, "rx_avg": "-21.4"}]}
+    if len(partes) == 7 and partes[:2] == ["api", "olts"] and partes[3] == "ports" and partes[6] == "traffic":
+        return 200, _serie_trafico(horas, min(cubos, 60))
+    if len(partes) == 4 and partes[:2] == ["api", "interfaces"] and partes[3] == "series":
+        return 200, _serie_trafico(horas, min(cubos, 60))
+    if len(partes) == 3 and partes[:2] == ["api", "onts"] and partes[2].isdigit():
+        o = next((x for x in onts_ahora() if x["id"] == int(partes[2])), None)
+        return (200, {**o, "olt_id": 1, "frame": 0, "olt_name": "ALVATIC-MA5800-01", "olt_host": "10.0.0.1"}) if o else (404, {"detail": "Not Found"})
     if len(partes) == 4 and partes[:2] == ["api", "onts"] and partes[2].isdigit():
         ont_id = int(partes[2])
         if partes[3] == "series":
-            s = serie(ont_id, int(q.get("hours", ["168"])[0]), min(200, int(q.get("buckets", ["42"])[0])))
+            s = serie(ont_id, horas, min(200, cubos))
             return (200, s) if s else (404, {"detail": "Not Found"})
+        if partes[3] == "optical":
+            s = serie(ont_id, horas, min(300, horas * 12))
+            if not s:
+                return 404, {"detail": "Not Found"}
+            return 200, [{"sampled_at": p["t"], "rx_power_dbm": p["rx_avg"], "tx_power_dbm": "2.26", "temperature_c": "40.0",
+                          "voltage_v": "3.36", "bias_ma": None} for p in s["points"]]
         if partes[3] == "events":
             o = next((x for x in onts_ahora() if x["id"] == ont_id), None)
             if o is None:
                 return 404, {"detail": "Not Found"}
             ev = [{"occurred_at": iso(ahora() - timedelta(days=90)), "event_type": "appeared",
-                   "details": {"fsp": f"0/{o['slot']}/{o['port']}"}}]
+                   "details": {"fsp": f"0/{o['slot']}/{o['port']}", "via": "snmp_poll", "ont_id": o["ont_id"]}}]
             if o["run_state"] == "offline":
                 ev.insert(0, {"occurred_at": o["last_down_time"], "event_type": "offline",
                               "details": {"cause": o["last_down_cause"]}})
             return 200, ev
-        if partes[3] == "live":
-            return 200, {"aviso": "esto abre una sesión SSH: las muestras no tienen que pedirlo"}
+        if partes[3] == "traffic":
+            return 200, {"aviso": "tráfico por SSH: las muestras no tienen que pedirlo"}
     return 404, {"detail": "Not Found"}
 
 
