@@ -4406,13 +4406,13 @@ button.integ-enlace:hover {
 
 /* ---- los equipos: cada OLT dibujada como es, con sus placas y sus puertos ---- */
 
-.equipo + .equipo {
+.olt-equipo + .olt-equipo {
   margin-top: 26px;
   padding-top: 22px;
   border-top: 1px solid var(--line);
 }
 
-.equipo-cab {
+.olt-equipo-cab {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
@@ -4421,17 +4421,17 @@ button.integ-enlace:hover {
   margin-bottom: 12px;
 }
 
-.equipo-cab h3 {
+.olt-equipo-cab h3 {
   font-size: 17px;
   overflow-wrap: anywhere;
 }
 
-.equipo-cab .olt-nota,
-.equipo-cab .olt-novedad-botones {
+.olt-equipo-cab .olt-nota,
+.olt-equipo-cab .olt-novedad-botones {
   margin-top: 2px;
 }
 
-.equipo-agregar {
+.olt-equipo-agregar {
   margin-top: 24px;
 }
 
@@ -4439,8 +4439,8 @@ button.integ-enlace:hover {
   justify-content: center;
 }
 
-.equipo-agregar button,
-.equipo-form-botones button,
+.olt-equipo-agregar button,
+.olt-form-botones button,
 .chasis-lista button {
   min-height: 34px;
   padding: 3px 14px;
@@ -4451,8 +4451,8 @@ button.integ-enlace:hover {
   font-weight: 650;
 }
 
-.equipo-agregar button:hover,
-.equipo-form-botones button:hover,
+.olt-equipo-agregar button:hover,
+.olt-form-botones button:hover,
 .chasis-lista button:hover {
   background: var(--paper-dim);
 }
@@ -4477,7 +4477,7 @@ button.integ-enlace:hover {
   cursor: default;
 }
 
-.olt-cuerpo button.equipo-enlace {
+.olt-cuerpo button.olt-enlace {
   min-height: 34px;
   padding: 0 4px;
   border: 0;
@@ -4488,7 +4488,7 @@ button.integ-enlace:hover {
   text-underline-offset: 3px;
 }
 
-.olt-cuerpo button.equipo-enlace.peligro {
+.olt-cuerpo button.olt-enlace.peligro {
   margin-left: auto;
   color: var(--signal);
 }
@@ -4585,6 +4585,10 @@ button.integ-enlace:hover {
   stroke-width: 2.6;
 }
 
+.chasis-dibujo text {
+  stroke: none;
+}
+
 .chasis-slot-numero {
   fill: var(--muted);
   font-size: 9px;
@@ -4615,17 +4619,17 @@ button.integ-enlace:hover {
 .chasis-puerto.bien,
 .chasis-chip.bien,
 .chasis-clave.bien,
-.equipo-resultado.bien { --nivel: var(--nivel-bien); }
+.olt-resultado.bien { --nivel: var(--nivel-bien); }
 
 .chasis-puerto.atencion,
 .chasis-chip.atencion,
 .chasis-clave.atencion,
-.equipo-resultado.atencion { --nivel: var(--nivel-atencion); }
+.olt-resultado.atencion { --nivel: var(--nivel-atencion); }
 
 .chasis-puerto.mal,
 .chasis-chip.mal,
 .chasis-clave.mal,
-.equipo-resultado.mal { --nivel: var(--nivel-mal); }
+.olt-resultado.mal { --nivel: var(--nivel-mal); }
 
 .chasis-puerto.caida,
 .chasis-chip.caida,
@@ -4798,11 +4802,11 @@ button.integ-enlace:hover {
 }
 
 /* cargar o cambiar una OLT */
-.equipo-form {
+.olt-form {
   max-width: 740px;
 }
 
-.equipo-form-cab {
+.olt-form-cab {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -4810,7 +4814,7 @@ button.integ-enlace:hover {
   margin-bottom: 4px;
 }
 
-.equipo-form fieldset {
+.olt-form fieldset {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 12px 18px;
@@ -4821,33 +4825,33 @@ button.integ-enlace:hover {
   border-radius: var(--radius);
 }
 
-.equipo-form legend {
+.olt-form legend {
   padding: 0 6px;
   font-size: 13.5px;
   font-weight: 750;
 }
 
-.equipo-campo {
+.olt-campo {
   display: grid;
   align-content: start;
   gap: 4px;
   min-width: 0;
 }
 
-.equipo-campo > span:first-child {
+.olt-campo > span:first-child {
   color: var(--muted);
   font-size: 12.5px;
   font-weight: 650;
 }
 
-.equipo-campo small {
+.olt-campo small {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
-.equipo-campo input,
-.equipo-campo select {
+.olt-campo input,
+.olt-campo select {
   width: 100%;
   min-width: 0;
   min-height: var(--tap);
@@ -4859,20 +4863,20 @@ button.integ-enlace:hover {
   font: inherit;
 }
 
-.equipo-campo input:focus-visible,
-.equipo-campo select:focus-visible {
+.olt-campo input:focus-visible,
+.olt-campo select:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 1px;
 }
 
-.equipo-secreto {
+.olt-secreto {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
 }
 
-.equipo-tilde {
+.olt-tilde {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
@@ -4880,14 +4884,14 @@ button.integ-enlace:hover {
   font-size: 13.5px;
 }
 
-.equipo-tilde input {
+.olt-tilde input {
   flex: none;
   width: 18px;
   height: 18px;
   accent-color: var(--ink);
 }
 
-.equipo-form-botones {
+.olt-form-botones {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -4895,18 +4899,18 @@ button.integ-enlace:hover {
   margin-top: 16px;
 }
 
-.equipo-form-botones p {
+.olt-form-botones p {
   width: 100%;
   margin: 0;
   font-weight: 650;
 }
 
-.equipo-form-botones button.peligro:not(.equipo-enlace) {
+.olt-form-botones button.peligro:not(.olt-enlace) {
   background: var(--signal);
   color: #fff;
 }
 
-.equipo-resultado {
+.olt-resultado {
   margin-top: 14px;
   padding: 10px 14px 12px;
   border: 1px solid var(--line);
@@ -4914,7 +4918,7 @@ button.integ-enlace:hover {
   border-radius: var(--radius-inner);
 }
 
-.olt-cuerpo .equipo-resultado h4 {
+.olt-cuerpo .olt-resultado h4 {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -4923,7 +4927,7 @@ button.integ-enlace:hover {
   font-size: 14.5px;
 }
 
-.equipo-marca {
+.olt-marca {
   padding: 1px 9px;
   border-radius: 999px;
   background: var(--nivel);
@@ -4932,26 +4936,26 @@ button.integ-enlace:hover {
   font-weight: 750;
 }
 
-.equipo-resultado.atencion .equipo-marca {
+.olt-resultado.atencion .olt-marca {
   color: #16222c;
 }
 
-.equipo-resultado p {
+.olt-resultado p {
   margin: 0 0 6px;
   font-size: 13.5px;
 }
 
-.equipo-resultado ul {
+.olt-resultado ul {
   margin: 0;
   padding-left: 18px;
   font-size: 13px;
 }
 
-.equipo-resultado li + li {
+.olt-resultado li + li {
   margin-top: 4px;
 }
 
-.equipo-resultado .equipo-revisar {
+.olt-resultado .olt-revisar {
   margin-top: 8px;
   font-weight: 650;
 }
@@ -4959,5 +4963,21 @@ button.integ-enlace:hover {
 @media (max-width: 840px) {
   .chasis.alto {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* en el teléfono el dibujo queda chico: los números de slot, más grandes; los de cada puerto están en la lista de abajo */
+@media (max-width: 640px) {
+  .chasis-slot-numero {
+    font-size: 12px;
+  }
+
+  .chasis-numero {
+    font-size: 10px;
+  }
+
+  .chasis-x17 .chasis-numero,
+  .chasis-x15 .chasis-numero {
+    display: none;
   }
 }

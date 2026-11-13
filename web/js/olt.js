@@ -163,8 +163,8 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     return actual.todas ? acciones.redes() : [actual];
   }
 
-  // repetir: se vuelve a pedir a los pocos segundos (una OLT recién cargada tarda un poco en leerse).
-  function pedir({ forzar = false, repetir = false } = {}) {
+  // repetir: cuántas veces más se vuelve a pedir, cada pocos segundos (una OLT recién cargada tarda un poco en leerse).
+  function pedir({ forzar = false, repetir = 0 } = {}) {
     if (!redVista) return;
     const redId = redVista;
     const mio = (turno += 1);
@@ -172,9 +172,9 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     pintarCabecera();
     clearTimeout(repeticion);
     const directas = datos && datosDe === redId && (datos.equipos ?? []).some((e) => e.origen === 'directa');
-    if (repetir || (forzar && directas)) {
+    if (repetir > 0 || (forzar && directas)) {
       repeticion = setTimeout(() => {
-        if (abierta() && redVista === redId && !pidiendo) pedir({ repetir: repetir && !(datos?.onts?.length) });
+        if (abierta() && redVista === redId && !pidiendo) pedir({ repetir: datos?.onts?.length ? 0 : repetir - 1 });
       }, 6000);
     }
     api(`api/olt?red=${redId}${forzar ? '&refrescar=1' : ''}`, { espera: 60000 }).then((res) => {

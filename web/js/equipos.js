@@ -159,7 +159,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const largo = lugar.parada ? lugar.h : lugar.w;
     const ancho = lugar.parada ? lugar.w : lugar.h;
     const inicio = lugar.parada ? 20 : 17;
-    const reserva = largo > 180 ? 50 : 6;
+    const reserva = largo >= 110 ? 48 : 6; // el lugar del nombre, donde entra
     const paso = Math.min(lugar.parada ? 17.4 : 22, (largo - inicio - reserva) / n);
     const lado = Math.max(2, paso - 1.8);
     const grosor = ancho - 7;
@@ -170,6 +170,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       const marcado = elegido?.equipo === equipo.id && elegido.slot === placa.slot && elegido.puerto === puerto.clave;
       const celda = s('g', {
         class: `chasis-puerto ${nivelPuerto(equipo, puerto)}${marcado ? ' elegido' : ''}`,
+        'data-puerto': puerto.clave,
         'aria-hidden': 'true',
         onclick: (event) => {
           event.stopPropagation();
@@ -208,6 +209,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
         : `Slot ${lugar.slot}: vacío`;
       const g = s('g', {
         class: `chasis-slot ${placa ? `con-placa rol-${placa.rol}${placa.estado !== 'normal' ? ' con-falla' : ''}` : 'vacio'}${marcada ? ' elegida' : ''}`,
+        'data-slot': lugar.slot,
         role: placa ? 'button' : null,
         tabindex: placa ? '0' : null,
         'aria-label': rotulo,
@@ -228,7 +230,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
         dibujarPuertos(equipo, placa, g, lugar);
         const nombre = placa.nombre ?? '';
         const largo = lugar.parada ? lugar.h : lugar.w;
-        const cabe = placa.puertos.length === 0 ? largo > 60 : largo > 180;
+        const cabe = placa.puertos.length === 0 ? largo > 60 : largo >= 110;
         if (nombre && cabe) {
           g.append(lugar.parada
             ? s('text', { class: 'chasis-nombre', 'text-anchor': 'end', transform: `translate(${lugar.x + lugar.w / 2} ${lugar.y + lugar.h - 5}) rotate(90)`, text: nombre })
@@ -375,7 +377,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
   function tarjeta(equipo) {
     const origen = equipo.origen === 'panel'
       ? `del panel de la OLT${equipo.registrado ? ' · con su conexión cargada' : ''}`
-      : 'leída directo por traza';
+      : 'lectura directa por SNMP';
     const leido = equipo.leido ? `leída ${haceCuanto(equipo.leido)}` : null;
     const sub = [equipo.modelo ?? (equipo.chasis ? `chasis ${equipo.chasis}` : null), origen, leido].filter(Boolean).join(' · ');
     const dibujo = equipo.placas.length ? dibujarChasis(equipo) : null;
@@ -384,8 +386,8 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     if (administra()) {
       acciones.push(boton(equipo.registrado ? 'Conexión' : 'Cargar su conexión', () => abrirFormulario(equipo)));
     }
-    return h('article.equipo', { 'data-equipo': equipo.id },
-      h('header.equipo-cab', {},
+    return h('article.olt-equipo', { 'data-equipo': equipo.id },
+      h('header.olt-equipo-cab', {},
         h('div', {}, h('h3', { text: equipo.nombre }), h('p.olt-nota', { text: sub })),
         acciones.length ? h('div.olt-novedad-botones', {}, ...acciones) : null),
       equipo.error ? h('p.olt-aviso.alerta', { text: `${equipo.error.charAt(0).toUpperCase()}${equipo.error.slice(1)}.` }) : null,
@@ -409,7 +411,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
           : 'Las OLT las carga quien administra traza.' }));
     }
     if (administra()) {
-      partes.push(h('div.equipo-agregar', {}, boton('Agregar una OLT', () => abrirFormulario(null), { class: 'primario' })));
+      partes.push(h('div.olt-equipo-agregar', {}, boton('Agregar una OLT', () => abrirFormulario(null), { class: 'primario' })));
     }
     return partes;
   }
@@ -480,7 +482,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       toast?.(actual.id ? 'Conexión guardada' : 'OLT cargada: se empieza a leer');
       if (form === actual) form = null;
       elegido = null;
-      pedir({ forzar: true, repetir: true });
+      pedir({ forzar: true, repetir: 6 });
     } catch (err) {
       actual.error = err.message;
       actual.guardando = false;
@@ -509,7 +511,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     }
     actual.probando = false;
     repintar({ conservar: true });
-    if (form === actual) document.querySelector('.equipo-prueba')?.scrollIntoView({ block: 'nearest' });
+    if (form === actual) document.querySelector('.olt-prueba')?.scrollIntoView({ block: 'nearest' });
   }
 
   async function quitar() {
@@ -531,7 +533,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
   }
 
   function campo(rotulo, control, ayuda = null) {
-    return h('label.equipo-campo', {}, h('span', { text: rotulo }), control, ayuda ? h('small', { text: ayuda }) : null);
+    return h('label.olt-campo', {}, h('span', { text: rotulo }), control, ayuda ? h('small', { text: ayuda }) : null);
   }
 
   function entrada(clave, attrs = {}) {
@@ -549,8 +551,8 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const ver = boton('ver', () => {
       input.type = input.type === 'password' ? 'text' : 'password';
       ver.textContent = input.type === 'password' ? 'ver' : 'ocultar';
-    }, { class: 'equipo-enlace', 'aria-label': `Mostrar u ocultar ${rotulo}` });
-    return h('span.equipo-secreto', {}, input, ver);
+    }, { class: 'olt-enlace', 'aria-label': `Mostrar u ocultar ${rotulo}` });
+    return h('span.olt-secreto', {}, input, ver);
   }
 
   function seleccion(clave, opciones, alCambiar = null) {
@@ -567,11 +569,11 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
   function resultadoPrueba() {
     if (form.probando) return h('p.olt-nota', { text: 'Probando la conexión… puede tardar hasta medio minuto.' });
     if (!form.prueba) return null;
-    return h('div', {}, ...form.prueba.pruebas.map((p) => h(`section.equipo-resultado.${p.ok ? (p.parcial ? 'atencion' : 'bien') : 'mal'}`, {},
-      h('h4', {}, h('span.equipo-marca', { text: p.ok ? (p.parcial ? 'A medias' : 'Bien') : 'No anduvo' }), p.titulo),
+    return h('div', {}, ...form.prueba.pruebas.map((p) => h(`section.olt-resultado.${p.ok ? (p.parcial ? 'atencion' : 'bien') : 'mal'}`, {},
+      h('h4', {}, h('span.olt-marca', { text: p.ok ? (p.parcial ? 'A medias' : 'Bien') : 'No anduvo' }), p.titulo),
       h('p', { text: p.texto }),
       p.datos?.length ? h('dl.olt-datos', {}, ...p.datos.map(([k, valor]) => dato(k, valor))) : null,
-      p.pistas?.length ? h('div', {}, h('p.equipo-revisar', { text: 'Para revisar:' }), h('ul', {}, ...p.pistas.map((t) => h('li', { text: t })))) : null)));
+      p.pistas?.length ? h('div', {}, h('p.olt-revisar', { text: 'Para revisar:' }), h('ul', {}, ...p.pistas.map((t) => h('li', { text: t })))) : null)));
   }
 
   function formulario() {
@@ -583,14 +585,14 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const puertoConsola = entrada('consola_puerto', { type: 'number', inputmode: 'numeric', min: '1', max: '65535' });
     const ocupado = form.guardando || form.probando;
     const titulo = form.id ? `Conexión de ${form.titulo}` : vinculada && form.titulo ? `Cargar la conexión de ${form.titulo}` : 'Agregar una OLT';
-    return h('form.equipo-form', {
+    return h('form.olt-form', {
       novalidate: true,
       onsubmit: (e) => {
         e.preventDefault();
         guardar();
       },
     },
-    h('div.equipo-form-cab', {}, boton('← Equipos', () => cerrarFormulario(), { class: 'equipo-enlace' }), h('h3', { text: titulo })),
+    h('div.olt-form-cab', {}, boton('← Equipos', () => cerrarFormulario(), { class: 'olt-enlace' }), h('h3', { text: titulo })),
     h('p.olt-nota', { text: `Red ${nombreRed()}. traza solo lee la OLT: no cambia nada en ella. La comunidad y la clave quedan en el servidor y no se vuelven a mostrar.` }),
     h('fieldset', {}, h('legend', { text: 'La OLT' }),
       delPanel.length ? campo('¿Es una OLT del panel?', seleccion('panel', [[null, 'No: traza la lee directo'], ...delPanel.map((e) => [e.panel, `Sí: ${e.nombre}`])], () => repintar({ conservar: true })),
@@ -605,7 +607,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       campo('Puerto UDP', entrada('snmp_puerto', { type: 'number', inputmode: 'numeric', min: '1', max: '65535' })),
       campo('Comunidad de lectura', secreto('comunidad', form.tieneComunidad, 'la comunidad'),
         'Con la comunidad, traza lee las ONT, las placas y los puertos. Alcanza con una de solo lectura.'),
-      h('label.equipo-tilde', {}, h('input', {
+      h('label.olt-tilde', {}, h('input', {
         type: 'checkbox', checked: v.leer,
         onchange: (e) => {
           v.leer = e.target.checked;
@@ -622,22 +624,22 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       v.consola ? campo('Clave', secreto('clave', form.tieneClave && v.usuario.trim() === form.usuarioGuardado, 'la clave')) : null),
     form.error ? h('p.olt-aviso.alerta', { role: 'alert', text: form.error }) : null,
     form.quitar
-      ? h('div.equipo-form-botones', {},
+      ? h('div.olt-form-botones', {},
         h('p', { text: `¿Quitar ${form.titulo}? Deja de leerse; lo que ya se anotó queda.` }),
         boton(form.guardando ? 'Quitando…' : 'Sí, quitarla', () => quitar(), { class: 'peligro', disabled: form.guardando }),
         boton('No', () => {
           form.quitar = false;
           repintar({ conservar: true });
         }))
-      : h('div.equipo-form-botones', {},
+      : h('div.olt-form-botones', {},
         boton(form.probando ? 'Probando…' : 'Probar la conexión', () => probar(), { disabled: ocupado }),
         h('button.primario', { type: 'submit', disabled: ocupado, text: form.guardando ? 'Guardando…' : 'Guardar' }),
         boton('Cancelar', () => cerrarFormulario(), { disabled: form.guardando }),
         form.id ? boton('Quitar esta OLT', () => {
           form.quitar = true;
           repintar({ conservar: true });
-        }, { class: 'equipo-enlace peligro', disabled: ocupado }) : null),
-    h('div.equipo-prueba', { 'aria-live': 'polite' }, resultadoPrueba()));
+        }, { class: 'olt-enlace peligro', disabled: ocupado }) : null),
+    h('div.olt-prueba', { 'aria-live': 'polite' }, resultadoPrueba()));
   }
 
   return {

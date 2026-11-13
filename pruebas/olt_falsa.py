@@ -32,7 +32,8 @@ def chasis_x17():
 
 class OltFalsa:
     def __init__(self, api, community="lectura-de-prueba", placas=None, onts_por_puerto=3, puertos_con_onts=4,
-                 usuario="traza", clave="Clave-de-la-olt", nombre="OLT-DE-PRUEBA", utc=-180, host="127.0.0.1"):
+                 usuario="traza", clave="Clave-de-la-olt", nombre="OLT-DE-PRUEBA", utc=-180, host="127.0.0.1",
+                 puerto_snmp=0, puerto_telnet=0):
         self.api = api
         self.community = community
         self.usuario, self.clave, self.nombre, self.utc = usuario, clave, nombre, utc
@@ -61,11 +62,11 @@ class OltFalsa:
                     "sn": b"HWTC" + n.to_bytes(4, "big"), "descripcion": f"#{n} Cliente {n}", "en_linea": True,
                     "causa": -1, "cayo": None, "distancia": 800 + 37 * ont, "rx": -1850 - 110 * ont - 40 * puerto}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind((host, 0))
+        self.sock.bind((host, puerto_snmp))
         self.puerto = self.sock.getsockname()[1]
         self.escucha = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.escucha.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.escucha.bind((host, 0))
+        self.escucha.bind((host, puerto_telnet))
         self.escucha.listen(8)
         self.telnet = self.escucha.getsockname()[1]
         self.viva = True
