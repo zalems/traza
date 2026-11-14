@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.3
+# Plataforma FTTH · kit 0.12.4
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -754,7 +754,9 @@ potencia de los puertos y de las ONT) y el chasis se reconoció por sus placas;
 guardada, el tablero mostró las ONT, las potencias y la óptica de cada puerto.
 Ahí se vio que en esa familia los contadores estándar de los puertos GPON no
 se mueven (el tráfico daba cero) y que la OLT no informa placas en los slots
-de energía.
+de energía (tampoco su consola las lista, con `display board 0`): en el
+dibujo esos lugares dicen "energía" y que la OLT no las informa, en vez de
+mostrarse vacíos.
 
 No se pudo probar, y hay que mirarlo en el uso real:
 

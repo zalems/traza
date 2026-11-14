@@ -44,6 +44,13 @@ comprobar(s['9'].w > s['8'].w && s['10'].w > s['11'].w && Math.abs(s['9'].w - s[
 let v = await ventilador();
 comprobar(v.y + v.h < s['1'].y && v.w > v.h, 'los ventiladores van arriba, a todo lo ancho');
 comprobar(Object.values(s).filter((x) => x.placa).length === 3, 'tres placas puestas; el resto, slots vacíos');
+const lugarX17 = (slot) => page.evaluate((n) => {
+  const g = document.querySelector(`.chasis-slot[data-slot="${n}"]`);
+  return { clases: g.getAttribute('class'), texto: g.querySelector('.chasis-lugar')?.textContent ?? null };
+}, slot);
+comprobar((await lugarX17(21)).texto === 'energía' && /sin-informar/.test((await lugarX17(21)).clases) && (await lugarX17(10)).texto === 'control'
+  && !/sin-informar/.test((await lugarX17(10)).clases) && (await lugarX17(0)).texto === 'interfaz universal' && (await lugarX17(3)).texto === null,
+'los lugares vacíos que no son de servicio dicen para qué son (energía 20 y 21, sin informar; control 10; interfaz universal 0)');
 comprobar(await sinDesborde(), 'el dibujo entra en la pantalla');
 await foto('x17');
 
@@ -242,7 +249,7 @@ await page.click('.olt-form-botones button:has-text("Sí, quitarla")');
 await page.waitForFunction(() => /todavía no tiene una OLT cargada/.test(document.querySelector('.olt-cuerpo')?.textContent ?? ''), null, { timeout: 20000 });
 comprobar(true, 'quitada: la red vuelve a quedar sin OLT');
 
-// --- Una MA5680T (la familia anterior a la MA5800): se reconoce por sus placas y se dibuja con su chasis
+// --- Una MA5680T como una leída de verdad (la familia anterior a la MA5800): de 19 pulgadas, sin placas de energía informadas
 await page.click('.olt-equipo-agregar button:has-text("Agregar una OLT")');
 await page.waitForSelector('.olt-form');
 comprobar(await page.locator('select[name=modelo] option[value="MA5680T-ETSI"]').count() === 1
@@ -253,43 +260,56 @@ await page.fill('input[name=comunidad]', COMUNIDAD);
 await page.click('.olt-form-botones button:has-text("Probar la conexión")');
 await page.waitForSelector('.olt-resultado.bien', { timeout: 60000 });
 prueba = await texto('.olt-prueba');
-comprobar(/Chasis\s*MA5680T de 21 pulgadas \(ETSI\) \(por dónde tiene las placas\)/.test(prueba), `la prueba dice qué chasis es: ${prueba.match(/Chasis.{0,80}/)?.[0]}`);
-comprobar(/H801SCUN en 9/.test(prueba) && /H801PRTE en 21/.test(prueba) && /Puertos PON\s*28/.test(prueba), 'con sus placas y sus 28 puertos PON');
+comprobar(/Chasis\s*MA5680T de 19 pulgadas \(IEC\) \(por dónde tiene las placas\)/.test(prueba), `la prueba dice qué chasis es: ${prueba.match(/Chasis.{0,80}/)?.[0]}`);
+comprobar(/H802SCUN en 7/.test(prueba) && /H801X2CS en 18/.test(prueba) && !/PRT/.test(prueba) && /Puertos PON\s*64/.test(prueba), 'con sus placas y sus 64 puertos PON');
 comprobar(await page.inputValue('input[name=nombre]') === 'MA5680T', 'toma el nombre que la OLT dice de sí misma');
-await page.click('.olt-form-botones button[type=submit]');
-await page.waitForSelector('.chasis-t21', { timeout: 45000 });
-s = await slots();
-v = await ventilador();
-comprobar(Object.keys(s).length === 23, `la MA5680T de 21 pulgadas tiene sus 23 slots (${Object.keys(s).length})`);
-comprobar(s['21'].x === s['22'].x && s['22'].x === s['0'].x && s['21'].y < s['22'].y && s['22'].y < s['0'].y,
-  'a la izquierda, de arriba abajo: energía 21, energía 22 y la interfaz universal (0)');
-comprobar(s['1'].x > s['0'].x && [...Array(17).keys()].every((i) => s[String(i + 2)].x > s[String(i + 1)].x), 'después, los slots 1 a 18 de izquierda a derecha');
-comprobar(s['9'].w > s['8'].w && s['10'].w > s['11'].w && Math.abs(s['9'].w - s['10'].w) < 0.01, 'los dos de control (9 y 10) son más anchos');
-comprobar(s['19'].x === s['20'].x && s['19'].x > s['18'].x && s['19'].y < s['20'].y && Math.abs(s['19'].h - s['20'].h) < 0.01,
-  'a la derecha, las dos placas de subida: la 19 arriba y la 20 abajo');
-comprobar(v.y + v.h < s['1'].y && v.w > v.h, 'los ventiladores van arriba, a todo lo ancho');
-comprobar(Object.values(s).filter((x) => x.placa).length === 10, 'diez placas puestas; el resto, slots vacíos');
-const puertosDe = (slot) => page.locator(`.chasis-slot[data-slot="${slot}"] .chasis-puerto`).count();
-comprobar(await puertosDe(1) === 16 && await puertosDe(2) === 8 && await puertosDe(3) === 4 && await puertosDe(19) === 2,
-  'cada placa con sus puertos: 16, 8 y 4 de PON; 2 en la de subida');
-comprobar(/MA5600T \/ MA5680T de 21 pulgadas \(ETSI\) · lectura directa por SNMP/.test(await texto('.olt-equipo-cab')), 'la tarjeta dice qué chasis es');
-await tocarPlaca(19);
-await page.waitForSelector('.chasis-chips');
-comprobar(/Slot 19 · H801X2CS/.test(await texto('.chasis-placa-titulo')) && /Placa de subida · 2 puertos/.test(await texto('.chasis-detalle')),
-  'la placa de subida dice qué es');
-comprobar(await sinDesborde(), 'el chasis entra en la pantalla');
-await foto('ma5680t');
-// Con el modelo elegido a mano, se dibuja el que se eligió (la de 19 pulgadas lleva el control en 7 y 8).
-await page.click('.olt-equipo-cab button:has-text("Conexión")');
-await page.waitForSelector('.olt-form');
-await page.selectOption('select[name=modelo]', 'MA5680T-IEC');
 await page.click('.olt-form-botones button[type=submit]');
 await page.waitForSelector('.chasis-t19', { timeout: 45000 });
 s = await slots();
-comprobar(Object.keys(s).length === 21 && s['7'].w > s['6'].w && s['8'].w > s['9'].w && s['17'].x === s['18'].x && s['17'].y < s['18'].y
-  && s['19'].x === s['20'].x && s['20'].x === s['0'].x, 'eligiendo la de 19 pulgadas: 21 slots, control en 7 y 8, subida en 17 y 18, energía en 19 y 20');
-comprobar(/MA5680T de 19 pulgadas \(IEC\)/.test(await texto('.olt-equipo-cab')), 'y la tarjeta la nombra como se eligió');
-comprobar(/parece MA5600T \/ MA5680T de 21 pulgadas \(ETSI\), y el modelo indicado es MA5680T de 19 pulgadas \(IEC\)/.test(await texto('.olt-equipo')),
+v = await ventilador();
+comprobar(Object.keys(s).length === 21, `la MA5680T de 19 pulgadas tiene sus 21 slots (${Object.keys(s).length})`);
+comprobar(s['19'].x === s['20'].x && s['20'].x === s['0'].x && s['19'].y < s['20'].y && s['20'].y < s['0'].y,
+  'a la izquierda, de arriba abajo: energía 19, energía 20 y la interfaz universal (0)');
+comprobar(s['1'].x > s['0'].x && [...Array(15).keys()].every((i) => s[String(i + 2)].x > s[String(i + 1)].x), 'después, los slots 1 a 16 de izquierda a derecha');
+comprobar(s['7'].w > s['6'].w && s['8'].w > s['9'].w && Math.abs(s['7'].w - s['8'].w) < 0.01, 'los dos de control (7 y 8) son más anchos');
+comprobar(s['17'].x === s['18'].x && s['17'].x > s['16'].x && s['17'].y < s['18'].y && Math.abs(s['17'].h - s['18'].h) < 0.01,
+  'a la derecha, las dos placas de subida: la 17 arriba y la 18 abajo');
+comprobar(v.y + v.h < s['1'].y && v.w > v.h, 'los ventiladores van arriba, a todo lo ancho');
+comprobar(Object.values(s).filter((x) => x.placa).length === 8, 'ocho placas puestas; el resto, slots vacíos');
+const puertosDe = (slot) => page.locator(`.chasis-slot[data-slot="${slot}"] .chasis-puerto`).count();
+comprobar(await puertosDe(13) === 16 && await puertosDe(16) === 16 && await puertosDe(17) === 2 && await puertosDe(7) === 4,
+  'cada placa con sus puertos: 16 en las de PON, 2 en las de subida, 4 en las de control');
+comprobar(/MA5600T \/ MA5680T de 19 pulgadas \(IEC\) · lectura directa por SNMP/.test(await texto('.olt-equipo-cab')), 'la tarjeta dice qué chasis es');
+// La OLT no informa sus placas de energía: esos dos lugares no se muestran vacíos, sino sin informar.
+const lugar = (slot) => page.evaluate((n) => {
+  const g = document.querySelector(`.chasis-slot[data-slot="${n}"]`);
+  return { clases: g.getAttribute('class'), texto: g.querySelector('.chasis-lugar')?.textContent ?? null, rotulo: g.getAttribute('aria-label') };
+}, slot);
+const energia = await lugar(19);
+comprobar(/sin-informar/.test(energia.clases) && energia.texto === 'energía' && /La OLT no informa sus placas de energía/.test(energia.rotulo)
+  && /sin-informar/.test((await lugar(20)).clases), 'los lugares de las placas de energía (19 y 20) dicen que la OLT no las informa');
+const interfaz = await lugar(0);
+comprobar(!/sin-informar/.test(interfaz.clases) && interfaz.texto === 'interfaz universal' && /vacío \(lugar de la interfaz universal\)/.test(interfaz.rotulo),
+  'el slot 0 está vacío y dice que es el lugar de la interfaz universal');
+comprobar((await lugar(1)).texto === null && /Slot 1: vacío$/.test((await lugar(1)).rotulo), 'un slot de servicio vacío no lleva rótulo');
+comprobar(/Energía\s*la OLT no informa sus placas de energía \(slots 19 y 20\)/.test(await texto('.chasis-detalle')), 'y el resumen del equipo también lo dice');
+await tocarPlaca(17);
+await page.waitForSelector('.chasis-chips');
+comprobar(/Slot 17 · H801X2CS/.test(await texto('.chasis-placa-titulo')) && /Placa de subida · 2 puertos/.test(await texto('.chasis-detalle')),
+  'la placa de subida dice qué es');
+comprobar(await sinDesborde(), 'el chasis entra en la pantalla');
+await foto('ma5680t');
+// Con el modelo elegido a mano, se dibuja el que se eligió (la de 21 pulgadas lleva el control en 9 y 10).
+await page.click('.olt-equipo-cab button:has-text("Conexión")');
+await page.waitForSelector('.olt-form');
+await page.selectOption('select[name=modelo]', 'MA5680T-ETSI');
+await page.click('.olt-form-botones button[type=submit]');
+await page.waitForSelector('.chasis-t21', { timeout: 45000 });
+s = await slots();
+comprobar(Object.keys(s).length === 23 && s['9'].w > s['8'].w && s['10'].w > s['11'].w && s['19'].x === s['20'].x && s['19'].y < s['20'].y
+  && s['21'].x === s['22'].x && s['22'].x === s['0'].x, 'eligiendo la de 21 pulgadas: 23 slots, control en 9 y 10, subida en 19 y 20, energía en 21 y 22');
+comprobar(/MA5680T de 21 pulgadas \(ETSI\)/.test(await texto('.olt-equipo-cab')), 'y la tarjeta la nombra como se eligió');
+comprobar(/parece MA5600T \/ MA5680T de 19 pulgadas \(IEC\), y el modelo indicado es MA5680T de 21 pulgadas \(ETSI\)/.test(await texto('.olt-equipo')),
   'como sus placas dicen otra cosa, avisa que el dibujo puede no ser el suyo');
 comprobar(await sinDesborde(), 'con el aviso, sigue entrando en la pantalla');
 await foto('ma5680t-otro-modelo');

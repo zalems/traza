@@ -1,5 +1,22 @@
 # Cambios
 
+## 0.12.4 · 14/11/2026
+
+Los lugares del chasis que la OLT no informa.
+
+- En el dibujo, un slot sin placa que no es de servicio dice para qué es ese
+  lugar: energía, control, subida o interfaz universal.
+- Si la OLT no informa ninguna placa de energía (una MA5680T de verdad no las
+  registra: ni por SNMP ni en `display board`), sus lugares ya no se muestran
+  vacíos: dicen "energía" con otro trazo, y el resumen del equipo aclara que
+  la OLT no informa sus placas de energía y en qué slots van. Si informa
+  alguna, el otro lugar se muestra vacío, como antes.
+- La OLT de mentira de las pruebas en navegador es ahora como la MA5680T leída
+  de verdad: de 19 pulgadas, cuatro placas GPON de 16 puertos, sin placas de
+  energía informadas y con el tráfico de sus puertos PON en la tabla de Huawei.
+- Sin cambios en la API ni en los datos. Volver a 0.12.3: `git checkout
+  891c0a9` y `./instalar.sh`.
+
 ## 0.12.3 · 14/11/2026 · commit 9c3053b
 
 El tráfico de los puertos PON de una MA5680T (y su familia), después de la

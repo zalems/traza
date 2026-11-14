@@ -45,6 +45,13 @@ def chasis_ma5680t_iec():
             17: "H801GICF", 18: "H801GICF", 19: "H801PRTE", 20: "H801PRTE"}
 
 
+def chasis_ma5680t_sin_energia():
+    """Una MA5680T de 19 pulgadas como una leída de verdad: control en 7 y 8, cuatro GPON de 16 puertos en 13 a 16
+    y subida en 17 y 18. No informa placas de energía (19 y 20) ni interfaz universal (0): tampoco su consola las lista."""
+    return {7: "H802SCUN", 8: "H802SCUN", 13: "H805GPFD", 14: "H805GPFD", 15: "H805GPFD", 16: "H806GPFD",
+            17: "H801X2CS", 18: "H801X2CS"}
+
+
 def chasis_ma5683t():
     """Una MA5683T: seis slots de servicio (0 a 5), control en 6 y 7, subida en 8 y 9, energía en 10 y 11, interfaz universal en 12."""
     return {0: "H805GPFD", 1: "H802GPBD", 6: "H801SCUN", 7: "H801SCUN", 8: "H801GICF", 9: "H801GICF",

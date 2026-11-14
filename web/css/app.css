@@ -4556,6 +4556,20 @@ button.integ-enlace:hover {
   stroke-dasharray: 2 2;
 }
 
+/* el lugar de una placa de energía que la OLT no informa: no se sabe qué placa hay, pero vacío no está */
+.chasis-slot.sin-informar .chasis-frente {
+  fill: color-mix(in srgb, var(--caja-luz) 55%, var(--bandeja));
+  stroke-dasharray: 6 2;
+}
+
+.chasis-lugar {
+  fill: var(--muted);
+  font-size: 7.5px;
+  font-weight: 600;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
 /* las placas de control, más oscuras: como en la figura del fabricante */
 .chasis-slot.rol-control .chasis-frente {
   fill: color-mix(in srgb, var(--ink) 13%, var(--caja-luz));

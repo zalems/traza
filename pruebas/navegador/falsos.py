@@ -12,7 +12,8 @@ Datos fijos: 10 NAPs (HP1C1…HP1C10) en 5 puertos PON, 63 contratos con su ONT.
 Además 3 ONT sin contrato en 0/2/0 y una OLT de otra empresa (1362) que no tiene que verse.
 Control: GET /_control?caer=0/1/0 | volver=0/1/0 | atraso=SEGUNDOS (lectura vieja del panel).
 Las OLT de mentira (pruebas/olt_falsa.py): una EA5800-X2 con 12 ONT en 4 puertos PON y una
-MA5680T de 21 pulgadas con placas GPON de 16, 8 y 4 puertos; comunidad «lectura-e2e», usuario
+MA5680T de 19 pulgadas como una leída de verdad (cuatro placas GPON de 16 puertos, sin placas de
+energía informadas, y el tráfico de sus puertos PON en la tabla de Huawei); comunidad «lectura-e2e», usuario
 «traza», clave «Clave-olt-e2e». Control (de la primera): /_control?olt_caer=SERIE |
 olt_volver=SERIE | olt_muda=1|0 (deja de contestar SNMP).
 """
@@ -404,12 +405,12 @@ if __name__ == "__main__":
     servidor(18092, panel, False)
     raiz = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.path.insert(0, os.path.join(raiz, "pruebas"))
-    from olt_falsa import OltFalsa, chasis_ma5680t  # noqa: E402
+    from olt_falsa import OltFalsa, chasis_ma5680t_sin_energia  # noqa: E402
     spec = importlib.util.spec_from_file_location("ftth_api_falsos", os.path.join(raiz, "api", "ftth-api.py"))
     api = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(api)  # de la API se usan solo las funciones BER
     OLT = OltFalsa(api, community="lectura-e2e", clave="Clave-olt-e2e", nombre="OLT-CARCA", puerto_snmp=18161, puerto_telnet=18023)
-    OLT_T = OltFalsa(api, community="lectura-e2e", clave="Clave-olt-e2e", nombre="MA5680T", placas=chasis_ma5680t(),
+    OLT_T = OltFalsa(api, community="lectura-e2e", clave="Clave-olt-e2e", nombre="MA5680T", placas=chasis_ma5680t_sin_energia(),
                      puerto_snmp=18162, puerto_telnet=18024, trafico="huawei")
     print("Wispro falso en 18091, panel falso en 18092, OLT falsas en UDP 18161 y 18162 (TCP 18023 y 18024)", flush=True)
     try:

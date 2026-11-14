@@ -2,7 +2,7 @@
 // un tráfico y dónde va cada slot en el frente de cada chasis. Sin navegador:
 //   node pruebas/equipos.test.mjs      (Node 20.19 o más nuevo)
 import assert from 'node:assert/strict';
-import { bajada, bps, geometria, subida } from '../web/js/equipos.js';
+import { bajada, bps, geometria, slotSinPlaca, subida } from '../web/js/equipos.js';
 
 // --- el tráfico, escrito
 for (const [valor, texto] of [
@@ -95,5 +95,29 @@ g = geometria('X2');
 s = lugares(g);
 assert.ok(s[3].y === s[4].y && s[4].y === s[0].y && s[3].x < s[4].x && s[4].x < s[0].x && s[1].y > s[3].y && s[2].y > s[1].y);
 assert.ok(g.ventilador.x >= s[1].x + s[1].w - 0.01);
+
+// --- para qué es cada lugar, y qué se dice de uno sin placa
+const para = (chasis, puestos) => Object.fromEntries(geometria(chasis, puestos).slots.map((x) => [x.slot, x.para]));
+const lugaresDe = (chasis, rol, puestos = []) => Object.entries(para(chasis, puestos)).filter(([, r]) => r === rol).map(([n]) => Number(n)).sort((a, b) => a - b);
+for (const [chasis, energia, control, interfaz, uplink] of [
+  ['X17', [20, 21], [9, 10], [0], []], ['X15', [18, 19], [8, 9], [0], []], ['X7', [10, 11], [8, 9], [0], []], ['X2', [0], [3, 4], [], []],
+  ['T21', [21, 22], [9, 10], [0], [19, 20]], ['T19', [19, 20], [7, 8], [0], [17, 18]], ['T6', [10, 11], [6, 7], [12], [8, 9]], ['T2', [4], [2, 3], [], []],
+]) {
+  assert.deepEqual([lugaresDe(chasis, 'energia'), lugaresDe(chasis, 'control'), lugaresDe(chasis, 'interfaz'), lugaresDe(chasis, 'uplink')],
+    [energia, control, interfaz, uplink], chasis);
+  assert.ok(Object.values(para(chasis)).every((r) => ['servicio', 'energia', 'control', 'interfaz', 'uplink'].includes(r)), chasis);
+}
+assert.deepEqual(lugaresDe('T2', 'energia', [0, 1, 2, 3, 4, 5]), [4, 5]);
+assert.equal(lugaresDe('T19', 'servicio').length, 14); // la de 19 pulgadas lleva 14 placas de servicio
+assert.equal(lugaresDe('T21', 'servicio').length, 16); // y la de 21, 16
+const t19 = lugares(geometria('T19'));
+// La OLT no informa ninguna placa de energía: de esos lugares no se sabe qué placa tienen (vacíos no están).
+assert.deepEqual(slotSinPlaca(t19[19], false), { sinInformar: true, lugar: 'energía', rotulo: 'Slot 19: lugar de una placa de energía. La OLT no informa sus placas de energía' });
+// Si informa alguna, el otro lugar está vacío de verdad.
+assert.deepEqual(slotSinPlaca(t19[20], true), { sinInformar: false, lugar: 'energía', rotulo: 'Slot 20: vacío (lugar de una placa de energía)' });
+assert.deepEqual(slotSinPlaca(t19[0], false), { sinInformar: false, lugar: 'interfaz universal', rotulo: 'Slot 0: vacío (lugar de la interfaz universal)' });
+assert.deepEqual(slotSinPlaca(t19[8], false), { sinInformar: false, lugar: 'control', rotulo: 'Slot 8: vacío (lugar de una placa de control)' });
+assert.deepEqual(slotSinPlaca(t19[18], true), { sinInformar: false, lugar: 'subida', rotulo: 'Slot 18: vacío (lugar de una placa de subida)' });
+assert.deepEqual(slotSinPlaca(t19[3], false), { sinInformar: false, lugar: null, rotulo: 'Slot 3: vacío' });
 
 console.log('equipos.test.mjs: todo bien');

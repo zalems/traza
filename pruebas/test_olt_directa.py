@@ -22,7 +22,8 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from olt_falsa import OltFalsa, chasis_ma5608t, chasis_ma5680t, chasis_ma5680t_iec, chasis_ma5683t, chasis_x2, chasis_x17
+from olt_falsa import (OltFalsa, chasis_ma5608t, chasis_ma5680t, chasis_ma5680t_iec, chasis_ma5680t_sin_energia, chasis_ma5683t,
+                       chasis_x2, chasis_x17)
 from test_integraciones import Falso, puerto_libre
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -163,7 +164,8 @@ class OltDirectaTest(unittest.TestCase):
         def de(juego):
             return [{"slot": s, "nombre": n, "rol": api.rol_placa(n)} for s, n in juego.items()]
 
-        for juego, chasis in ((chasis_ma5680t(), "T21"), (chasis_ma5680t_iec(), "T19"), (chasis_ma5683t(), "T6"),
+        for juego, chasis in ((chasis_ma5680t(), "T21"), (chasis_ma5680t_iec(), "T19"), (chasis_ma5680t_sin_energia(), "T19"),
+                              (chasis_ma5683t(), "T6"),
                               (chasis_ma5608t(), "T2"), (chasis_ma5608t(dos_fuentes=True), "T2"),
                               (chasis_x2(), "X2"), (chasis_x17(), "X17")):
             self.assertEqual(api.chasis_de(None, de(juego)), chasis, juego)
