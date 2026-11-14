@@ -539,6 +539,37 @@ class OltDirectaTest(unittest.TestCase):
         (equipo,) = self.ok("GET", f"/api/olt?red={red}")["equipos"]
         self.assertEqual((equipo["chasis"], equipo["chasis_nombre"]), ("T19", "MA5680T de 19 pulgadas (IEC)"))
 
+    def test_trafico_de_los_puertos_pon(self):
+        """El tráfico de cada puerto PON: de los contadores estándar (MA5800) o, si esos no se mueven,
+        de la tabla de Huawei (MA5680T y su familia). El de los puertos de subida, siempre de los estándar."""
+        olts = {modo: OltFalsa(api, community=COMUNIDAD, placas=chasis_ma5680t_iec(), trafico=modo) for modo in ("estandar", "huawei", "ambos")}
+        for olt in olts.values():
+            self.addCleanup(olt.cerrar)
+        eqs = {modo: api.equipo_de({"id": "abcdef0%d" % n, "nombre": modo, "host": "127.0.0.1",
+                                    "snmp": {"puerto": olt.puerto, "community": COMUNIDAD}})
+               for n, (modo, olt) in enumerate(olts.items())}
+        primera = {modo: api.leer_huawei(eq) for modo, eq in eqs.items()}
+        for lectura in primera.values():  # con una sola lectura todavía no hay ritmo
+            self.assertTrue(all(p["entra"] is None and p["sale"] is None for p in lectura["puertos"].values()))
+        time.sleep(5.3)
+        for modo, eq in eqs.items():
+            segunda = api.leer_huawei(eq, primera[modo], completa=False)
+            placas = {p["slot"]: p for p in api.placas_de_lectura(segunda)}
+            pon = placas[1]["puertos"][0]  # tres ONT en línea: 40 Mb/s de bajada y 4 de subida cada una
+            self.assertAlmostEqual(pon["sale"], 120e6, delta=8e6, msg=modo)
+            self.assertAlmostEqual(pon["entra"], 12e6, delta=1e6, msg=modo)
+            sin_ont = placas[16]["puertos"][0]
+            self.assertEqual((sin_ont["entra"], sin_ont["sale"]), (0, 0), modo)
+            subida = placas[17]["puertos"][0]  # el de subida: por los contadores estándar, en los tres casos
+            self.assertAlmostEqual(subida["entra"], 480e6, delta=30e6, msg=modo)
+            self.assertAlmostEqual(subida["sale"], 48e6, delta=3e6, msg=modo)
+            self.assertEqual(segunda["sin_trafico_pon"], False, modo)
+            self.assertEqual(segunda["notas"], [], modo)
+        # Lo que cuesta: dos tablas cortas más por lectura (las de los puertos PON), no una por puerto.
+        antes = olts["huawei"].pedidos
+        api.leer_huawei(eqs["huawei"], primera["huawei"], completa=False)
+        self.assertLess(olts["huawei"].pedidos - antes, 20)
+
     def test_olt_del_panel_con_su_chasis(self):
         panel = Falso("panel")
         self.addCleanup(panel.cerrar)

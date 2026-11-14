@@ -1,5 +1,26 @@
 # Cambios
 
+## 0.12.3 · 14/11/2026
+
+El tráfico de los puertos PON de una MA5680T (y su familia), después de la
+primera lectura de una OLT de verdad.
+
+- En la MA5600T, la MA5680T y sus hermanas, los contadores estándar (IF-MIB)
+  de los puertos GPON no se mueven: el tráfico de cada puerto PON daba
+  "0 b/s". Ahora se lee también la tabla de Huawei con lo que pasó por cada
+  puerto PON (`hwGponOltEthernetStatisticTable`: octetos recibidos y
+  enviados) y se usa esa cuando se movió o cuando la estándar no dice nada.
+  Los puertos de subida siguen saliendo de los contadores estándar. Son dos
+  pedidos cortos más por lectura.
+- `herramientas/muestras-snmp.py --red N` lee la OLT cargada en traza para
+  esa red con su conexión guardada (no hay que escribir la dirección ni la
+  comunidad, y no las muestra) y ahora dice qué informa la OLT de cada slot
+  (nombre de la placa, estado, modo, temperatura) y el tráfico de cada puerto
+  medido con cada contador (estándar de 64 y de 32 bits, y el de Huawei), para
+  ver cuáles se mueven en ese equipo.
+- Sin cambios en los datos. Volver a 0.12.2: `git checkout 36abe7b` y
+  `./instalar.sh`.
+
 ## 0.12.2 · 13/11/2026 · commit 6729a3c
 
 Corrige cómo se escribe el tráfico.

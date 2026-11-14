@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.2
+# Plataforma FTTH · kit 0.12.3
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -333,13 +333,18 @@ claves ni datos de los clientes:
 `python3 herramientas/muestras-olt-wispro.py`. Para ver todo lo que entrega
 el panel (todas sus rutas y la forma de cada respuesta de lectura: placas,
 puertos, uplinks, tráfico), sin llamar nada que cambie algo ni que lea la
-OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para leer por
-SNMP, directo de la OLT, la óptica de cada puerto PON (potencia de salida del
-SFP, temperatura, corriente, tensión) y su tráfico, comprobar así que desde
-el servidor se llega a la OLT y ver las primeras filas de cada tabla que traza
-lee de una OLT cargada en el visor (placas, ONT, potencias; sin números de
-serie enteros ni descripciones): `python3 herramientas/muestras-snmp.py --olt N`
-o `--host DIRECCIÓN` (pide la community sin mostrarla; solo lee). Para ver cómo están las
+OLT en el momento: `python3 herramientas/muestras-panel.py --olt N`. Para ver
+cómo responde una OLT por SNMP: `python3 herramientas/muestras-snmp.py --red N`
+(como root) lee la OLT cargada en traza para esa red, con su conexión
+guardada, y muestra qué placa dice tener en cada slot, la óptica de cada
+puerto PON (potencia de salida del SFP, temperatura, corriente, tensión), el
+tráfico de cada puerto medido con cada contador que puede tener (los estándar
+de 64 y de 32 bits y los de Huawei para los puertos GPON, para ver cuáles se
+mueven) y las primeras filas de cada tabla de ONT que traza lee, con cuánto
+tarda cada una. No muestra la dirección, la comunidad, números de serie
+enteros ni descripciones, y solo lee. Para una OLT que no está cargada,
+`--olt N` (toma la dirección del panel) o `--host DIRECCIÓN` (y `--puerto`):
+ahí pide la community sin mostrarla. Para ver cómo están las
 ubicaciones de las NAPs y de los contratos en Wispro, por OLT (solo cuentas y
 distancias): `python3 herramientas/ubicaciones-wispro.py RED` (el número de la
 red).
@@ -417,7 +422,10 @@ la OLT se lee lo que el panel no informa (lo que emite cada puerto PON).
 
 Por ahora se leen OLT Huawei: MA5800 y EA5800 y la familia anterior (MA5600T,
 MA5680T, MA5603T, MA5683T y MA5608T), que publican las mismas tablas
-(HUAWEI-XPON-MIB).
+(HUAWEI-XPON-MIB). El tráfico de cada puerto sale de los contadores estándar
+(IF-MIB); en la familia anterior los de los puertos GPON no se mueven, y el
+tráfico de esos puertos se toma de la tabla de Huawei
+(`hwGponOltEthernetStatisticTable`).
 
 ### Publicarlo con nombre y HTTPS
 
@@ -739,21 +747,26 @@ el chasis por sus placas, que cada slot quede en su lugar y que ninguno se
 pise con otro. Que la red cargue aunque el mapa de fondo no llegue se prueba
 en Chromium dejando sin respuesta a los servidores de afuera.
 
+La lectura directa se probó además contra una OLT de verdad (14/11/2026): una
+MA5680T de 19 pulgadas en producción, por su dirección pública, con 973 ONT.
+"Probar la conexión" entregó todo (placas con su nombre, 64 puertos PON, ONT,
+potencia de los puertos y de las ONT) y el chasis se reconoció por sus placas;
+guardada, el tablero mostró las ONT, las potencias y la óptica de cada puerto.
+Ahí se vio que en esa familia los contadores estándar de los puertos GPON no
+se mueven (el tráfico daba cero) y que la OLT no informa placas en los slots
+de energía.
+
 No se pudo probar, y hay que mirarlo en el uso real:
 
-- La lectura directa contra una OLT de verdad: al escribirla, ninguna OLT
-  contestaba SNMP desde el servidor de traza. Lo primero para mirar con una
-  es "Probar la conexión" (dice qué entrega y cuánto tarda en dar la potencia
-  de una ONT) y que las cuentas de ONT y de puertos coincidan con las de la
-  OLT. En particular: el nombre de cada placa (traza lo busca en dos columnas
-  de la tabla de slots), cuánto tarda una OLT con cientos de ONT en dar la
-  potencia de todas (la pide de a 20, con 10 segundos de espera; si no llega,
-  sigue con lo demás y lo avisa) y la hora de las caídas (según la zona que
-  se indique para el reloj de la OLT).
-- Una MA5680T (o cualquiera de su familia) de verdad: que entregue por SNMP
-  las mismas tablas que una MA5800 y con qué nombre da cada placa. Si "Probar
-  la conexión" no muestra la línea "Placas", el chasis no se puede deducir:
-  se elige el modelo a mano.
+- El tráfico de los puertos PON de una MA5680T tomado de la tabla de Huawei
+  (0.12.3): se escribió con la documentación de la MIB y se probó con la OLT
+  de mentira; `herramientas/muestras-snmp.py --red N` muestra qué contadores
+  se mueven en la OLT de verdad.
+- La lectura directa contra una MA5800 o una EA5800 de verdad, y contra las
+  otras de la familia anterior (MA5683T, MA5608T): el nombre de cada placa,
+  cuánto tarda en dar la potencia de todas las ONT (la pide de a 20, con 10
+  segundos de espera; si no llega, sigue con lo demás y lo avisa) y la hora
+  de las caídas (según la zona que se indique para el reloj de la OLT).
 - La consola por SSH contra una OLT de verdad (las que tienen años usan
   algoritmos que el cliente de hoy trae apagados; traza los habilita si el
   cliente del servidor todavía los tiene).
