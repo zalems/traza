@@ -1,5 +1,20 @@
 # Cambios
 
+## 0.12.2 · 13/11/2026
+
+Corrige cómo se escribe el tráfico.
+
+- Corregido: un tráfico de 100 o más que terminaba en cero se mostraba sin
+  ese cero: 120 Mb/s aparecía como "12 Mb/s"; 300 Mb/s, como "3 Mb/s"; un
+  puerto de 100 Mb, como de "1 Mb". Pasaba desde 0.12.0 en *Equipos* (el
+  tráfico de cada puerto y la velocidad de los de subida), en la columna de
+  tráfico de *Puertos PON* y en la escala de las curvas de tráfico. Los
+  números guardados estaban bien: era solo cómo se escribían.
+- Prueba nueva, sin navegador: `node pruebas/equipos.test.mjs` (cómo se
+  escribe un tráfico y dónde va cada slot en el frente de cada chasis).
+- Sin cambios en la API ni en los datos. Volver a 0.12.1: `git checkout
+  2ff6514` y `./instalar.sh`.
+
 ## 0.12.1 · 13/11/2026 · commit b9e1d3b
 
 Las OLT Huawei de la familia anterior a la MA5800 (MA5680T, MA5600T, MA5683T,
