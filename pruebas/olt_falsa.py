@@ -45,6 +45,13 @@ def chasis_ma5680t_iec():
             17: "H801GICF", 18: "H801GICF", 19: "H801PRTE", 20: "H801PRTE"}
 
 
+def chasis_ma5680t_sin_energia():
+    """Una MA5680T de 19 pulgadas como una leída de verdad: control en 7 y 8, cuatro GPON de 16 puertos en 13 a 16
+    y subida en 17 y 18. No informa placas de energía (19 y 20) ni interfaz universal (0): tampoco su consola las lista."""
+    return {7: "H802SCUN", 8: "H802SCUN", 13: "H805GPFD", 14: "H805GPFD", 15: "H805GPFD", 16: "H806GPFD",
+            17: "H801X2CS", 18: "H801X2CS"}
+
+
 def chasis_ma5683t():
     """Una MA5683T: seis slots de servicio (0 a 5), control en 6 y 7, subida en 8 y 9, energía en 10 y 11, interfaz universal en 12."""
     return {0: "H805GPFD", 1: "H802GPBD", 6: "H801SCUN", 7: "H801SCUN", 8: "H801GICF", 9: "H801GICF",
@@ -213,9 +220,13 @@ class OltFalsa:
         poner("1.3.6.1.2.1.31.1.1.1.1.1", texto("meth0"))
         poner("1.3.6.1.2.1.31.1.1.1.1.2", texto("vlanif100"))
         poner("1.3.6.1.2.1.2.2.1.8.1", entero(1))
+        control = sorted(slot for slot, nombre in self.placas.items() if puertos_de(nombre)[0] == "eth" and nombre[4:6] not in ("GI", "X2"))
         for slot, nombre in ({} if self.sin_placas else self.placas).items():
-            poner(f"{SLOT}.3.0.{slot}", texto(f"{nombre}_0_Board"))
+            poner(f"{SLOT}.3.0.{slot}", texto(f"{nombre}_0_{slot}"))
+            # De las dos placas de control, la primera es la activa (1) y la otra, la de reserva (2); a las demás no les corresponde (255).
+            poner(f"{SLOT}.6.0.{slot}", entero(control.index(slot) + 1 if slot in control[:2] else 255))
             poner(f"{SLOT}.8.0.{slot}", entero(2))
+            poner(f"{SLOT}.13.0.{slot}", entero(30 + slot % 10))
             poner(f"{SLOT}.21.0.{slot}", texto(nombre))
         for indice, o in onts.items():
             poner(f"{XPON}.43.1.3.{indice}", texto(o["sn"]))

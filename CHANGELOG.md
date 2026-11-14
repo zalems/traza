@@ -1,5 +1,33 @@
 # Cambios
 
+## 0.12.4 · 14/11/2026
+
+Los lugares del chasis que la OLT no informa, y cuál placa de control trabaja.
+
+- En el dibujo, un slot sin placa que no es de servicio dice para qué es ese
+  lugar: energía, control, subida o interfaz universal.
+- Si la OLT no informa ninguna placa de energía (una MA5680T de verdad no las
+  registra: ni por SNMP ni en `display board`), sus lugares ya no se muestran
+  vacíos: dicen "energía" con otro trazo, y el resumen del equipo aclara que
+  la OLT no informa sus placas de energía y en qué slots van. Si informa
+  alguna, el otro lugar se muestra vacío, como antes.
+- De las dos placas de control se dice cuál es la activa y cuál la de
+  reserva, y de cada placa, su temperatura (al tocarla, en *Equipos*). En una
+  OLT leída directo sale de la tabla de slots (`hwSlotWorkMode` y
+  `hwSlotTemperature`); en una del panel, del estado que informa el panel.
+  API: `modo` (`activa` o `reserva`) y `temperatura` en cada placa de
+  `GET /api/olt`.
+- El tráfico de los puertos PON de 0.12.3 quedó comprobado en una MA5680T de
+  verdad con `herramientas/muestras-snmp.py --red N`: los contadores estándar
+  de 64 bits de sus puertos GPON no se mueven y los de la tabla de Huawei sí,
+  y lo que baja por todos los puertos PON (1,72 Gb/s) coincide con lo que
+  entra por el puerto de subida (1,73 Gb/s). La tabla se lee en 0,6 s.
+- La OLT de mentira de las pruebas en navegador es ahora como la MA5680T leída
+  de verdad: de 19 pulgadas, cuatro placas GPON de 16 puertos, sin placas de
+  energía informadas y con el tráfico de sus puertos PON en la tabla de Huawei.
+- Sin cambios en los datos. Volver a 0.12.3: `git checkout 891c0a9` y
+  `./instalar.sh`.
+
 ## 0.12.3 · 14/11/2026 · commit 9c3053b
 
 El tráfico de los puertos PON de una MA5680T (y su familia), después de la

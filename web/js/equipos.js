@@ -22,6 +22,7 @@ const MODELOS = [
   ['MA5603T', 'Huawei MA5603T (6 placas de servicio)'],
 ];
 const ROLES = { pon: 'PON', control: 'control', energia: 'energía', interfaz: 'interfaz universal', uplink: 'subida', ventilador: 'ventiladores', otra: '' };
+const MODO_PLACA = { activa: 'activa', reserva: 'de reserva' }; // de las dos placas de control, cuál trabaja
 const ESTADO_PLACA = { normal: 'normal', falla: 'con falla', 'sin-confirmar': 'sin confirmar', ausente: 'no está puesta', apagada: 'apagada', 'no-coincide': 'no es la configurada', otro: '' };
 const NIVEL_PON = { caido: 'caida', parcial: 'mal', atencion: 'atencion', bien: 'bien' };
 const TEXTO_PON = { caido: 'caído: ninguna ONT en línea', parcial: 'la mitad o más sin señal', atencion: 'con señal al límite', bien: 'bien' };
@@ -43,9 +44,43 @@ const SERVICIO_T = 22.86;
 const LARGO_T = 395.4;
 const ENERGIA_T = 105.1;
 
-// Dónde va cada slot en el frente de un chasis (en milímetros). `puestos`: los slots que
-// tienen una placa (la MA5608T lleva una placa de energía entera o dos de la mitad).
+// Para qué es cada lugar de cada chasis; los que no figuran son de servicio (las placas de PON).
+const LUGARES = {
+  X17: { energia: [20, 21], interfaz: [0], control: [9, 10] },
+  X15: { energia: [18, 19], interfaz: [0], control: [8, 9] },
+  X7: { energia: [10, 11], interfaz: [0], control: [8, 9] },
+  X2: { energia: [0], control: [3, 4] },
+  T21: { energia: [21, 22], interfaz: [0], control: [9, 10], uplink: [19, 20] },
+  T19: { energia: [19, 20], interfaz: [0], control: [7, 8], uplink: [17, 18] },
+  T6: { energia: [10, 11], interfaz: [12], control: [6, 7], uplink: [8, 9] },
+  T2: { energia: [4, 5], control: [2, 3] },
+};
+const LUGAR_DE = { energia: 'energía', interfaz: 'interfaz universal', control: 'control', uplink: 'subida' };
+
+// Dónde va cada slot en el frente de un chasis (en milímetros) y para qué es ese lugar (`para`:
+// servicio, control, energia, interfaz o uplink). `puestos`: los slots que tienen una placa
+// (la MA5608T lleva una placa de energía entera o dos de la mitad).
 export function geometria(chasis, puestos = []) {
+  const geo = frente(chasis, puestos);
+  if (!geo) return null;
+  const lugares = LUGARES[chasis] ?? {};
+  for (const lugar of geo.slots) {
+    lugar.para = Object.keys(lugares).find((rol) => lugares[rol].includes(lugar.slot)) ?? 'servicio';
+  }
+  return geo;
+}
+
+// Lo que se dice de un slot sin placa. En el lugar de una placa de energía, si la OLT no informa
+// ninguna, no se sabe qué hay: las placas de energía que no se registran no figuran en la OLT.
+export function slotSinPlaca(lugar, informaEnergia) {
+  if (lugar.para === 'energia' && !informaEnergia) {
+    return { sinInformar: true, lugar: LUGAR_DE.energia, rotulo: `Slot ${lugar.slot}: lugar de una placa de energía. La OLT no informa sus placas de energía` };
+  }
+  const lugarDe = LUGAR_DE[lugar.para] ?? null;
+  return { sinInformar: false, lugar: lugarDe, rotulo: `Slot ${lugar.slot}: vacío${lugarDe ? ` (lugar de ${lugar.para === 'interfaz' ? 'la' : 'una placa de'} ${lugarDe})` : ''}` };
+}
+
+function frente(chasis, puestos) {
   const slots = [];
   if (chasis === 'T21' || chasis === 'T19') {
     const etsi = chasis === 'T21';
@@ -281,6 +316,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const geo = geometria(equipo.chasis, equipo.placas.map((p) => p.slot));
     if (!geo) return null;
     const porSlot = new Map(equipo.placas.map((p) => [p.slot, p]));
+    const informaEnergia = equipo.placas.some((p) => p.rol === 'energia');
     const lienzo = s('svg', { viewBox: `0 0 ${geo.ancho} ${geo.alto}`, class: `chasis-dibujo chasis-${equipo.chasis.toLowerCase()}`, role: 'group', 'aria-label': `Frente de ${equipo.nombre}: sus placas, slot por slot` });
     lienzo.append(s('rect', { x: 0.75, y: 0.75, width: geo.ancho - 1.5, height: geo.alto - 1.5, rx: 4, class: 'chasis-caja' }));
     // Los ventiladores.
@@ -297,11 +333,12 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     for (const lugar of geo.slots) {
       const placa = porSlot.get(lugar.slot) ?? null;
       const marcada = elegido?.equipo === equipo.id && elegido.slot === lugar.slot;
+      const sin = placa ? null : slotSinPlaca(lugar, informaEnergia);
       const rotulo = placa
-        ? `Slot ${lugar.slot}: ${placa.nombre ?? 'placa'}${ROLES[placa.rol] ? `, ${ROLES[placa.rol]}` : ''}${placa.puertos.length ? `, ${placa.puertos.length} puertos` : ''}${placa.estado !== 'normal' ? `, ${ESTADO_PLACA[placa.estado] || placa.estado}` : ''}`
-        : `Slot ${lugar.slot}: vacío`;
+        ? `Slot ${lugar.slot}: ${placa.nombre ?? 'placa'}${ROLES[placa.rol] ? `, ${ROLES[placa.rol]}` : ''}${MODO_PLACA[placa.modo] ? `, ${MODO_PLACA[placa.modo]}` : ''}${placa.puertos.length ? `, ${placa.puertos.length} puertos` : ''}${placa.estado !== 'normal' ? `, ${ESTADO_PLACA[placa.estado] || placa.estado}` : ''}`
+        : sin.rotulo;
       const g = s('g', {
-        class: `chasis-slot ${placa ? `con-placa rol-${placa.rol}${placa.estado !== 'normal' ? ' con-falla' : ''}` : 'vacio'}${marcada ? ' elegida' : ''}`,
+        class: `chasis-slot ${placa ? `con-placa rol-${placa.rol}${placa.estado !== 'normal' ? ' con-falla' : ''}` : `vacio${sin.sinInformar ? ' sin-informar' : ''}`}${marcada ? ' elegida' : ''}`,
         'data-slot': lugar.slot,
         role: placa ? 'button' : null,
         tabindex: placa ? '0' : null,
@@ -314,7 +351,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
           elegir(equipo, lugar.slot);
         } : null,
       });
-      g.append(s('rect', { x: lugar.x + 0.9, y: lugar.y + 0.9, width: lugar.w - 1.8, height: lugar.h - 1.8, rx: 1.6, class: 'chasis-frente' }));
+      g.append(s('title', { text: rotulo }), s('rect', { x: lugar.x + 0.9, y: lugar.y + 0.9, width: lugar.w - 1.8, height: lugar.h - 1.8, rx: 1.6, class: 'chasis-frente' }));
       // El número del slot, en la punta donde empieza la placa.
       g.append(lugar.parada
         ? s('text', { x: lugar.x + lugar.w / 2, y: lugar.y + 11, class: 'chasis-slot-numero', text: String(lugar.slot) })
@@ -329,6 +366,11 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
             ? s('text', { class: 'chasis-nombre', 'text-anchor': 'end', transform: `translate(${lugar.x + lugar.w / 2} ${lugar.y + lugar.h - 5}) rotate(90)`, text: nombre })
             : s('text', { class: 'chasis-nombre', 'text-anchor': 'end', x: lugar.x + lugar.w - 5, y: lugar.y + lugar.h / 2, text: nombre }));
         }
+      } else if (sin.lugar && (lugar.parada ? lugar.h : lugar.w) > 60) {
+        // Un lugar que no es de servicio dice para qué es, donde iría el nombre de la placa.
+        g.append(lugar.parada
+          ? s('text', { class: 'chasis-lugar', 'text-anchor': 'end', transform: `translate(${lugar.x + lugar.w / 2} ${lugar.y + lugar.h - 5}) rotate(90)`, text: sin.lugar })
+          : s('text', { class: 'chasis-lugar', 'text-anchor': 'end', x: lugar.x + lugar.w - 5, y: lugar.y + lugar.h / 2, text: sin.lugar }));
       }
       lienzo.append(g);
     }
@@ -443,9 +485,13 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       const baja = subidas.reduce((a, p) => a + (bajada(p) ?? 0), 0);
       const sube = subidas.reduce((a, p) => a + (subida(p) ?? 0), 0);
       const placasPon = equipo.placas.filter((p) => p.rol === 'pon').length;
+      // Los lugares de las placas de energía, si la OLT no informa ninguna.
+      const energia = equipo.placas.length && !equipo.placas.some((p) => p.rol === 'energia')
+        ? (geometria(equipo.chasis, [])?.slots ?? []).filter((x) => x.para === 'energia').map((x) => x.slot) : [];
       return h('div.chasis-detalle', {},
         h('dl.olt-datos', {},
           dato('Placas', equipo.placas.length ? `${equipo.placas.length}${placasPon ? ` · ${placasPon} de PON` : ''}` : null),
+          dato('Energía', energia.length ? `la OLT no informa sus placas de energía (${energia.length === 1 ? `slot ${energia[0]}` : `slots ${energia.join(' y ')}`})` : null),
           dato('Puertos PON', pon.length ? `${pon.length} · ${pon.filter((p) => ponDe(equipo, p)).length} con ONT` : null),
           dato('Subida ahora', subidas.length && (baja || sube) ? `bajada ${bps(baja)} · subida ${bps(sube)}` : null),
           dato('Encendida', Number.isFinite(equipo.encendida_s) ? `hace ${equipo.encendida_s >= 2 * 86400 ? `${Math.round(equipo.encendida_s / 86400)} días` : `${Math.round(equipo.encendida_s / 3600)} h`}` : null),
@@ -455,8 +501,9 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const placa = equipo.placas.find((p) => p.slot === elegido.slot);
     if (!placa) return h('div.chasis-detalle', {});
     const puerto = placa.puertos.find((p) => p.clave === elegido.puerto) ?? null;
-    const que = [ROLES[placa.rol] ? `Placa de ${ROLES[placa.rol]}` : 'Placa', placa.puertos.length ? `${placa.puertos.length} puertos` : null,
-      placa.detalle ?? (ESTADO_PLACA[placa.estado] || null)].filter(Boolean).join(' · ');
+    const que = [ROLES[placa.rol] ? `Placa de ${ROLES[placa.rol]}` : 'Placa', MODO_PLACA[placa.modo] ?? null,
+      placa.puertos.length ? `${placa.puertos.length} puertos` : null, placa.detalle ?? (ESTADO_PLACA[placa.estado] || null),
+      Number.isFinite(placa.temperatura) ? `${placa.temperatura} °C` : null].filter(Boolean).join(' · ');
     return h('div.chasis-detalle', {},
       h('h4.chasis-placa-titulo', { text: `Slot ${placa.slot}${placa.nombre ? ` · ${placa.nombre}` : ''}` }),
       h(`p.olt-nota${placa.estado === 'normal' ? '' : '.alerta'}`, { text: que }),
