@@ -8,7 +8,19 @@ import { dbTexto, haceCuanto, tiempo } from './integracion.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const HORA = 3600 * 1000;
-const MODELOS = ['MA5800-X17', 'MA5800-X15', 'MA5800-X7', 'MA5800-X2', 'EA5800-X17', 'EA5800-X15', 'EA5800-X7', 'EA5800-X2'];
+// Los modelos que se saben dibujar. La MA5680T y la MA5600T usan el mismo chasis, que viene en dos anchos:
+// el de 21 pulgadas (ETSI) lleva 16 placas de servicio y el de 19 (IEC), 14.
+const MODELOS = [
+  ['MA5800-X17', 'Huawei MA5800-X17'], ['MA5800-X15', 'Huawei MA5800-X15'], ['MA5800-X7', 'Huawei MA5800-X7'], ['MA5800-X2', 'Huawei MA5800-X2'],
+  ['EA5800-X17', 'Huawei EA5800-X17'], ['EA5800-X15', 'Huawei EA5800-X15'], ['EA5800-X7', 'Huawei EA5800-X7'], ['EA5800-X2', 'Huawei EA5800-X2'],
+  ['MA5680T-ETSI', 'Huawei MA5680T de 21 pulgadas (16 placas de servicio, control en 9 y 10)'],
+  ['MA5680T-IEC', 'Huawei MA5680T de 19 pulgadas (14 placas de servicio, control en 7 y 8)'],
+  ['MA5683T', 'Huawei MA5683T (6 placas de servicio)'],
+  ['MA5608T', 'Huawei MA5608T (2 placas de servicio)'],
+  ['MA5600T-ETSI', 'Huawei MA5600T de 21 pulgadas (16 placas de servicio, control en 9 y 10)'],
+  ['MA5600T-IEC', 'Huawei MA5600T de 19 pulgadas (14 placas de servicio, control en 7 y 8)'],
+  ['MA5603T', 'Huawei MA5603T (6 placas de servicio)'],
+];
 const ROLES = { pon: 'PON', control: 'control', energia: 'energía', interfaz: 'interfaz universal', uplink: 'subida', ventilador: 'ventiladores', otra: '' };
 const ESTADO_PLACA = { normal: 'normal', falla: 'con falla', 'sin-confirmar': 'sin confirmar', ausente: 'no está puesta', apagada: 'apagada', 'no-coincide': 'no es la configurada', otro: '' };
 const NIVEL_PON = { caido: 'caida', parcial: 'mal', atencion: 'atencion', bien: 'bien' };
@@ -22,9 +34,88 @@ const SERVICIO = 23.3;
 const CONTROL = 31;
 const LATERAL = 25.4;
 const LARGO = 399;
+// La familia anterior (MA5600T y MA5680T; MA5603T y MA5683T; MA5608T), también como en su
+// descripción de hardware: las placas de servicio miden 22,86 de ancho y 395,4 de largo; las
+// de control, las de subida, las de energía y la interfaz universal, 25,4 de ancho. En el
+// chasis grande van paradas, con los ventiladores arriba; en los chicos, acostadas, con los
+// ventiladores a la izquierda.
+const SERVICIO_T = 22.86;
+const LARGO_T = 395.4;
+const ENERGIA_T = 105.1;
 
-export function geometria(chasis) {
+// Dónde va cada slot en el frente de un chasis (en milímetros). `puestos`: los slots que
+// tienen una placa (la MA5608T lleva una placa de energía entera o dos de la mitad).
+export function geometria(chasis, puestos = []) {
   const slots = [];
+  if (chasis === 'T21' || chasis === 'T19') {
+    const etsi = chasis === 'T21';
+    const servicio = etsi ? 18 : 16; // los slots del medio, con los dos de control
+    const control = etsi ? [9, 10] : [7, 8];
+    const energia = etsi ? [21, 22] : [19, 20];
+    const subida = etsi ? [19, 20] : [17, 18];
+    const ancho = etsi ? 490 : 442;
+    const alto = etsi ? 447.2 : 441.7;
+    const bandeja = etsi ? 44 : 38.5; // la de los ventiladores
+    const total = 2 * LATERAL + (servicio - 2) * SERVICIO_T + 2 * LATERAL; // las dos columnas de los costados, el servicio y el control
+    const x0 = (ancho - total) / 2;
+    const y0 = alto - LARGO_T - 2.3;
+    // A la izquierda, de arriba abajo: las dos placas de energía y la interfaz universal (slot 0).
+    slots.push({ slot: energia[0], x: x0, y: y0, w: LATERAL, h: ENERGIA_T, parada: true });
+    slots.push({ slot: energia[1], x: x0, y: y0 + ENERGIA_T, w: LATERAL, h: ENERGIA_T, parada: true });
+    slots.push({ slot: 0, x: x0, y: y0 + 2 * ENERGIA_T, w: LATERAL, h: LARGO_T - 2 * ENERGIA_T, parada: true });
+    let x = x0 + LATERAL;
+    for (let slot = 1; slot <= servicio; slot += 1) {
+      const w = control.includes(slot) ? LATERAL : SERVICIO_T;
+      slots.push({ slot, x, y: y0, w, h: LARGO_T, parada: true });
+      x += w;
+    }
+    // A la derecha: las dos placas de subida, una arriba de la otra.
+    slots.push({ slot: subida[0], x, y: y0, w: LATERAL, h: LARGO_T / 2, parada: true });
+    slots.push({ slot: subida[1], x, y: y0 + LARGO_T / 2, w: LATERAL, h: LARGO_T / 2, parada: true });
+    return { ancho, alto, slots, ventilador: { x: 2, y: 3, w: ancho - 4, h: bandeja, cantidad: etsi ? 4 : 6 } };
+  }
+  if (chasis === 'T6') {
+    const x0 = 53;
+    const largo = 385;
+    const y0 = 12.5;
+    let y = y0;
+    // De arriba abajo: seis placas de servicio (0 a 5), las dos de control (6 y 7), las dos
+    // de subida lado a lado (8 y 9) y, abajo, las dos de energía (10 y 11) y la interfaz universal (12).
+    for (let slot = 0; slot <= 7; slot += 1) {
+      const h = slot >= 6 ? LATERAL : SERVICIO_T;
+      slots.push({ slot, x: x0, y, w: largo, h });
+      y += h;
+    }
+    slots.push({ slot: 8, x: x0, y, w: largo / 2, h: LATERAL });
+    slots.push({ slot: 9, x: x0 + largo / 2, y, w: largo / 2, h: LATERAL });
+    y += LATERAL;
+    const energia = largo * (ENERGIA_T / LARGO_T);
+    slots.push({ slot: 10, x: x0, y, w: energia, h: LATERAL });
+    slots.push({ slot: 11, x: x0 + energia, y, w: energia, h: LATERAL });
+    slots.push({ slot: 12, x: x0 + 2 * energia, y, w: largo - 2 * energia, h: LATERAL });
+    return { ancho: 442, alto: 263.9, slots, ventilador: { x: 4, y: 9, w: 45, h: 245.7, cantidad: 6 } };
+  }
+  if (chasis === 'T2') {
+    const x0 = 38;
+    const largo = 399;
+    const y0 = 3.4;
+    const h = 35.56; // la fila de abajo: las placas de control y las de energía
+    // Arriba, las dos placas de servicio (0 y 1); abajo, las dos de control (2 y 3) y la energía (4, o 4 y 5).
+    slots.push({ slot: 0, x: x0, y: y0, w: largo, h: SERVICIO_T });
+    slots.push({ slot: 1, x: x0, y: y0 + SERVICIO_T, w: largo, h: SERVICIO_T });
+    const y = y0 + 2 * SERVICIO_T;
+    const control = largo * 0.335;
+    slots.push({ slot: 2, x: x0, y, w: control, h });
+    slots.push({ slot: 3, x: x0 + control, y, w: control, h });
+    const energia = largo - 2 * control;
+    if (puestos.includes(5)) {
+      slots.push({ slot: 4, x: x0 + 2 * control, y, w: energia / 2, h });
+      slots.push({ slot: 5, x: x0 + 2 * control + energia / 2, y, w: energia / 2, h });
+    } else {
+      slots.push({ slot: 4, x: x0 + 2 * control, y, w: energia, h });
+    }
+    return { ancho: 442, alto: 88.1, slots, ventilador: { x: 4, y: 1.3, w: 29, h: 85.5, cantidad: 2 } };
+  }
   if (chasis === 'X17' || chasis === 'X15') {
     const x17 = chasis === 'X17';
     const orden = x17 ? [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
@@ -185,7 +276,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
   }
 
   function dibujarChasis(equipo) {
-    const geo = geometria(equipo.chasis);
+    const geo = geometria(equipo.chasis, equipo.placas.map((p) => p.slot));
     if (!geo) return null;
     const porSlot = new Map(equipo.placas.map((p) => [p.slot, p]));
     const lienzo = s('svg', { viewBox: `0 0 ${geo.ancho} ${geo.alto}`, class: `chasis-dibujo chasis-${equipo.chasis.toLowerCase()}`, role: 'group', 'aria-label': `Frente de ${equipo.nombre}: sus placas, slot por slot` });
@@ -263,7 +354,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const marcado = elegido?.puerto === puerto.clave;
     let sub;
     if (puerto.tipo === 'pon') sub = p ? `${p.en_linea}/${p.onts}` : 'sin ONT';
-    else sub = puerto.estado === 'up' ? (Number.isFinite(bajada(puerto)) ? bps(bajada(puerto)) : 'en servicio') : puerto.estado === 'ausente' ? 'sin módulo' : 'sin enlace';
+    else sub = puerto.estado === 'up' ? (Number.isFinite(bajada(puerto)) ? bps(bajada(puerto)) : 'con enlace') : puerto.estado === 'ausente' ? 'sin módulo' : 'sin enlace';
     const rotulo = puerto.tipo === 'pon'
       ? `PON ${puerto.interfaz}: ${p ? `${p.onts} ONT, ${p.en_linea} en línea` : 'sin ONT'}`
       : `Puerto de subida ${puerto.puerto}: ${sub}`;
@@ -367,7 +458,8 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     return h('div.chasis-detalle', {},
       h('h4.chasis-placa-titulo', { text: `Slot ${placa.slot}${placa.nombre ? ` · ${placa.nombre}` : ''}` }),
       h(`p.olt-nota${placa.estado === 'normal' ? '' : '.alerta'}`, { text: que }),
-      placa.puertos.length ? h('div.chasis-chips', { role: 'group', 'aria-label': `Puertos de la placa del slot ${placa.slot}` },
+      // Los puertos de subida dicen más que los de PON («sin módulo», «1,15 Gb/s»): van más anchos.
+      placa.puertos.length ? h(`div.chasis-chips${placa.puertos.some((p) => p.tipo !== 'pon') ? '.anchos' : ''}`, { role: 'group', 'aria-label': `Puertos de la placa del slot ${placa.slot}` },
         ...placa.puertos.map((p) => chip(equipo, placa, p))) : null,
       puerto ? detallePuerto(equipo, puerto) : null);
   }
@@ -379,9 +471,12 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       ? `del panel de la OLT${equipo.registrado ? ' · con su conexión cargada' : ''}`
       : 'lectura directa por SNMP';
     const leido = equipo.leido ? `leída ${haceCuanto(equipo.leido)}` : null;
-    const sub = [equipo.modelo ?? (equipo.chasis ? `chasis ${equipo.chasis}` : null), origen, leido].filter(Boolean).join(' · ');
+    const sub = [equipo.chasis_nombre ?? equipo.modelo ?? null, origen, leido].filter(Boolean).join(' · ');
     const dibujo = equipo.placas.length ? dibujarChasis(equipo) : null;
-    const alto = equipo.chasis === 'X17' || equipo.chasis === 'X15';
+    // Placas en slots que el chasis dibujado no tiene: el modelo no es ese (si la API ya lo avisó, alcanza con su aviso).
+    const lugares = dibujo && !equipo.chasis_dudoso ? geometria(equipo.chasis, equipo.placas.map((p) => p.slot)).slots.map((x) => x.slot) : null;
+    const afuera = lugares ? equipo.placas.filter((p) => !lugares.includes(p.slot)).map((p) => p.slot) : [];
+    const alto = ['X17', 'X15', 'T21', 'T19'].includes(equipo.chasis); // los de placas paradas: el detalle va al costado
     const acciones = [];
     if (administra()) {
       acciones.push(boton(equipo.registrado ? 'Conexión' : 'Cargar su conexión', () => abrirFormulario(equipo)));
@@ -392,6 +487,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
         acciones.length ? h('div.olt-novedad-botones', {}, ...acciones) : null),
       equipo.error ? h('p.olt-aviso.alerta', { text: `${equipo.error.charAt(0).toUpperCase()}${equipo.error.slice(1)}.` }) : null,
       equipo.nota ? h('p.olt-nota.alerta', { text: equipo.nota }) : null,
+      afuera.length ? h('p.olt-nota.alerta', { text: `${afuera.length === 1 ? `La placa del slot ${afuera[0]} no entra` : `Las placas de los slots ${afuera.join(', ')} no entran`} en este chasis: el modelo no es ese.${administra() ? ' Se cambia en «Conexión».' : ''}` }) : null,
       equipo.placas.length
         ? h(`div.chasis${alto ? '.alto' : ''}`, {},
           h('div.chasis-marco', {}, dibujo ?? listaDePlacas(equipo), dibujo ? leyenda() : null,
@@ -622,8 +718,8 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       vinculada ? null : campo('Nombre', entrada('nombre', { maxlength: '60', placeholder: 'OLT Centro' })),
       campo('Dirección', entrada('host', { maxlength: '253', inputmode: 'url', placeholder: '10.0.0.2 o olt.ejemplo.com.ar' }),
         'La IP o el nombre con que este servidor llega a la OLT. Si está en otra red, su IP pública (o la del router que le reenvía los puertos).'),
-      campo('Modelo', seleccion('modelo', [['', 'Detectarlo por sus placas'], ...MODELOS.map((m) => [m, `Huawei ${m}`])]),
-        'De acá sale cómo se dibuja el chasis.'),
+      campo('Modelo', seleccion('modelo', [['', 'Detectarlo por sus placas'], ...MODELOS]),
+        'De acá sale cómo se dibuja el chasis. Si no sabés cuál es, dejalo así: «Probar la conexión» dice cuál reconoce.'),
       campo('Hora de la OLT', seleccion('utc', zonas), 'La zona del reloj de la OLT: sirve para ubicar las caídas que ella anota.')),
     h('fieldset', {}, h('legend', { text: 'Lectura (SNMP v2c)' }),
       campo('Puerto UDP', entrada('snmp_puerto', { type: 'number', inputmode: 'numeric', min: '1', max: '65535' })),

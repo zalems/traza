@@ -4493,7 +4493,8 @@ button.integ-enlace:hover {
   color: var(--signal);
 }
 
-/* el chasis: X17 y X15 son casi cuadrados, y el detalle va al lado; X7 y X2 son apaisados, y va abajo */
+/* el chasis: los de placas paradas (X17, X15 y la MA5680T) son casi cuadrados, y el detalle va al lado;
+   los de placas acostadas (X7, X2, MA5683T, MA5608T) son apaisados, y va abajo */
 .chasis {
   display: grid;
   gap: 16px 24px;
@@ -4516,11 +4517,13 @@ button.integ-enlace:hover {
   max-height: 580px;
 }
 
-.chasis-x7 {
+.chasis-x7,
+.chasis-t6 {
   max-width: 780px;
 }
 
-.chasis-x2 {
+.chasis-x2,
+.chasis-t2 {
   max-width: 920px;
 }
 
@@ -4745,6 +4748,10 @@ button.integ-enlace:hover {
   margin: 10px 0 12px;
 }
 
+.chasis-chips.anchos {
+  grid-template-columns: repeat(auto-fill, minmax(98px, 1fr));
+}
+
 .chasis-chip {
   display: grid;
   align-content: center;
@@ -4757,6 +4764,7 @@ button.integ-enlace:hover {
   background: transparent;
   color: var(--ink);
   text-align: left;
+  min-width: 0;
 }
 
 .chasis-chip:hover {
@@ -4769,9 +4777,11 @@ button.integ-enlace:hover {
 }
 
 .chasis-chip span {
+  overflow: hidden;
   color: var(--muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -4977,7 +4987,9 @@ button.integ-enlace:hover {
   }
 
   .chasis-x17 .chasis-numero,
-  .chasis-x15 .chasis-numero {
+  .chasis-x15 .chasis-numero,
+  .chasis-t21 .chasis-numero,
+  .chasis-t19 .chasis-numero {
     display: none;
   }
 }

@@ -1,6 +1,7 @@
 """Una OLT Huawei de mentira para las pruebas: responde SNMP v2c (GET, GETNEXT y
-GETBULK) con las tablas que traza lee de una MA5800/EA5800 y atiende Telnet como
-ella. No sale de la máquina (127.0.0.1) y no necesita nada instalado.
+GETBULK) con las tablas que traza lee de una MA5800/EA5800 (o de una MA5680T y
+sus hermanas, según las placas que se le pongan) y atiende Telnet como ella. No
+sale de la máquina (127.0.0.1) y no necesita nada instalado.
 
     olt = OltFalsa(api)          # api: el módulo ftth-api cargado (se usan sus funciones BER)
     olt.puerto, olt.telnet       # dónde atiende (UDP y TCP)
@@ -30,6 +31,45 @@ def chasis_x17():
     return {0: "H901CIUA", 9: "H903MPLA", 10: "H903MPLA", 18: "H901GPHF", 19: "H901GPHF", 20: "H901PILA", 21: "H901PILA"}
 
 
+def chasis_ma5680t():
+    """Una MA5680T de 21 pulgadas (ETSI) como la figura de Huawei: energía en 21 y 22, interfaz
+    universal en 0, control en 9 y 10, subida en 19 y 20; tres placas GPON de 16, 8 y 4 puertos."""
+    return {0: "H801CITD", 1: "H805GPFD", 2: "H802GPBD", 3: "H801GPBC", 9: "H801SCUN", 10: "H801SCUN",
+            19: "H801X2CS", 20: "H801GICF", 21: "H801PRTE", 22: "H801PRTE"}
+
+
+def chasis_ma5680t_iec():
+    """La de 19 pulgadas (IEC): control en 7 y 8, subida en 17 y 18, energía en 19 y 20."""
+    return {0: "H801CITD", 1: "H802GPBD", 16: "H805GPFD", 7: "H801SCUN", 8: "H801SCUN",
+            17: "H801GICF", 18: "H801GICF", 19: "H801PRTE", 20: "H801PRTE"}
+
+
+def chasis_ma5683t():
+    """Una MA5683T: seis slots de servicio (0 a 5), control en 6 y 7, subida en 8 y 9, energía en 10 y 11, interfaz universal en 12."""
+    return {0: "H805GPFD", 1: "H802GPBD", 6: "H801SCUN", 7: "H801SCUN", 8: "H801GICF", 9: "H801GICF",
+            10: "H801PRTE", 11: "H801PRTE", 12: "H801CITD"}
+
+
+def chasis_ma5608t(dos_fuentes=False):
+    """Una MA5608T: dos slots de servicio (0 y 1), control en 2 y 3 y la energía en 4 (o dos placas de la mitad, en 4 y 5)."""
+    placas = {0: "H805GPFD", 1: "H802GPBD", 2: "H801MCUD", 3: "H801MCUD", 4: "H801MPWC"}
+    if dos_fuentes:
+        placas.update({4: "H801MPWE", 5: "H801MPWE"})
+    return placas
+
+
+def puertos_de(nombre):
+    """Qué puertos trae una placa, por su nombre: ('pon' o 'eth', cuántos); (None, 0) si no trae."""
+    tipo = nombre[4:]
+    if tipo[:2] in ("GP", "XG"):
+        return "pon", {"GPBC": 4, "GPBD": 8}.get(tipo, 16)
+    if tipo[:3] in ("SCU", "MCU") or (tipo[:2] == "MP" and tipo[:3] != "MPW"):
+        return "eth", 4  # las placas de control
+    if tipo[:2] in ("GI", "X2"):
+        return "eth", 2  # las de subida
+    return None, 0
+
+
 class OltFalsa:
     def __init__(self, api, community="lectura-de-prueba", placas=None, onts_por_puerto=3, puertos_con_onts=4,
                  usuario="traza", clave="Clave-de-la-olt", nombre="OLT-DE-PRUEBA", utc=-180, host="127.0.0.1",
@@ -45,17 +85,20 @@ class OltFalsa:
         self.lenta = 0.0  # segundos que demora cada respuesta
         self.nombre_pon = "GPON 0/{slot}/{puerto}"  # cómo nombra sus puertos PON (ifName)
         self.muda = False  # no contesta (como con la comunidad equivocada)
+        self.sin_placas = False  # no entrega la tabla de sus placas
+        self.tope = 0  # si no es 0: cuántas filas le entran en una respuesta (si le piden más, contesta tooBig)
         self.onts = {}  # índice 'ifIndex.ont' -> {sn, descripcion, en_linea, causa, cayo, distancia, rx}
         self.pon, self.eth = [], []
         n = 100
         for slot, nombre_placa in sorted(self.placas.items()):
-            tipo = nombre_placa[4:6]
-            if tipo in ("GP", "XG"):
-                for puerto in range(16):
+            tipo, cuantos = puertos_de(nombre_placa)
+            for puerto in range(cuantos):
+                if tipo == "pon":
                     self.pon.append((GPON + slot * 8192 + puerto * 256, slot, puerto))
-            elif tipo == "MP":
-                for puerto in range(4):
+                else:
                     self.eth.append((ETH + slot * 8192 + puerto * 64, slot, puerto))
+        # Una sola subida conectada: el primer puerto de la primera placa de subida o, si no hay, de la de control.
+        self.subida = next((i for i, (_, slot, _) in enumerate(self.eth) if self.placas[slot][4:6] in ("GI", "X2")), 0)
         for ifindex, slot, puerto in self.pon[:puertos_con_onts]:
             for ont in range(onts_por_puerto):
                 n += 1
@@ -129,6 +172,7 @@ class OltFalsa:
 
         andando = time.time() - self.arranque
         poner("1.3.6.1.2.1.1.1.0", texto("Huawei Integrated Access Software"))
+        poner("1.3.6.1.2.1.1.2.0", (0x06, a.ber_oid("1.3.6.1.4.1.2011.2.999")[2:]))  # (un número cualquiera, de mentira)
         poner("1.3.6.1.2.1.1.3.0", (0x43, int(andando * 100 + 8640000).to_bytes(4, "big")))
         poner("1.3.6.1.2.1.1.5.0", texto(self.nombre))
         with self.candado:
@@ -151,7 +195,7 @@ class OltFalsa:
                 poner(f"{XPON}.23.1.{col}.{ifindex}", entero(valor))
         total = sum(1 for o in onts.values() if o["en_linea"])
         for n, (ifindex, slot, puerto) in enumerate(self.eth):
-            arriba = n == 0  # una sola subida conectada
+            arriba = n == self.subida
             poner(f"1.3.6.1.2.1.2.2.1.8.{ifindex}", entero(1 if arriba else 6))
             poner(f"1.3.6.1.2.1.31.1.1.1.1.{ifindex}", texto(f"ethernet0/{slot}/{puerto}"))
             poner(f"1.3.6.1.2.1.31.1.1.1.6.{ifindex}", contador(int(andando * total * 5000000) + 10 ** 11 if arriba else 0))
@@ -161,7 +205,7 @@ class OltFalsa:
         poner("1.3.6.1.2.1.31.1.1.1.1.1", texto("meth0"))
         poner("1.3.6.1.2.1.31.1.1.1.1.2", texto("vlanif100"))
         poner("1.3.6.1.2.1.2.2.1.8.1", entero(1))
-        for slot, nombre in self.placas.items():
+        for slot, nombre in ({} if self.sin_placas else self.placas).items():
             poner(f"{SLOT}.3.0.{slot}", texto(f"{nombre}_0_Board"))
             poner(f"{SLOT}.8.0.{slot}", entero(2))
             poner(f"{SLOT}.21.0.{slot}", texto(nombre))
@@ -222,6 +266,10 @@ class OltFalsa:
                     enlaces.append(enlace(oid, tabla.get(oid, (0x81, b""))))
             elif tipo in (0xA1, 0xA5):  # GETNEXT, GETBULK
                 veces = 1 if tipo == 0xA1 else max(1, min(int.from_bytes(max_rep, "big"), 60))
+                if self.tope and veces > self.tope:
+                    error = a.ber_tlv(0xA2, a.ber_tlv(0x02, rid) + a.ber_entero(1) + a.ber_entero(0) + a.ber_tlv(0x30, b""))
+                    self.sock.sendto(a.ber_tlv(0x30, a.ber_entero(1) + a.ber_tlv(0x04, comunidad) + error), de)
+                    continue
                 for oid in pedidos:
                     actual = oid
                     for _ in range(veces):

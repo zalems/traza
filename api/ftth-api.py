@@ -2991,9 +2991,18 @@ def novedades_olt(onts: list, pon: list, nombres_caja: dict, leido, u: dict, his
 #       "consola": {"protocolo": "ssh", "puerto": 22, "usuario": "…", "clave": "…"},
 #       "utc": -180, "panel": null, "leer": true}]}}}
 # La comunidad y la clave entran por el visor y no vuelven a salir del servidor.
-# Por ahora se leen OLT Huawei (MA5800 y EA5800), con las tablas de HUAWEI-XPON-MIB.
+# Por ahora se leen OLT Huawei (MA5800 y EA5800, y la familia anterior: MA5600T, MA5680T, MA5603T,
+# MA5683T y MA5608T), con las tablas de HUAWEI-XPON-MIB.
 
-MODELOS_OLT = ("MA5800-X17", "MA5800-X15", "MA5800-X7", "MA5800-X2", "EA5800-X17", "EA5800-X15", "EA5800-X7", "EA5800-X2")
+MODELOS_OLT = ("MA5800-X17", "MA5800-X15", "MA5800-X7", "MA5800-X2", "EA5800-X17", "EA5800-X15", "EA5800-X7", "EA5800-X2",
+               # La familia anterior (placas H80x): la MA5680T y la MA5600T son el mismo chasis, de 21 pulgadas (ETSI,
+               # 16 placas de servicio) o de 19 (IEC, 14); la MA5683T y la MA5603T, el de 6; la MA5608T, el de 2.
+               "MA5680T-ETSI", "MA5680T-IEC", "MA5683T", "MA5608T", "MA5600T-ETSI", "MA5600T-IEC", "MA5603T")
+# Cada chasis que se sabe dibujar, con el nombre con que se lo muestra cuando no se eligió el modelo
+# (el de una MA5800 y el de una EA5800 son el mismo; el de una MA5600T y una MA5680T, también).
+CHASIS = {"X17": "MA5800-X17 / EA5800-X17", "X15": "MA5800-X15 / EA5800-X15", "X7": "MA5800-X7 / EA5800-X7",
+          "X2": "MA5800-X2 / EA5800-X2", "T21": "MA5600T / MA5680T de 21 pulgadas (ETSI)",
+          "T19": "MA5600T / MA5680T de 19 pulgadas (IEC)", "T6": "MA5603T / MA5683T", "T2": "MA5608T"}
 HOST_VALIDO = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.\-:]*[A-Za-z0-9])?")
 MAX_OLTS_RED = 16
 UTC_OLT = -180  # minutos: la hora del reloj de la OLT respecto de UTC, si no se indica (Argentina)
@@ -3005,6 +3014,7 @@ LECTURAS_S = 900  # el historial de la potencia de cada ONT leída directo: un p
 SNMP_SIN_DATO = 2147483647  # lo que Huawei devuelve cuando no hay lectura
 
 SYS_DESCR, SYS_ENCENDIDA, SYS_NOMBRE = "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.3.0", "1.3.6.1.2.1.1.5.0"
+SYS_OBJETO = "1.3.6.1.2.1.1.2.0"  # qué equipo es, según el fabricante (un número por modelo)
 IF_ESTADO = "1.3.6.1.2.1.2.2.1.8"  # IF-MIB ifOperStatus
 IF_NOMBRE = "1.3.6.1.2.1.31.1.1.1.1"  # ifName: 'GPON 0/18/3', 'ethernet0/9/0'
 IF_ENTRA = "1.3.6.1.2.1.31.1.1.1.6"  # ifHCInOctets
@@ -3026,6 +3036,16 @@ ESTADOS_SLOT = {2: "normal", 3: "falla", 5: "sin-confirmar", 7: "ausente", 8: "f
 ESTADOS_IF = {1: "up", 2: "down", 6: "ausente"}
 NOMBRE_PUERTO = re.compile(r"\s*([A-Za-z][A-Za-z0-9\-_ ]*?)\s*(\d{1,2})/(\d{1,2})/(\d{1,3})\s*")
 NOMBRE_PLACA = re.compile(r"H\d{3}[A-Z0-9]{4,5}")
+# El tipo de placa suelto ('GPBD', 'SCUN'), por si la OLT lo da sin el 'H801' de adelante.
+TIPO_PLACA = re.compile(r"\b(?!GPON\b|EPON\b)(GP[A-Z]{2}|XG[A-Z]{2}|EP[A-Z]{2}|SCU[A-Z]|MCU[A-Z]|MP[LSW][A-Z]|PRT[A-Z]|PI[LS][A-Z]"
+                        r"|CI[TU][A-Z]|GIC[A-Z]|X[12]C[A-Z]|NXED)\b")
+
+
+def nombre_placa(valor):
+    """El nombre de una placa en lo que la OLT dice de un slot ('H801GPBD_0_Board' -> 'H801GPBD'); None si no hay."""
+    t = str(valor or "").upper()
+    m = NOMBRE_PLACA.search(t) or TIPO_PLACA.search(t)
+    return m.group(0) if m else None
 
 
 def ber_largo(n: int) -> bytes:
@@ -3213,7 +3233,14 @@ class Snmp:
         los octetos tal como vienen (números de serie, fechas)."""
         out, actual, prefijo = [], base, base + "."
         while len(out) < limite:
-            filas = self._pedir(0xA5, [actual], 0, de_a, espera)
+            try:
+                filas = self._pedir(0xA5, [actual], 0, de_a, espera)
+            except IntegracionError as err:
+                # tooBig: la respuesta no le entra al equipo en un mensaje. Se le pide de a menos filas.
+                if str(err) == "respondió con el error SNMP 1" and de_a > 1:
+                    de_a = max(1, de_a // 4)
+                    continue
+                raise
             if not filas:
                 break
             for oid, tipo, contenido in filas:
@@ -3264,13 +3291,18 @@ def puerto_gpon(indice: int):
 
 
 def rol_placa(nombre) -> str:
-    """Para qué es una placa de Huawei, por su nombre ('H901GPHF'): pon, control, energia, interfaz, uplink, ventilador u otra."""
+    """Para qué es una placa de Huawei, por su nombre ('H901GPHF', 'H801SCUN'): pon,
+    control, energia, interfaz, uplink, ventilador u otra."""
     n = str(nombre or "").upper()
-    tipo = n[4:6] if re.match(r"H\d{3}", n) else n[:2]
-    if tipo in ("GP", "XG", "XS", "XE", "TW", "CG", "CS", "EP", "TG"):
+    tipo = n[4:] if re.match(r"H\d{3}", n) else n
+    if tipo[:2] in ("GP", "XG", "XS", "XE", "TW", "CG", "CS", "EP", "TG"):
         return "pon"
-    return {"MP": "control", "PI": "energia", "CI": "interfaz", "NX": "uplink", "OX": "uplink", "OG": "uplink",
-            "ET": "uplink", "GI": "uplink", "X1": "uplink", "X2": "uplink", "SP": "uplink", "FM": "ventilador"}.get(tipo, "otra")
+    if tipo[:3] == "MPW" or tipo[:2] in ("PR", "PI"):  # PRTE (MA5600T), MPWC (MA5608T), PILA (MA5800)
+        return "energia"
+    if tipo[:3] in ("SCU", "MCU") or tipo[:2] == "MP":  # SCUN (MA5600T), MCUD (MA5608T), MPLA y MPSC (MA5800)
+        return "control"
+    return {"CI": "interfaz", "NX": "uplink", "OX": "uplink", "OG": "uplink", "ET": "uplink", "GI": "uplink",
+            "X1": "uplink", "X2": "uplink", "SP": "uplink", "FM": "ventilador", "FC": "ventilador"}.get(tipo[:2], "otra")
 
 
 def estado_placa(texto) -> str:
@@ -3288,26 +3320,82 @@ def estado_placa(texto) -> str:
 
 
 def chasis_de(modelo, placas: list):
-    """Qué chasis es ('X17', 'X15', 'X7', 'X2'): por el modelo si se sabe y, si no,
-    por dónde tiene las placas de control y de energía. None si no alcanza."""
-    m = re.search(r"X\s?-?(17|15|7|2)(?!\d)", str(modelo or "").upper())
+    """Qué chasis es (una clave de CHASIS): por el modelo si se sabe y, si no, por
+    dónde tiene las placas de control y de energía. None si no alcanza: solo se
+    contesta con algo que un chasis tiene y los demás no.
+    MA5800/EA5800 (placas H90x): X17, X15, X7, X2. La familia anterior (placas
+    H80x): T21 y T19 (MA5600T y MA5680T, de 21 y de 19 pulgadas), T6 (MA5603T y
+    MA5683T) y T2 (MA5608T)."""
+    texto = str(modelo or "").upper().replace(" ", "")
+    if re.search(r"56[08]3T", texto):
+        return "T6"
+    if "5608T" in texto:
+        return "T2"
+    grande = re.search(r"56[08]0T", texto) is not None  # MA5600T o MA5680T: falta saber si de 21 o de 19 pulgadas
+    if grande and ("ETSI" in texto or "IEC" in texto):
+        return "T21" if "ETSI" in texto else "T19"
+    m = None if grande else re.search(r"X-?(17|15|7|2)(?!\d)", texto)
     if m:
         return "X" + m.group(1)
     slots = {p["slot"] for p in placas}
     control = {p["slot"] for p in placas if p["rol"] == "control"}
     energia = {p["slot"] for p in placas if p["rol"] == "energia"}
-    if not slots:
+    if not control and not energia:
+        return None
+    # De qué familia son las placas manda sobre el nombre que le hayan puesto a la OLT.
+    nombres = [str(p.get("nombre") or "").upper() for p in placas]
+    viejas = sum(1 for n in nombres if n.startswith("H8") or n[:3] in ("SCU", "MCU", "PRT"))
+    nuevas = sum(1 for n in nombres if n.startswith("H9"))
+    if viejas > nuevas or (grande and not nuevas):
+        if control & {9, 10} or energia & {21, 22}:
+            return "T21"
+        if energia & {19, 20} or 8 in control or (7 in control and max(slots) > 12):
+            return "T19"
+        if grande:
+            return None
+        if 6 in control or energia & {10, 11}:
+            return "T6"
+        if control & {2, 3} and max(slots) <= 5:
+            return "T2"
         return None
     if max(slots) >= 20 or 10 in control or energia & {20, 21}:
         return "X17"
     if control and control <= {3, 4} and max(slots) <= 4:
         return "X2"
-    if control & {8, 9}:
-        if max(slots) >= 12 or energia & {18, 19}:
-            return "X15"
-        if 8 in control or energia & {10, 11}:
-            return "X7"
+    if energia & {18, 19} or (8 in control and max(slots) >= 12):
+        return "X15"
+    if energia & {10, 11}:
+        return "X7"
     return None
+
+
+def modelo_de(chasis, dice: str = "") -> str:
+    """El modelo de la lista que corresponde a un chasis; `dice` es lo que se sabe de
+    la familia (lo que la OLT dice ser, o el modelo elegido): el chasis de una
+    MA5800 y el de una EA5800 son el mismo, y el de una MA5680T y una MA5600T también."""
+    dice = str(dice or "").upper()
+    if chasis in ("X17", "X15", "X7", "X2"):
+        return ("EA5800-" if "EA58" in dice else "MA5800-") + chasis
+    if chasis in ("T21", "T19"):
+        return ("MA5600T-" if "5600T" in dice else "MA5680T-") + ("ETSI" if chasis == "T21" else "IEC")
+    if chasis == "T6":
+        return "MA5603T" if "5603T" in dice else "MA5683T"
+    return "MA5608T" if chasis == "T2" else None
+
+
+def nombre_modelo(modelo) -> str:
+    """Un modelo de la lista, como se lo muestra: 'MA5680T-ETSI' -> 'MA5680T de 21 pulgadas (ETSI)'."""
+    m = str(modelo or "")
+    if m.endswith("-ETSI"):
+        return f"{m[:-5]} de 21 pulgadas (ETSI)"
+    if m.endswith("-IEC"):
+        return f"{m[:-4]} de 19 pulgadas (IEC)"
+    return m
+
+
+def nombre_chasis(modelo, chasis):
+    """Cómo se le dice al chasis que se dibuja: el modelo, si se sabe; si no, el que sale de las placas."""
+    return nombre_modelo(modelo) if modelo else CHASIS.get(chasis)
 
 
 def equipo_de(e, red_id=None):
@@ -3452,13 +3540,12 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
             placas, optica = {}, {}
             try:
                 nombres = columna(HW_SLOT + ".21", limite=400)
-                if not any(NOMBRE_PLACA.search(str(v or "")) for _, v in nombres):
+                if not any(nombre_placa(v) for _, v in nombres):
                     nombres = columna(HW_SLOT + ".3", limite=400)
                 for indice, v in nombres:
                     marco, _, slot = indice.partition(".")
-                    m = NOMBRE_PLACA.search(str(v or "").upper())
-                    if marco == "0" and slot.isdigit() and m:
-                        placas[int(slot)] = {"nombre": m.group(0)}
+                    if marco == "0" and slot.isdigit() and nombre_placa(v):
+                        placas[int(slot)] = {"nombre": nombre_placa(v)}
                 for indice, v in columna(HW_SLOT + ".8", limite=400):
                     marco, _, slot = indice.partition(".")
                     if marco == "0" and slot.isdigit() and int(slot) in placas and isinstance(v, int):
@@ -3554,12 +3641,13 @@ def placas_de_lectura(lectura: dict) -> list:
     """Las placas de una lectura directa, con sus puertos, para dibujar el chasis."""
     por_slot = {slot: {"slot": slot, "nombre": p.get("nombre"), "estado": p.get("estado") or "normal", "detalle": None,
                        "rol": rol_placa(p.get("nombre")), "puertos": []} for slot, p in lectura.get("placas", {}).items()}
+    sabidas = set(por_slot)  # los slots con placa, si la OLT entregó la tabla de sus placas
     for ifindex, p in sorted(lectura["puertos"].items()):
         if p["marco"] != 0:
             continue
         # La OLT lista los puertos de un slot aunque no tenga la placa puesta (la de control de
         # reserva): si se sabe qué placas hay y ahí no hay ninguna, no se inventa una.
-        if por_slot and p["slot"] not in por_slot and p.get("estado_n") != 1:
+        if sabidas and p["slot"] not in sabidas and p.get("estado_n") != 1:
             continue
         placa = por_slot.setdefault(p["slot"], {"slot": p["slot"], "nombre": None, "estado": "normal", "detalle": None,
                                                 "rol": "pon" if p["tipo"] == "pon" else "uplink", "puertos": []})
@@ -3648,8 +3736,11 @@ def pistas_snmp(eq: dict, desde: str) -> list:
     puerto = eq["snmp"]["puerto"]
     origen = (f"desde {desde}, que es la dirección de este servidor" if desde and es_privada(eq["host"])
               else "desde la IP pública con la que este servidor sale a internet")
-    out = ["La comunidad: tiene que ser exactamente la de lectura de la OLT (snmp-agent community read …). Si no coincide, la OLT no contesta nada.",
-           f"El permiso: la OLT tiene que aceptar pedidos SNMP {origen} (si la comunidad tiene una lista de acceso, que la incluya)."]
+    out = ["La comunidad: tiene que ser exactamente la de lectura de la OLT (se ve con «display snmp-agent community read»), "
+           "y la OLT tiene que hablar SNMP v2c («snmp-agent sys-info version v2c»). Si la comunidad no coincide, la OLT no contesta nada.",
+           f"El permiso: la OLT tiene que aceptar pedidos SNMP {origen}. Una Huawei que filtra SNMP por dirección "
+           "(sysman firewall snmp) solo les contesta a los rangos que tiene permitidos: el de este servidor se agrega con "
+           "«sysman ip-access snmp DESDE HASTA». Si la comunidad tiene una lista de acceso, que también lo incluya."]
     if not es_privada(eq["host"]):
         out.append(f"El camino: el router que está delante de la OLT tiene que dejar pasar UDP {puerto} hacia ella (un reenvío de puerto, mejor limitado a la IP de este servidor).")
     else:
@@ -3673,7 +3764,7 @@ def probar_snmp(eq: dict) -> dict:
         desde = s.desde()
         empezo = time.monotonic()
         try:
-            sistema = s.get([SYS_DESCR, SYS_NOMBRE, SYS_ENCENDIDA])
+            sistema = s.get([SYS_DESCR, SYS_NOMBRE, SYS_ENCENDIDA, SYS_OBJETO])
         except IntegracionError as err:
             out.update({"texto": f"La OLT {err}.", "pistas": pistas_snmp(eq, desde)})
             return out
@@ -3685,19 +3776,20 @@ def probar_snmp(eq: dict) -> dict:
             out["datos"].append(["Nombre", nombre])
         if texto_corto(sistema.get(SYS_DESCR), 120):
             out["datos"].append(["Equipo", texto_corto(sistema.get(SYS_DESCR), 120)])
+        if re.fullmatch(r"[0-9.]{5,80}", str(sistema.get(SYS_OBJETO) or "")):
+            out["datos"].append(["Identificador", sistema.get(SYS_OBJETO)])
         if isinstance(ticks, int):
             out["datos"].append(["Encendida", f"hace {texto_duracion(ticks // 100)}"])
         falta = []
         placas = []
         try:
             nombres = s.recorrer(HW_SLOT + ".21", limite=400)
-            if not any(NOMBRE_PLACA.search(str(v or "")) for _, v in nombres):
+            if not any(nombre_placa(v) for _, v in nombres):
                 nombres = s.recorrer(HW_SLOT + ".3", limite=400)
             for indice, v in nombres:
                 marco, _, slot = indice.partition(".")
-                m = NOMBRE_PLACA.search(str(v or "").upper())
-                if marco == "0" and slot.isdigit() and m:
-                    placas.append({"slot": int(slot), "nombre": m.group(0), "rol": rol_placa(m.group(0))})
+                if marco == "0" and slot.isdigit() and nombre_placa(v):
+                    placas.append({"slot": int(slot), "nombre": nombre_placa(v), "rol": rol_placa(nombre_placa(v))})
         except IntegracionError:
             pass
         if placas:
@@ -3715,18 +3807,21 @@ def probar_snmp(eq: dict) -> dict:
                         placas.append({"slot": p[2], "nombre": None, "rol": "pon"})
         except IntegracionError:
             pass
-        # El modelo: si la OLT lo dice en su descripción o en su nombre; si no, el chasis sale de
-        # dónde tiene las placas (la familia, MA o EA, no se distingue así: queda la elegida).
+        # El chasis: el que la OLT dice ser en su descripción o en su nombre y, si no lo dice (o no
+        # alcanza: una MA5680T puede ser de 21 o de 19 pulgadas), el que sale de dónde tiene las placas.
         dice = f"{sistema.get(SYS_DESCR)} {nombre}".upper().replace(" ", "")
         modelo = next((m for m in MODELOS_OLT if m in dice), None)
-        chasis = chasis_de(modelo, placas)
-        if modelo:
-            out["modelo"] = modelo
-            out["datos"].append(["Chasis", modelo])
-        elif chasis:
-            familia = "EA5800" if "EA58" in dice or str(eq.get("modelo") or "").startswith("EA") else "MA5800"
-            out["modelo"] = f"{familia}-{chasis}"
-            out["datos"].append(["Chasis", f"{chasis} (por dónde tiene las placas)"])
+        familia = modelo or next((f for f in ("MA5680T", "MA5600T") if f in dice), None)
+        chasis = chasis_de(familia, placas)
+        elegido = chasis_de(eq.get("modelo"), []) if eq.get("modelo") else None
+        if chasis:
+            out["modelo"] = modelo or modelo_de(chasis, f"{dice} {eq.get('modelo') or ''}")
+            como = "lo dice la OLT" if modelo else "por dónde tiene las placas"
+            otro = f"; el modelo elegido es otro: {nombre_modelo(eq['modelo'])}" if elegido and elegido != chasis else ""
+            out["datos"].append(["Chasis", f"{nombre_modelo(out['modelo'])} ({como}{otro})"])
+        elif familia and not elegido:
+            out["datos"].append(["Chasis", f"dice ser una {familia}, pero sin sus placas de control y de energía no se sabe "
+                                           "si es la de 21 o la de 19 pulgadas: elegí el modelo"])
         if pon:
             out["datos"].append(["Puertos PON", str(pon)])
         else:
@@ -3757,7 +3852,8 @@ def probar_snmp(eq: dict) -> dict:
             out["parcial"] = True
             out["texto"] += f" Pero no entregó {', '.join(falta)}."
             out["pistas"] = ["Responde lo general y no las tablas de Huawei: la comunidad puede tener una vista limitada "
-                             "(snmp-agent mib-view) o la OLT no es una MA5800/EA5800."]
+                             "(snmp-agent mib-view) o la OLT no es una Huawei de las que traza lee "
+                             "(MA5800 y EA5800; MA5600T, MA5680T, MA5603T, MA5683T y MA5608T)."]
     return out
 
 
@@ -4572,6 +4668,14 @@ class Integraciones:
                 if admin:
                     item["conexion"] = self.conexion_json(eq)
             item["chasis"] = chasis_de(item["modelo"], item["placas"])
+            item["chasis_nombre"] = nombre_chasis(item["modelo"], item["chasis"])
+            # Un modelo elegido que no es el que dicen las placas: se dibuja el elegido, con el aviso.
+            suyo = chasis_de(None, item["placas"]) if item["modelo"] else None
+            if suyo and item["chasis"] and suyo != item["chasis"]:
+                aviso = (f"Por dónde tiene las placas de control y de energía parece {CHASIS[suyo]}, y el modelo "
+                         f"indicado es {item['chasis_nombre']}: el dibujo puede no ser el suyo.")
+                item["nota"] = f"{item['nota']} {aviso}" if item.get("nota") else aviso
+                item["chasis_dudoso"] = True
             out.append(item)
         for eq in registrados:  # las cargadas de las que no hay nada leído
             if eq["id"] in usados:
@@ -4588,6 +4692,7 @@ class Integraciones:
             item = {"id": eq["id"], "registrado": True, "nombre": eq["nombre"], "origen": "directa", "panel": eq["panel"],
                     "modelo": eq["modelo"] or None, "firmware": None, "leido": None, "error": error, "placas": [],
                     "chasis": chasis_de(eq["modelo"], [])}
+            item["chasis_nombre"] = nombre_chasis(item["modelo"], item["chasis"])
             if admin:
                 item["conexion"] = self.conexion_json(eq)
             out.append(item)

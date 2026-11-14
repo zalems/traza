@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from olt_falsa import OltFalsa, chasis_x17
+from olt_falsa import OltFalsa, chasis_ma5608t, chasis_ma5680t, chasis_ma5680t_iec, chasis_ma5683t, chasis_x2, chasis_x17
 from test_integraciones import Falso, puerto_libre
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -112,6 +112,19 @@ class OltDirectaTest(unittest.TestCase):
         self.assertEqual(api.rol_placa("H903MPLA"), "control")
         self.assertEqual(api.rol_placa("H901PILA"), "energia")
         self.assertEqual(api.rol_placa("H901CIUA"), "interfaz")
+        self.assertEqual(api.rol_placa("H901MPSC"), "control")
+        # Las de la familia anterior (MA5600T, MA5680T, MA5683T, MA5608T).
+        for nombre, rol in (("H801SCUN", "control"), ("H802SCUN", "control"), ("H801MCUD", "control"), ("H801PRTE", "energia"),
+                            ("H801MPWC", "energia"), ("H801MPWE", "energia"), ("H801CITD", "interfaz"), ("H801GICF", "uplink"),
+                            ("H801X2CS", "uplink"), ("H802GPBD", "pon"), ("H805GPFD", "pon"), ("H801GPBC", "pon"),
+                            ("SCUN", "control"), ("GPBD", "pon"), ("H801FCBB", "ventilador"), ("", "otra"), (None, "otra")):
+            self.assertEqual(api.rol_placa(nombre), rol, nombre)
+        self.assertEqual(api.nombre_placa("H802GPBD_0_Board"), "H802GPBD")
+        self.assertEqual(api.nombre_placa("h801scun"), "H801SCUN")
+        self.assertEqual(api.nombre_placa("Board GPBD"), "GPBD")  # sin el H80x de adelante
+        self.assertIsNone(api.nombre_placa("Board"))
+        self.assertIsNone(api.nombre_placa("GPON Service Board"))  # una descripción no es el nombre de una placa
+        self.assertIsNone(api.nombre_placa(None))
         self.assertEqual(api.estado_placa("Active_normal"), "normal")
         self.assertEqual(api.estado_placa("Failed"), "falla")
         # 2026-11-13 18:30:15 en el reloj de la OLT (UTC−3) son las 21:30:15 UTC.
@@ -132,6 +145,45 @@ class OltDirectaTest(unittest.TestCase):
         self.assertEqual(api.chasis_de(None, placas(control=[3], pon=[1], energia=[0])), "X2")
         self.assertIsNone(api.chasis_de(None, placas(pon=[1, 2])))
         self.assertIsNone(api.chasis_de("otra cosa", []))
+        # La familia anterior: por el modelo elegido...
+        for modelo, chasis in (("MA5680T-ETSI", "T21"), ("MA5680T-IEC", "T19"), ("MA5600T-ETSI", "T21"), ("MA5600T-IEC", "T19"),
+                               ("MA5683T", "T6"), ("MA5603T", "T6"), ("MA5608T", "T2")):
+            self.assertEqual(api.chasis_de(modelo, []), chasis, modelo)
+            self.assertEqual(api.chasis_de(api.modelo_de(chasis, modelo), []), chasis, modelo)
+            self.assertEqual(api.modelo_de(chasis, modelo), modelo)
+            self.assertIn(modelo, api.MODELOS_OLT)
+        self.assertEqual(api.modelo_de("X2", "EA5800"), "EA5800-X2")
+        self.assertEqual(api.modelo_de("X17"), "MA5800-X17")
+        self.assertEqual(api.modelo_de("T21"), "MA5680T-ETSI")
+        self.assertEqual(api.nombre_modelo("MA5680T-ETSI"), "MA5680T de 21 pulgadas (ETSI)")
+        self.assertEqual(api.nombre_modelo("MA5600T-IEC"), "MA5600T de 19 pulgadas (IEC)")
+        self.assertEqual(api.nombre_modelo("EA5800-X2"), "EA5800-X2")
+
+        # ... o por dónde tiene las placas de control y de energía (los nombres H80x dicen que es de esa familia).
+        def de(juego):
+            return [{"slot": s, "nombre": n, "rol": api.rol_placa(n)} for s, n in juego.items()]
+
+        for juego, chasis in ((chasis_ma5680t(), "T21"), (chasis_ma5680t_iec(), "T19"), (chasis_ma5683t(), "T6"),
+                              (chasis_ma5608t(), "T2"), (chasis_ma5608t(dos_fuentes=True), "T2"),
+                              (chasis_x2(), "X2"), (chasis_x17(), "X17")):
+            self.assertEqual(api.chasis_de(None, de(juego)), chasis, juego)
+        # Sin algo que distinga un chasis de los demás, no se contesta: un control en el 9 (X17 o X15), en el 7 (MA5680T de 19
+        # o MA5683T) o en el 8 sin nada más allá del slot 11 (X15 o X7).
+        self.assertIsNone(api.chasis_de(None, placas(control=[9], pon=[1, 2])))
+        self.assertIsNone(api.chasis_de(None, placas(control=[8], pon=[1, 2])))
+        self.assertIsNone(api.chasis_de(None, de({0: "H802GPBD", 7: "H801SCUN"})))
+        # Con una sola placa de control puesta (sin la de reserva) también se reconoce.
+        self.assertEqual(api.chasis_de(None, de({1: "H802GPBD", 9: "H801SCUN", 21: "H801PRTE"})), "T21")
+        self.assertEqual(api.chasis_de(None, de({1: "H802GPBD", 7: "H801SCUN", 19: "H801PRTE"})), "T19")
+        self.assertEqual(api.chasis_de(None, de({0: "H802GPBD", 7: "H801SCUN", 10: "H801PRTE", 12: "H801CITD"})), "T6")
+        self.assertEqual(api.chasis_de(None, de({0: "H802GPBD", 3: "H801MCUD", 4: "H801MPWC"})), "T2")
+        # Una OLT que dice ser una MA5680T: cuál de las dos, lo dicen sus placas; sin ellas no se adivina.
+        self.assertEqual(api.chasis_de("MA5680T", de(chasis_ma5680t_iec())), "T19")
+        self.assertEqual(api.chasis_de("MA5680T", de(chasis_ma5680t())), "T21")
+        self.assertIsNone(api.chasis_de("MA5680T", []))
+        self.assertIsNone(api.chasis_de("MA5680T", [{"slot": 1, "nombre": None, "rol": "pon"}]))
+        # Y si alguien le dejó ese nombre a una MA5800, mandan las placas.
+        self.assertEqual(api.chasis_de("MA5680T", de(chasis_x17())), "X17")
 
     def test_lectura_por_snmp(self):
         olt = OltFalsa(api, community="otra-comunidad")
@@ -180,6 +232,16 @@ class OltDirectaTest(unittest.TestCase):
         self.assertEqual({m["sn"]: m for m in api.medidas_directas(cuatro, "Prueba")}["HWTC00000065"]["interfaz"], "0/1/0")
         self.assertEqual(api.placas_de_lectura(cuatro)[1]["puertos"][2]["interfaz"], "0/1/2")
         olt.nombre_pon = "GPON 0/{slot}/{puerto}"
+        # Una OLT a la que no le entran 40 filas en una respuesta (contesta tooBig): se le pide de a menos y se lee igual.
+        olt.tope = 12
+        antes = olt.pedidos
+        cinco = api.leer_huawei(eq)
+        self.assertEqual(len(cinco["onts"]), 13)
+        self.assertEqual(sum(1 for p in cinco["puertos"].values() if p["tipo"] == "pon"), 32)
+        self.assertEqual(len(cinco["placas"]), 5)
+        self.assertEqual(cinco["notas"], [])
+        self.assertLess(olt.pedidos - antes, 200)
+        olt.tope = 0
         # Con otra comunidad, la OLT no contesta.
         mala = api.equipo_de({"id": "abcdef02", "host": "127.0.0.1", "snmp": {"puerto": olt.puerto, "community": "x"}})
         with self.assertRaises(api.IntegracionError) as ctx:
@@ -382,6 +444,100 @@ class OltDirectaTest(unittest.TestCase):
         data = self.ok("GET", f"/api/olt?red={red}")
         self.assertEqual(data["configurada"]["panel"], False)
         self.assertEqual(data["equipos"][0]["error"], "no se lee: está en pausa")
+
+    def test_la_familia_ma5600t(self):
+        """Una MA5680T (y sus hermanas): se lee con las mismas tablas y se reconoce su chasis."""
+        olt = OltFalsa(api, community=COMUNIDAD, placas=chasis_ma5680t(), nombre="MA5680T")
+        self.addCleanup(olt.cerrar)
+        red = self.red("Familia anterior")
+        data = self.ok("POST", "/api/olt/equipos/probar", {"red": red, "equipo": self.equipo(olt, consola="")})
+        (snmp,) = data["pruebas"]
+        self.assertTrue(snmp["ok"], snmp)
+        self.assertNotIn("parcial", snmp)
+        datos = dict(snmp["datos"])
+        self.assertEqual(datos["Chasis"], "MA5680T de 21 pulgadas (ETSI) (por dónde tiene las placas)")
+        self.assertEqual(datos["Puertos PON"], "28")  # una placa de 16, una de 8 y una de 4
+        self.assertEqual(datos["Identificador"], "1.3.6.1.4.1.2011.2.999")
+        for placa in ("H801CITD en 0", "H805GPFD en 1", "H801SCUN en 9", "H801X2CS en 19", "H801PRTE en 22"):
+            self.assertIn(placa, datos["Placas"])
+        self.assertEqual(data["detectado"], {"nombre": "MA5680T", "modelo": "MA5680T-ETSI"})
+        # Si se eligió otro modelo, la prueba lo dice.
+        data = self.ok("POST", "/api/olt/equipos/probar", {"red": red, "equipo": self.equipo(olt, consola="", modelo="MA5800-X17")})
+        self.assertEqual(dict(data["pruebas"][0]["datos"])["Chasis"],
+                         "MA5680T de 21 pulgadas (ETSI) (por dónde tiene las placas; el modelo elegido es otro: MA5800-X17)")
+        data = self.ok("POST", "/api/olt/equipos/probar", {"red": red, "equipo": self.equipo(olt, consola="", modelo="MA5600T-ETSI")})
+        self.assertEqual(dict(data["pruebas"][0]["datos"])["Chasis"], "MA5600T de 21 pulgadas (ETSI) (por dónde tiene las placas)")
+        # Cargada sin elegir el modelo: el tablero la entrega con su chasis y cada placa con su papel y sus puertos.
+        eq_id = self.cargar(red, olt, consola="", nombre="OLT Carcarañá")
+        self.leer(red)
+        data = self.ok("GET", f"/api/olt?red={red}")
+        self.assertEqual(data["errores"], [])
+        self.assertEqual(data["resumen"]["onts"], 12)
+        (equipo,) = data["equipos"]
+        self.assertEqual((equipo["id"], equipo["chasis"], equipo["chasis_nombre"], equipo["modelo"]),
+                         (eq_id, "T21", "MA5600T / MA5680T de 21 pulgadas (ETSI)", None))
+        self.assertEqual([(p["slot"], p["nombre"], p["rol"], len(p["puertos"])) for p in equipo["placas"]],
+                         [(0, "H801CITD", "interfaz", 0), (1, "H805GPFD", "pon", 16), (2, "H802GPBD", "pon", 8), (3, "H801GPBC", "pon", 4),
+                          (9, "H801SCUN", "control", 4), (10, "H801SCUN", "control", 4), (19, "H801X2CS", "uplink", 2),
+                          (20, "H801GICF", "uplink", 2), (21, "H801PRTE", "energia", 0), (22, "H801PRTE", "energia", 0)])
+        placas = {p["slot"]: p for p in equipo["placas"]}
+        self.assertEqual([p["estado"] for p in placas[19]["puertos"]], ["up", "ausente"])
+        self.assertEqual((placas[1]["puertos"][0]["interfaz"], placas[1]["puertos"][0]["tx"]), ("0/1/0", 3.2))
+        self.assertEqual([p["interfaz"] for p in data["pon"]], ["0/1/0", "0/1/1", "0/1/2", "0/1/3"])
+        self.assertNotIn("nota", equipo)
+        # Con el modelo elegido, se la nombra como se eligió.
+        self.ok("PUT", f"/api/olt/equipos/{eq_id}", {"red": red, "equipo": self.equipo(olt, consola="", nombre="OLT Carcarañá",
+                                                                                    comunidad="", modelo="MA5680T-ETSI")})
+        (equipo,) = self.ok("GET", f"/api/olt?red={red}")["equipos"]
+        self.assertEqual((equipo["chasis"], equipo["chasis_nombre"], equipo["modelo"]),
+                         ("T21", "MA5680T de 21 pulgadas (ETSI)", "MA5680T-ETSI"))
+        self.assertNotIn("nota", equipo)
+        # Con un modelo que no es el que dicen sus placas: se dibuja el elegido, con el aviso.
+        self.ok("PUT", f"/api/olt/equipos/{eq_id}", {"red": red, "equipo": self.equipo(olt, consola="", nombre="OLT Carcarañá",
+                                                                                    comunidad="", modelo="MA5800-X17")})
+        (equipo,) = self.ok("GET", f"/api/olt?red={red}")["equipos"]
+        self.assertEqual((equipo["chasis"], equipo["chasis_dudoso"]), ("X17", True))
+        self.assertEqual(equipo["nota"], "Por dónde tiene las placas de control y de energía parece MA5600T / MA5680T de 21 pulgadas (ETSI), "
+                                         "y el modelo indicado es MA5800-X17: el dibujo puede no ser el suyo.")
+        # Las otras tres: la de 19 pulgadas, la MA5683T y la MA5608T (con una placa de energía o con dos).
+        for juego, chasis, pon in ((chasis_ma5680t_iec(), "T19", 24), (chasis_ma5683t(), "T6", 24),
+                                   (chasis_ma5608t(), "T2", 24), (chasis_ma5608t(dos_fuentes=True), "T2", 24)):
+            otra = OltFalsa(api, community=COMUNIDAD, placas=juego, puertos_con_onts=1)
+            try:
+                eq = api.equipo_de({"id": "abcdef03", "nombre": "Otra", "host": "127.0.0.1",
+                                    "snmp": {"puerto": otra.puerto, "community": COMUNIDAD}})
+                lectura = api.leer_huawei(eq)
+                placas = api.placas_de_lectura(lectura)
+                self.assertEqual(api.chasis_de(None, placas), chasis, juego)
+                self.assertEqual({p["slot"]: p["nombre"] for p in placas}, juego)
+                self.assertEqual(sum(len(p["puertos"]) for p in placas if p["rol"] == "pon"), pon, juego)
+                self.assertEqual(len(api.medidas_directas(lectura, "Otra")), 3)
+                prueba = api.probar_snmp(eq)
+                self.assertEqual(prueba["modelo"], api.modelo_de(chasis), juego)
+            finally:
+                otra.cerrar()
+        # Una OLT que dice ser una MA5680T y no entrega sus placas: no se adivina cuál de las dos es; se elige.
+        olt.sin_placas = True
+        data = self.ok("POST", "/api/olt/equipos/probar", {"red": red, "equipo": self.equipo(olt, consola="")})
+        (snmp,) = data["pruebas"]
+        self.assertTrue(snmp["parcial"])
+        self.assertIn("no entregó las placas", snmp["texto"])
+        self.assertIn("MA5680T", snmp["pistas"][0])
+        self.assertEqual(dict(snmp["datos"])["Chasis"], "dice ser una MA5680T, pero sin sus placas de control y de energía "
+                                                        "no se sabe si es la de 21 o la de 19 pulgadas: elegí el modelo")
+        self.assertIsNone(data["detectado"]["modelo"])
+        # (con otra zona horaria la lectura empieza de nuevo, completa)
+        self.ok("PUT", f"/api/olt/equipos/{eq_id}", {"red": red, "equipo": self.equipo(olt, consola="", nombre="OLT Carcarañá",
+                                                                                    comunidad="", utc=-240)})
+        self.leer(red)
+        (equipo,) = self.ok("GET", f"/api/olt?red={red}")["equipos"]
+        self.assertEqual((equipo["chasis"], equipo["chasis_nombre"]), (None, None))
+        self.assertEqual([(p["slot"], p["nombre"], p["rol"]) for p in equipo["placas"] if p["rol"] == "pon"],
+                         [(1, None, "pon"), (2, None, "pon"), (3, None, "pon")])
+        self.ok("PUT", f"/api/olt/equipos/{eq_id}", {"red": red, "equipo": self.equipo(olt, consola="", nombre="OLT Carcarañá",
+                                                                                    comunidad="", utc=-240, modelo="MA5680T-IEC")})
+        (equipo,) = self.ok("GET", f"/api/olt?red={red}")["equipos"]
+        self.assertEqual((equipo["chasis"], equipo["chasis_nombre"]), ("T19", "MA5680T de 19 pulgadas (IEC)"))
 
     def test_olt_del_panel_con_su_chasis(self):
         panel = Falso("panel")
