@@ -50,6 +50,37 @@ await elegir('Benítez Raúl 1');
 await page.waitForFunction(() => /dBm/.test(document.querySelector('#ficha')?.textContent ?? ''), null, { timeout: 30000 });
 comprobar(/Contrato|contrato/.test(await texto('#ficha')), 'la ficha del cliente trae su contrato y su ONT');
 
+// --- La carta del nodo: la placa de la OLT va adentro de la carta, con todos sus puertos
+// (llegó a quedar fija sobre la pantalla, tapando el título, por una regla del tablero de la OLT).
+await elegir('Nodo Central');
+await page.locator('#ficha').getByRole('button', { name: 'Carta de empalme' }).click();
+await page.waitForSelector('#carta .equipo.olt .puerto');
+const placaEnCarta = () => page.evaluate(() => {
+  const placa = document.querySelector('#carta .equipo.olt');
+  const marco = (placa.closest('.carta-visor') ?? document.querySelector('#carta .carta-cuerpo')).getBoundingClientRect();
+  const cab = document.querySelector('#carta .carta-cab').getBoundingClientRect();
+  const r = placa.getBoundingClientRect();
+  const puertos = [...placa.querySelectorAll('.puerto')].map((p) => p.getBoundingClientRect());
+  return {
+    posicion: getComputedStyle(placa).position,
+    bajoElTitulo: r.top >= cab.bottom - 1,
+    aLoAncho: r.left >= marco.left - 1 && r.right <= marco.right + 1,
+    conSusPuertos: puertos.length === 16 && puertos.every((p) => p.top >= r.top - 1 && p.bottom <= r.bottom + 1),
+  };
+});
+let placa = await placaEnCarta();
+comprobar(placa.posicion === 'relative' && placa.bajoElTitulo && placa.aLoAncho && placa.conSusPuertos,
+  `en columnas, la placa de la OLT queda adentro de la carta, con sus 16 puertos (${JSON.stringify(placa)})`);
+await page.locator('#carta .carta-modo').getByRole('button', { name: 'Libre' }).click();
+await page.waitForSelector('#carta .carta-lienzo .equipo.olt .puerto');
+placa = await placaEnCarta();
+comprobar(placa.posicion === 'absolute' && placa.bajoElTitulo && placa.conSusPuertos,
+  `y en el modo libre también (${JSON.stringify(placa)})`);
+await page.locator('#carta .carta-modo').getByRole('button', { name: 'Columnas' }).click();
+await page.waitForSelector('#carta .carta-diagrama .equipo.olt');
+await page.keyboard.press('Escape');
+await page.waitForSelector('#ficha .ficha-titulo');
+
 // --- El tablero de la OLT no deja nada trabado al cerrarse
 await page.evaluate(() => { window.ftth.herramientas.ficha.cerrar(); window.ftth.herramientas.red.seleccionar(null); });
 await page.click('.olt-boton');
