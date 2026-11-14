@@ -220,9 +220,13 @@ class OltFalsa:
         poner("1.3.6.1.2.1.31.1.1.1.1.1", texto("meth0"))
         poner("1.3.6.1.2.1.31.1.1.1.1.2", texto("vlanif100"))
         poner("1.3.6.1.2.1.2.2.1.8.1", entero(1))
+        control = sorted(slot for slot, nombre in self.placas.items() if puertos_de(nombre)[0] == "eth" and nombre[4:6] not in ("GI", "X2"))
         for slot, nombre in ({} if self.sin_placas else self.placas).items():
-            poner(f"{SLOT}.3.0.{slot}", texto(f"{nombre}_0_Board"))
+            poner(f"{SLOT}.3.0.{slot}", texto(f"{nombre}_0_{slot}"))
+            # De las dos placas de control, la primera es la activa (1) y la otra, la de reserva (2); a las demás no les corresponde (255).
+            poner(f"{SLOT}.6.0.{slot}", entero(control.index(slot) + 1 if slot in control[:2] else 255))
             poner(f"{SLOT}.8.0.{slot}", entero(2))
+            poner(f"{SLOT}.13.0.{slot}", entero(30 + slot % 10))
             poner(f"{SLOT}.21.0.{slot}", texto(nombre))
         for indice, o in onts.items():
             poner(f"{XPON}.43.1.3.{indice}", texto(o["sn"]))

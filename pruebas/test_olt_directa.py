@@ -128,6 +128,8 @@ class OltDirectaTest(unittest.TestCase):
         self.assertIsNone(api.nombre_placa(None))
         self.assertEqual(api.estado_placa("Active_normal"), "normal")
         self.assertEqual(api.estado_placa("Failed"), "falla")
+        self.assertEqual([api.modo_placa(t) for t in ("Active_normal", "Standby_normal", "Normal", "", None)],
+                         ["activa", "reserva", None, None, None])
         # 2026-11-13 18:30:15 en el reloj de la OLT (UTC−3) son las 21:30:15 UTC.
         sin_zona = (2026).to_bytes(2, "big") + bytes([11, 13, 18, 30, 15, 0])
         self.assertEqual(api.fecha_snmp(sin_zona, -180), "2026-11-13T21:30:15Z")
@@ -210,6 +212,9 @@ class OltDirectaTest(unittest.TestCase):
                          ("pon:0/1/0", "0/1/0", "up", 3.2, None))  # el tráfico necesita dos lecturas
         self.assertEqual(placas[1]["puertos"][8]["estado"], "down")  # un puerto sin ONT
         self.assertEqual([p["estado"] for p in placas[3]["puertos"]], ["up", "ausente", "ausente", "ausente"])
+        # De las dos placas de control, cuál trabaja y cuál está de reserva; y la temperatura de cada placa.
+        self.assertEqual([(s, placas[s]["modo"], placas[s]["temperatura"]) for s in (0, 1, 3, 4)],
+                         [(0, None, 30), (1, None, 31), (3, "activa", 33), (4, "reserva", 34)])
         self.assertEqual(api.chasis_de(None, list(placas.values())), "X2")
 
         # Una lectura rápida: solo el estado; de quién es cada ONT y cuánto recibe quedan de la anterior.
@@ -616,7 +621,9 @@ class OltDirectaTest(unittest.TestCase):
                           equipo["host_panel"]), ("p1", "ALVATIC-MA5800-01", "panel", "MA5800-X17", "X17", False, "10.10.0.2"))
         placas = {x["slot"]: x for x in equipo["placas"]}
         self.assertEqual(sorted(placas), [9, 18, 20])  # los slots vacíos no van
-        self.assertEqual((placas[9]["rol"], placas[9]["estado"], placas[9]["detalle"]), ("control", "normal", "Active_normal"))
+        self.assertEqual((placas[9]["rol"], placas[9]["estado"], placas[9]["detalle"], placas[9]["modo"]),
+                         ("control", "normal", "Active_normal", "activa"))
+        self.assertIsNone(placas[18]["modo"])
         self.assertEqual(placas[20]["rol"], "energia")
         subida = placas[9]["puertos"][0]
         self.assertEqual((subida["clave"], subida["estado"], subida["entra"], subida["uplink"]), ("eth:0/9/0", "up", 909000000.0, True))

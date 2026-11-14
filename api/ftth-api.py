@@ -3322,6 +3322,13 @@ def estado_placa(texto) -> str:
     return "otro"
 
 
+def modo_placa(texto):
+    """Si una placa de control es la activa o la de reserva, según el estado que escribe la OLT
+    ('Active_normal', 'Standby_normal'); None si no lo dice."""
+    t = normalizado(texto)
+    return "activa" if t.startswith("active") else "reserva" if t.startswith("standby") else None
+
+
 def chasis_de(modelo, placas: list):
     """Qué chasis es (una clave de CHASIS): por el modelo si se sabe y, si no, por
     dónde tiene las placas de control y de energía. None si no alcanza: solo se
@@ -3564,6 +3571,19 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
             except IntegracionError as err:
                 notas.append(f"no entregó sus placas ({err})")
             try:
+                # hwSlotWorkMode (1 principal, 2 de reserva; 255 no corresponde) y hwSlotTemperature (°C).
+                for col, campo in ((6, "modo"), (13, "temperatura")):
+                    for indice, v in columna(f"{HW_SLOT}.{col}", limite=400) if placas else []:
+                        marco, _, slot = indice.partition(".")
+                        if marco != "0" or not slot.isdigit() or int(slot) not in placas or not isinstance(v, int):
+                            continue
+                        if campo == "modo" and v in (1, 2):
+                            placas[int(slot)]["modo"] = "activa" if v == 1 else "reserva"
+                        elif campo == "temperatura" and -40 <= v <= 150:
+                            placas[int(slot)]["temperatura"] = v
+            except IntegracionError:
+                pass  # sin eso, las placas se ven igual
+            try:
                 for col, campo, escala in ((4, "tx", 0.01), (1, "temperatura", 1), (2, "tension", 0.01), (3, "corriente", 1)):
                     for indice, v in columna(f"{HW_PON_OPTICA}.{col}", limite=2000):
                         if indice.isdigit() and isinstance(v, int) and v != SNMP_SIN_DATO and abs(v) < 100000:
@@ -3667,7 +3687,8 @@ def clave_puerto(tipo, marco, slot, puerto) -> str:
 def placas_de_lectura(lectura: dict) -> list:
     """Las placas de una lectura directa, con sus puertos, para dibujar el chasis."""
     por_slot = {slot: {"slot": slot, "nombre": p.get("nombre"), "estado": p.get("estado") or "normal", "detalle": None,
-                       "rol": rol_placa(p.get("nombre")), "puertos": []} for slot, p in lectura.get("placas", {}).items()}
+                       "rol": rol_placa(p.get("nombre")), "modo": p.get("modo"), "temperatura": p.get("temperatura"), "puertos": []}
+                for slot, p in lectura.get("placas", {}).items()}
     sabidas = set(por_slot)  # los slots con placa, si la OLT entregó la tabla de sus placas
     for ifindex, p in sorted(lectura["puertos"].items()):
         if p["marco"] != 0:
@@ -3710,6 +3731,7 @@ def placas_de_panel(chasis, interfaces) -> list:
         rol = roles.get(str(b.get("role") or "").lower()) or rol_placa(nombre)
         por_slot[slot] = {"slot": slot, "nombre": nombre, "estado": estado_placa(b.get("status")),
                           "detalle": texto_corto(b.get("status"), 40), "rol": "pon" if rol == "otra" and puertos else rol,
+                          "modo": modo_placa(b.get("status")),
                           "puertos": [{"puerto": p["port"], "tipo": "pon", "nombre": f"GPON 0/{slot}/{p['port']}",
                                        "clave": clave_puerto("pon", 0, slot, p["port"]), "interfaz": f"0/{slot}/{p['port']}",
                                        "estado": None, "velocidad": None, "entra": None, "sale": None} for p in puertos]}

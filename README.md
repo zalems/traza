@@ -758,12 +758,16 @@ de energía (tampoco su consola las lista, con `display board 0`): en el
 dibujo esos lugares dicen "energía" y que la OLT no las informa, en vez de
 mostrarse vacíos.
 
+El tráfico de los puertos PON tomado de la tabla de Huawei (0.12.3) se
+comprobó en esa misma OLT con `herramientas/muestras-snmp.py --red N`: los
+contadores estándar de 64 bits de sus puertos GPON no se mueven, los de la
+tabla de Huawei sí (y los estándar de 32 bits también), la tabla se lee en
+0,6 s y lo que baja por todos los puertos PON (1,72 Gb/s) coincide con lo que
+entra por el puerto de subida (1,73 Gb/s). Una lectura completa de las 973
+ONT lleva unos 42 s (la potencia de cada ONT es lo que más tarda).
+
 No se pudo probar, y hay que mirarlo en el uso real:
 
-- El tráfico de los puertos PON de una MA5680T tomado de la tabla de Huawei
-  (0.12.3): se escribió con la documentación de la MIB y se probó con la OLT
-  de mentira; `herramientas/muestras-snmp.py --red N` muestra qué contadores
-  se mueven en la OLT de verdad.
 - La lectura directa contra una MA5800 o una EA5800 de verdad, y contra las
   otras de la familia anterior (MA5683T, MA5608T): el nombre de cada placa,
   cuánto tarda en dar la potencia de todas las ONT (la pide de a 20, con 10

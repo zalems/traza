@@ -22,6 +22,7 @@ const MODELOS = [
   ['MA5603T', 'Huawei MA5603T (6 placas de servicio)'],
 ];
 const ROLES = { pon: 'PON', control: 'control', energia: 'energía', interfaz: 'interfaz universal', uplink: 'subida', ventilador: 'ventiladores', otra: '' };
+const MODO_PLACA = { activa: 'activa', reserva: 'de reserva' }; // de las dos placas de control, cuál trabaja
 const ESTADO_PLACA = { normal: 'normal', falla: 'con falla', 'sin-confirmar': 'sin confirmar', ausente: 'no está puesta', apagada: 'apagada', 'no-coincide': 'no es la configurada', otro: '' };
 const NIVEL_PON = { caido: 'caida', parcial: 'mal', atencion: 'atencion', bien: 'bien' };
 const TEXTO_PON = { caido: 'caído: ninguna ONT en línea', parcial: 'la mitad o más sin señal', atencion: 'con señal al límite', bien: 'bien' };
@@ -334,7 +335,7 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
       const marcada = elegido?.equipo === equipo.id && elegido.slot === lugar.slot;
       const sin = placa ? null : slotSinPlaca(lugar, informaEnergia);
       const rotulo = placa
-        ? `Slot ${lugar.slot}: ${placa.nombre ?? 'placa'}${ROLES[placa.rol] ? `, ${ROLES[placa.rol]}` : ''}${placa.puertos.length ? `, ${placa.puertos.length} puertos` : ''}${placa.estado !== 'normal' ? `, ${ESTADO_PLACA[placa.estado] || placa.estado}` : ''}`
+        ? `Slot ${lugar.slot}: ${placa.nombre ?? 'placa'}${ROLES[placa.rol] ? `, ${ROLES[placa.rol]}` : ''}${MODO_PLACA[placa.modo] ? `, ${MODO_PLACA[placa.modo]}` : ''}${placa.puertos.length ? `, ${placa.puertos.length} puertos` : ''}${placa.estado !== 'normal' ? `, ${ESTADO_PLACA[placa.estado] || placa.estado}` : ''}`
         : sin.rotulo;
       const g = s('g', {
         class: `chasis-slot ${placa ? `con-placa rol-${placa.rol}${placa.estado !== 'normal' ? ' con-falla' : ''}` : `vacio${sin.sinInformar ? ' sin-informar' : ''}`}${marcada ? ' elegida' : ''}`,
@@ -500,8 +501,9 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const placa = equipo.placas.find((p) => p.slot === elegido.slot);
     if (!placa) return h('div.chasis-detalle', {});
     const puerto = placa.puertos.find((p) => p.clave === elegido.puerto) ?? null;
-    const que = [ROLES[placa.rol] ? `Placa de ${ROLES[placa.rol]}` : 'Placa', placa.puertos.length ? `${placa.puertos.length} puertos` : null,
-      placa.detalle ?? (ESTADO_PLACA[placa.estado] || null)].filter(Boolean).join(' · ');
+    const que = [ROLES[placa.rol] ? `Placa de ${ROLES[placa.rol]}` : 'Placa', MODO_PLACA[placa.modo] ?? null,
+      placa.puertos.length ? `${placa.puertos.length} puertos` : null, placa.detalle ?? (ESTADO_PLACA[placa.estado] || null),
+      Number.isFinite(placa.temperatura) ? `${placa.temperatura} °C` : null].filter(Boolean).join(' · ');
     return h('div.chasis-detalle', {},
       h('h4.chasis-placa-titulo', { text: `Slot ${placa.slot}${placa.nombre ? ` · ${placa.nombre}` : ''}` }),
       h(`p.olt-nota${placa.estado === 'normal' ? '' : '.alerta'}`, { text: que }),

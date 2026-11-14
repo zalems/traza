@@ -293,8 +293,16 @@ comprobar(!/sin-informar/.test(interfaz.clases) && interfaz.texto === 'interfaz 
   'el slot 0 está vacío y dice que es el lugar de la interfaz universal');
 comprobar((await lugar(1)).texto === null && /Slot 1: vacío$/.test((await lugar(1)).rotulo), 'un slot de servicio vacío no lleva rótulo');
 comprobar(/Energía\s*la OLT no informa sus placas de energía \(slots 19 y 20\)/.test(await texto('.chasis-detalle')), 'y el resumen del equipo también lo dice');
-await tocarPlaca(17);
+// De las dos placas de control, cuál trabaja y cuál está de reserva, y la temperatura de cada placa.
+await tocarPlaca(7);
 await page.waitForSelector('.chasis-chips');
+comprobar(/Placa de control · activa · 4 puertos · normal · 37 °C/.test(await texto('.chasis-detalle')), `la placa de control del 7 es la activa: ${(await texto('.chasis-detalle')).slice(0, 90)}`);
+await tocarPlaca(8);
+await page.waitForFunction(() => /Slot 8/.test(document.querySelector('.chasis-placa-titulo')?.textContent ?? ''));
+comprobar(/Placa de control · de reserva · 4 puertos · normal · 38 °C/.test(await texto('.chasis-detalle')), 'y la del 8, la de reserva');
+comprobar(/H802SCUN, control, de reserva, 4 puertos/.test(await page.getAttribute('.chasis-slot[data-slot="8"]', 'aria-label')), 'el dibujo también lo dice, para quien no lo ve');
+await tocarPlaca(17);
+await page.waitForFunction(() => /Slot 17/.test(document.querySelector('.chasis-placa-titulo')?.textContent ?? ''));
 comprobar(/Slot 17 · H801X2CS/.test(await texto('.chasis-placa-titulo')) && /Placa de subida · 2 puertos/.test(await texto('.chasis-detalle')),
   'la placa de subida dice qué es');
 comprobar(await sinDesborde(), 'el chasis entra en la pantalla');
