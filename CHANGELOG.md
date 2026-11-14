@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.4 · 14/11/2026
+## 0.12.4 · 14/11/2026 · commit b803ade
 
 Los lugares del chasis que la OLT no informa, y cuál placa de control trabaja.
 
