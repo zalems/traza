@@ -1,5 +1,26 @@
 # Cambios
 
+## 0.12.5 · 14/11/2026 · commit PENDIENTE
+
+La placa de la OLT vuelve a su lugar en la carta de empalme del nodo.
+
+- Desde 0.11.0, en la carta de empalme de un nodo la placa de la OLT (el
+  bloque oscuro con sus puertos PON) no se dibujaba donde va. En *Columnas*
+  quedaba fija sobre el borde izquierdo de la pantalla: tapaba el título de la
+  carta, no se movía al desplazarla, los puertos que no entraban en la
+  pantalla no se alcanzaban y, con varias placas en el nodo, quedaban una
+  encima de otra. En *Libre* se veía solo su nombre, con los puertos sueltos
+  sobre la bandeja. Lo causaba una regla de estilo del tablero de la OLT, que
+  usaba la clase `olt`, la misma que lleva ese bloque: ahora esa regla es solo
+  del tablero (`#olt`).
+- Era solo el dibujo: las placas, sus puertos y las uniones cargadas están
+  como se guardaron.
+- Las pruebas en navegador abren ahora la carta del nodo y comprueban que la
+  placa esté adentro de la carta, debajo del título y con sus 16 puertos, en
+  los dos modos (con la regla vieja fallan).
+- Sin cambios en la API ni en los datos. Volver a 0.12.4: `git checkout
+  55deb90` y `./instalar.sh`.
+
 ## 0.12.4 · 14/11/2026 · commit b803ade
 
 Los lugares del chasis que la OLT no informa, y cuál placa de control trabaja.

@@ -3507,7 +3507,9 @@ button.integ-enlace:hover {
   fill: var(--ink);
 }
 
-.olt {
+/* Por su id y no por la clase «olt»: esa clase también la lleva la placa de OLT de una
+   carta de empalme (.equipo.olt), que no tiene que quedar fija sobre la pantalla. */
+#olt {
   position: fixed;
   z-index: 7;
   inset: 0;
@@ -4320,7 +4322,7 @@ button.integ-enlace:hover {
 
 @media (max-width: 899px) {
   /* en el teléfono el tablero ocupa toda la pantalla */
-  .olt {
+  #olt {
     padding: 0;
     background: var(--paper);
   }

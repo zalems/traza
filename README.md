@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.4
+# Plataforma FTTH · kit 0.12.5
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,

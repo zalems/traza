@@ -25,7 +25,7 @@ pruebas/navegador/todas.sh                            # o una sola: node pruebas
 | `humo.mjs` | Entrar, cargar la red y prender la señal; y que la red cargue aunque los servidores del mapa de fondo no contesten. |
 | `olt.mjs` | El tablero de la OLT: resumen y novedades, puertos PON, ONT (buscar, filtrar, la historia de una), cajas, los anillos de las cajas en el mapa y la ficha de la NAP. |
 | `olt-historia.mjs` | Las curvas, lo que cayó y volvió, un puerto que pierde potencia, «todas las redes», una red sin OLT y un usuario de una sola red. |
-| `regresion.mjs` | Lo de antes: prender y apagar la señal, la ficha de la NAP con Wispro, la carta con luz, la ficha del cliente, el panel de usuarios. |
+| `regresion.mjs` | Lo de antes: prender y apagar la señal, la ficha de la NAP con Wispro, la carta con luz, la ficha del cliente, la carta del nodo con la placa de la OLT en su lugar (en columnas y en libre), el panel de usuarios. |
 | `equipos.mjs` | Los equipos: el chasis de la OLT del panel (X17) con cada slot en su lugar, placas y puertos con su detalle y su tráfico; en la red sin OLT, cargar una (X2) desde el formulario, probar la conexión (mal y bien), verla dibujada, sus ONT, un puerto que se corta, cambiarla, que quien no administra no la toque, y quitarla. Después, una MA5680T como una leída de verdad: que se reconozca por sus placas, su chasis de 19 pulgadas con cada slot en su lugar, los lugares de las placas de energía que la OLT no informa, el de 21 al elegirlo a mano (con el aviso), y la geometría de todos los chasis (ningún slot se pisa ni se sale). |
 
 El panel falso tiene cinco puertos PON: uno caído entero, una caja caída hace
