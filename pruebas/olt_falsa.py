@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 GPON = 0xFA000000  # ifIndex de 'GPON 0/slot/puerto': GPON + slot * 8192 + puerto * 256
 ETH = 234881024  # ifIndex de 'ethernet0/slot/puerto': ETH + slot * 8192 + puerto * 64
 XPON = "1.3.6.1.4.1.2011.6.128.1.1.2"
+PON_TRAFICO = "1.3.6.1.4.1.2011.6.128.1.1.4.21.1"  # hwGponOltEthernetStatisticTable: 15 = recibidos, 30 = enviados
 SLOT = "1.3.6.1.4.1.2011.6.3.3.2.1"
 SIN_DATO = 2147483647
 
@@ -73,8 +74,11 @@ def puertos_de(nombre):
 class OltFalsa:
     def __init__(self, api, community="lectura-de-prueba", placas=None, onts_por_puerto=3, puertos_con_onts=4,
                  usuario="traza", clave="Clave-de-la-olt", nombre="OLT-DE-PRUEBA", utc=-180, host="127.0.0.1",
-                 puerto_snmp=0, puerto_telnet=0):
+                 puerto_snmp=0, puerto_telnet=0, trafico="estandar"):
         self.api = api
+        # De dónde sale el tráfico de los puertos PON: 'estandar' (los contadores de IF-MIB, como una MA5800),
+        # 'huawei' (los de IF-MIB quietos y la tabla de Huawei andando, como una MA5680T) o 'ambos'.
+        self.trafico = trafico
         self.community = community
         self.usuario, self.clave, self.nombre, self.utc = usuario, clave, nombre, utc
         self.placas = placas or chasis_x2()
@@ -184,8 +188,12 @@ class OltFalsa:
             poner(f"1.3.6.1.2.1.31.1.1.1.1.{ifindex}", texto(self.nombre_pon.format(slot=slot, puerto=puerto)))
             # Por un puerto PON sale la bajada (40 Mb/s por ONT en línea) y entra la subida (4 Mb/s).
             en_linea = sum(1 for o in suyas if o["en_linea"])
-            poner(f"1.3.6.1.2.1.31.1.1.1.6.{ifindex}", contador(int(andando * en_linea * 500000) + 10 ** 9))
-            poner(f"1.3.6.1.2.1.31.1.1.1.10.{ifindex}", contador(int(andando * en_linea * 5000000) + 10 ** 10))
+            entra, sale = int(andando * en_linea * 500000) + 10 ** 9, int(andando * en_linea * 5000000) + 10 ** 10
+            poner(f"1.3.6.1.2.1.31.1.1.1.6.{ifindex}", contador(0 if self.trafico == "huawei" else entra))
+            poner(f"1.3.6.1.2.1.31.1.1.1.10.{ifindex}", contador(0 if self.trafico == "huawei" else sale))
+            if self.trafico != "estandar":
+                poner(f"{PON_TRAFICO}.15.{ifindex}", contador(entra))
+                poner(f"{PON_TRAFICO}.30.{ifindex}", contador(sale))
             poner(f"1.3.6.1.2.1.31.1.1.1.15.{ifindex}", (0x42, (2500).to_bytes(2, "big")))
             # El módulo de cada puerto emite aunque no tenga ONT (los de la segunda placa, sin módulo).
             con_modulo = slot == self.pon[0][1]

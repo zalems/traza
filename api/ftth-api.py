@@ -3022,6 +3022,9 @@ IF_SALE = "1.3.6.1.2.1.31.1.1.1.10"  # ifHCOutOctets
 IF_VELOCIDAD = "1.3.6.1.2.1.31.1.1.1.15"  # ifHighSpeed (Mb/s)
 HW_SLOT = "1.3.6.1.4.1.2011.6.3.3.2.1"  # HUAWEI-DEVICE-MIB hwSlotTable (marco.slot): 3 descripción, 8 estado, 21 placa
 HW_XPON = "1.3.6.1.4.1.2011.6.128.1.1.2"  # HUAWEI-XPON-MIB
+# hwGponOltEthernetStatisticTable, por ifIndex: lo que pasó por cada puerto PON (15 = octetos recibidos, 30 = enviados).
+# En la MA5600T y sus hermanas es de donde sale el tráfico de los puertos GPON: sus contadores estándar (IF-MIB) no se mueven.
+HW_PON_TRAFICO = "1.3.6.1.4.1.2011.6.128.1.1.4.21.1"
 HW_PON_OPTICA = HW_XPON + ".23.1"  # hwGponOltOpticsDdmInfoTable (ifIndex): 1 °C, 2 tensión (0,01 V), 3 corriente (mA), 4 emite (0,01 dBm)
 HW_ONT_CONFIG = HW_XPON + ".43.1"  # hwGponDeviceOntConfigInfoTable (ifIndex.ONT): 3 serie, 9 descripción
 HW_ONT_CONTROL = HW_XPON + ".46.1"  # hwGponDeviceOntControlInfoTable: 15 estado (1 en línea), 20 distancia (m), 23 última caída, 24 causa
@@ -3529,11 +3532,19 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
                     puertos[int(indice)][campo] = v
         mono_if = time.monotonic()
         lapso = mono_if - previa["mono_if"] if previa and previa.get("mono_if") else None
-        for i, p in puertos.items():
-            antes = previa["puertos"].get(i, {}) if previa else {}
-            for campo in ("entra", "sale"):
-                a, b = antes.get(campo + "_oct"), p.get(campo + "_oct")
-                p[campo] = round((b - a) * 8 / lapso) if lapso and lapso >= 5 and a is not None and b is not None and b >= a else None
+        # Lo que pasó por cada puerto PON según la tabla de Huawei. Si la OLT no la contesta,
+        # no se le vuelve a pedir hasta la próxima lectura completa.
+        trafico_pon, sin_trafico_pon = {}, False
+        if completa or not previa.get("sin_trafico_pon"):
+            try:
+                for col, campo in ((15, "entra_pon"), (30, "sale_pon")):
+                    for indice, v in columna(f"{HW_PON_TRAFICO}.{col}", limite=2000):
+                        if indice.isdigit() and isinstance(v, int):
+                            trafico_pon.setdefault(int(indice), {})[campo] = v
+            except IntegracionError:
+                trafico_pon, sin_trafico_pon = {}, True
+        else:
+            sin_trafico_pon = True
 
         # --- las placas y la óptica de los puertos PON
         if completa:
@@ -3566,9 +3577,24 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
                 if donde:
                     marco, slot, numero_puerto = (int(x) for x in donde.split("/"))
                     puertos[ifindex] = {"nombre": f"GPON {donde}", "tipo": "pon", "marco": marco, "slot": slot,
-                                        "puerto": numero_puerto, "entra": None, "sale": None}
+                                        "puerto": numero_puerto}
         else:
             placas, optica = previa.get("placas", {}), previa.get("optica", {})
+
+        # --- el tráfico: cuánto cambió cada contador desde la lectura anterior
+        def ritmo(antes, ahora):
+            if not lapso or lapso < 5 or antes is None or ahora is None or ahora < antes:
+                return None
+            return round((ahora - antes) * 8 / lapso)
+
+        for i, p in puertos.items():
+            antes = previa["puertos"].get(i, {}) if previa else {}
+            estandar = [ritmo(antes.get(c + "_oct"), p.get(c + "_oct")) for c in ("entra", "sale")]
+            if p["tipo"] == "pon":
+                p.update(trafico_pon.get(i, {}))
+            propio = [ritmo(antes.get(c + "_pon"), p.get(c + "_pon")) for c in ("entra", "sale")]
+            # De un puerto PON vale la tabla de Huawei si se movió, o si los contadores estándar no dicen nada.
+            p["entra"], p["sale"] = propio if any(propio) or all(v is None for v in estandar) else estandar
 
         # --- las ONT
         onts = {}
@@ -3612,6 +3638,7 @@ def leer_huawei(eq: dict, previa: dict = None, completa: bool = True, con_onts: 
             "sistema": {"descripcion": texto_corto(sistema.get(SYS_DESCR), 200), "nombre": texto_corto(sistema.get(SYS_NOMBRE), 80),
                         "encendida_s": ticks // 100 if isinstance(ticks, int) else None},
             "puertos": puertos, "placas": placas, "optica": optica, "onts": onts, "con_onts": con_onts, "notas": notas,
+            "sin_trafico_pon": sin_trafico_pon,
             "tardo": round(time.monotonic() - empezo, 1), "pedidos": pedidos}
 
 

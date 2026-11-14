@@ -410,7 +410,7 @@ if __name__ == "__main__":
     spec.loader.exec_module(api)  # de la API se usan solo las funciones BER
     OLT = OltFalsa(api, community="lectura-e2e", clave="Clave-olt-e2e", nombre="OLT-CARCA", puerto_snmp=18161, puerto_telnet=18023)
     OLT_T = OltFalsa(api, community="lectura-e2e", clave="Clave-olt-e2e", nombre="MA5680T", placas=chasis_ma5680t(),
-                     puerto_snmp=18162, puerto_telnet=18024)
+                     puerto_snmp=18162, puerto_telnet=18024, trafico="huawei")
     print("Wispro falso en 18091, panel falso en 18092, OLT falsas en UDP 18161 y 18162 (TCP 18023 y 18024)", flush=True)
     try:
         while True:
