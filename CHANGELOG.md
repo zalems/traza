@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.5 · 14/11/2026 · commit PENDIENTE
+## 0.12.5 · 14/11/2026 · commit 0eb8c5e
 
 La placa de la OLT vuelve a su lugar en la carta de empalme del nodo.
 
