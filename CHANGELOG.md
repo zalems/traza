@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.3 · 14/11/2026
+## 0.12.3 · 14/11/2026 · commit 9c3053b
 
 El tráfico de los puertos PON de una MA5680T (y su familia), después de la
 primera lectura de una OLT de verdad.
