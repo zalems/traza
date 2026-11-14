@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.2 · 13/11/2026
+## 0.12.2 · 13/11/2026 · commit 6729a3c
 
 Corrige cómo se escribe el tráfico.
 
