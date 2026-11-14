@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.12.1 · 13/11/2026
+## 0.12.1 · 13/11/2026 · commit b9e1d3b
 
 Las OLT Huawei de la familia anterior a la MA5800 (MA5680T, MA5600T, MA5683T,
 MA5603T y MA5608T) se reconocen y se dibujan con su chasis.
