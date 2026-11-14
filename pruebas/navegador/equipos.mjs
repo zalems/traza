@@ -1,5 +1,5 @@
-// Los equipos: el chasis de cada OLT dibujado como es (X17 del panel, X2 leída directo), el detalle
-// de placas y puertos, y cargar, probar, cambiar y quitar una OLT desde el visor.
+// Los equipos: el chasis de cada OLT dibujado como es (X17 del panel, X2 y MA5680T leídas directo),
+// el detalle de placas y puertos, y cargar, probar, cambiar y quitar una OLT desde el visor.
 //   node equipos.mjs [movil] [oscuro]
 import { abrir, comprobar, terminar, CAPTURAS } from './lib.mjs';
 
@@ -133,7 +133,7 @@ await page.waitForSelector('.olt-resultado.bien', { timeout: 60000 });
 await page.waitForFunction(() => document.querySelectorAll('.olt-resultado.bien').length === 2, null, { timeout: 60000 });
 prueba = await texto('.olt-prueba');
 comprobar(/Bien\s*Lectura por SNMP/.test(prueba) && /Puertos PON\s*32/.test(prueba) && /ONT\s*12 \(12 en línea\)/.test(prueba), 'con la buena, dice lo que la OLT entrega');
-comprobar(/Chasis\s*X2/.test(prueba) && /H901GPHF en 1/.test(prueba), 'reconoce el chasis por sus placas');
+comprobar(/Chasis\s*MA5800-X2 \(por dónde tiene las placas\)/.test(prueba) && /H901GPHF en 1/.test(prueba), 'reconoce el chasis por sus placas');
 comprobar(/Entró con el usuario «traza»/.test(prueba), 'y entra por Telnet');
 comprobar(await page.inputValue('input[name=nombre]') === 'OLT-CARCA', 'toma el nombre que la OLT dice de sí misma');
 comprobar(await sinDesborde(), 'el formulario entra en la pantalla');
@@ -241,5 +241,99 @@ comprobar(/¿Quitar OLT Carcarañá\?/.test(await texto('.olt-form-botones')), '
 await page.click('.olt-form-botones button:has-text("Sí, quitarla")');
 await page.waitForFunction(() => /todavía no tiene una OLT cargada/.test(document.querySelector('.olt-cuerpo')?.textContent ?? ''), null, { timeout: 20000 });
 comprobar(true, 'quitada: la red vuelve a quedar sin OLT');
+
+// --- Una MA5680T (la familia anterior a la MA5800): se reconoce por sus placas y se dibuja con su chasis
+await page.click('.olt-equipo-agregar button:has-text("Agregar una OLT")');
+await page.waitForSelector('.olt-form');
+comprobar(await page.locator('select[name=modelo] option[value="MA5680T-ETSI"]').count() === 1
+  && await page.locator('select[name=modelo] option[value="MA5608T"]').count() === 1, 'el formulario ofrece los modelos de esa familia');
+await page.fill('input[name=host]', '127.0.0.1');
+await page.fill('input[name=snmp_puerto]', '18162');
+await page.fill('input[name=comunidad]', COMUNIDAD);
+await page.click('.olt-form-botones button:has-text("Probar la conexión")');
+await page.waitForSelector('.olt-resultado.bien', { timeout: 60000 });
+prueba = await texto('.olt-prueba');
+comprobar(/Chasis\s*MA5680T de 21 pulgadas \(ETSI\) \(por dónde tiene las placas\)/.test(prueba), `la prueba dice qué chasis es: ${prueba.match(/Chasis.{0,80}/)?.[0]}`);
+comprobar(/H801SCUN en 9/.test(prueba) && /H801PRTE en 21/.test(prueba) && /Puertos PON\s*28/.test(prueba), 'con sus placas y sus 28 puertos PON');
+comprobar(await page.inputValue('input[name=nombre]') === 'MA5680T', 'toma el nombre que la OLT dice de sí misma');
+await page.click('.olt-form-botones button[type=submit]');
+await page.waitForSelector('.chasis-t21', { timeout: 45000 });
+s = await slots();
+v = await ventilador();
+comprobar(Object.keys(s).length === 23, `la MA5680T de 21 pulgadas tiene sus 23 slots (${Object.keys(s).length})`);
+comprobar(s['21'].x === s['22'].x && s['22'].x === s['0'].x && s['21'].y < s['22'].y && s['22'].y < s['0'].y,
+  'a la izquierda, de arriba abajo: energía 21, energía 22 y la interfaz universal (0)');
+comprobar(s['1'].x > s['0'].x && [...Array(17).keys()].every((i) => s[String(i + 2)].x > s[String(i + 1)].x), 'después, los slots 1 a 18 de izquierda a derecha');
+comprobar(s['9'].w > s['8'].w && s['10'].w > s['11'].w && Math.abs(s['9'].w - s['10'].w) < 0.01, 'los dos de control (9 y 10) son más anchos');
+comprobar(s['19'].x === s['20'].x && s['19'].x > s['18'].x && s['19'].y < s['20'].y && Math.abs(s['19'].h - s['20'].h) < 0.01,
+  'a la derecha, las dos placas de subida: la 19 arriba y la 20 abajo');
+comprobar(v.y + v.h < s['1'].y && v.w > v.h, 'los ventiladores van arriba, a todo lo ancho');
+comprobar(Object.values(s).filter((x) => x.placa).length === 10, 'diez placas puestas; el resto, slots vacíos');
+const puertosDe = (slot) => page.locator(`.chasis-slot[data-slot="${slot}"] .chasis-puerto`).count();
+comprobar(await puertosDe(1) === 16 && await puertosDe(2) === 8 && await puertosDe(3) === 4 && await puertosDe(19) === 2,
+  'cada placa con sus puertos: 16, 8 y 4 de PON; 2 en la de subida');
+comprobar(/MA5600T \/ MA5680T de 21 pulgadas \(ETSI\) · lectura directa por SNMP/.test(await texto('.olt-equipo-cab')), 'la tarjeta dice qué chasis es');
+await tocarPlaca(19);
+await page.waitForSelector('.chasis-chips');
+comprobar(/Slot 19 · H801X2CS/.test(await texto('.chasis-placa-titulo')) && /Placa de subida · 2 puertos/.test(await texto('.chasis-detalle')),
+  'la placa de subida dice qué es');
+comprobar(await sinDesborde(), 'el chasis entra en la pantalla');
+await foto('ma5680t');
+// Con el modelo elegido a mano, se dibuja el que se eligió (la de 19 pulgadas lleva el control en 7 y 8).
+await page.click('.olt-equipo-cab button:has-text("Conexión")');
+await page.waitForSelector('.olt-form');
+await page.selectOption('select[name=modelo]', 'MA5680T-IEC');
+await page.click('.olt-form-botones button[type=submit]');
+await page.waitForSelector('.chasis-t19', { timeout: 45000 });
+s = await slots();
+comprobar(Object.keys(s).length === 21 && s['7'].w > s['6'].w && s['8'].w > s['9'].w && s['17'].x === s['18'].x && s['17'].y < s['18'].y
+  && s['19'].x === s['20'].x && s['20'].x === s['0'].x, 'eligiendo la de 19 pulgadas: 21 slots, control en 7 y 8, subida en 17 y 18, energía en 19 y 20');
+comprobar(/MA5680T de 19 pulgadas \(IEC\)/.test(await texto('.olt-equipo-cab')), 'y la tarjeta la nombra como se eligió');
+comprobar(/parece MA5600T \/ MA5680T de 21 pulgadas \(ETSI\), y el modelo indicado es MA5680T de 19 pulgadas \(IEC\)/.test(await texto('.olt-equipo')),
+  'como sus placas dicen otra cosa, avisa que el dibujo puede no ser el suyo');
+comprobar(await sinDesborde(), 'con el aviso, sigue entrando en la pantalla');
+await foto('ma5680t-otro-modelo');
+
+// Los demás chasis de la familia, por su geometría: cada slot en su lugar, sin pisarse y adentro del chasis.
+const geo = await page.evaluate(async () => {
+  const { geometria } = await import('./js/equipos.js');
+  const out = {};
+  for (const [clave, chasis, puestos] of [['T21', 'T21', []], ['T19', 'T19', []], ['T6', 'T6', []], ['T2', 'T2', []], ['T2+5', 'T2', [5]],
+    ['X17', 'X17', []], ['X15', 'X15', []], ['X7', 'X7', []], ['X2', 'X2', []]]) {
+    const g = geometria(chasis, puestos);
+    const cajas = [...g.slots, g.ventilador];
+    const adentro = cajas.every((c) => c.x >= 0 && c.y >= 0 && c.x + c.w <= g.ancho + 0.01 && c.y + c.h <= g.alto + 0.01);
+    const pisados = [];
+    for (let i = 0; i < cajas.length; i += 1) {
+      for (let j = i + 1; j < cajas.length; j += 1) {
+        const a = cajas[i];
+        const b = cajas[j];
+        if (a.x < b.x + b.w - 0.01 && b.x < a.x + a.w - 0.01 && a.y < b.y + b.h - 0.01 && b.y < a.y + a.h - 0.01) pisados.push(`${a.slot ?? 'v'}-${b.slot ?? 'v'}`);
+      }
+    }
+    out[clave] = { n: g.slots.length, adentro, pisados, v: g.ventilador, ancho: g.ancho, alto: g.alto, s: Object.fromEntries(g.slots.map((x) => [x.slot, x])) };
+  }
+  return out;
+});
+comprobar(Object.entries({ T21: 23, T19: 21, T6: 13, T2: 5, 'T2+5': 6, X17: 22, X15: 20, X7: 12, X2: 5 }).every(([k, n]) => geo[k].n === n),
+  `cada chasis tiene sus slots (${Object.entries(geo).map(([k, g]) => `${k}: ${g.n}`).join(', ')})`);
+comprobar(Object.values(geo).every((g) => g.adentro && g.pisados.length === 0),
+  `ningún slot se pisa con otro ni se sale del chasis (${Object.entries(geo).filter(([, g]) => !g.adentro || g.pisados.length).map(([k, g]) => `${k}: ${g.pisados}`).join('; ') || 'bien'})`);
+let t = geo.T6;
+comprobar(t.v.x + t.v.w <= t.s[0].x && [1, 2, 3, 4, 5, 6, 7].every((n) => t.s[n].y > t.s[n - 1].y && t.s[n].x === t.s[0].x)
+  && t.s[6].h > t.s[5].h && t.s[8].y === t.s[9].y && t.s[8].y > t.s[7].y && t.s[8].x < t.s[9].x
+  && t.s[10].y === t.s[11].y && t.s[11].y === t.s[12].y && t.s[10].y > t.s[8].y && t.s[10].x < t.s[11].x && t.s[11].x < t.s[12].x,
+'la MA5683T: ventiladores a la izquierda; servicio 0 a 5, control 6 y 7, subida 8 y 9 lado a lado y, abajo, energía 10 y 11 e interfaz 12');
+t = geo.T2;
+comprobar(t.v.x + t.v.w <= t.s[0].x && t.s[1].y > t.s[0].y && t.s[2].y > t.s[1].y && t.s[2].y === t.s[3].y && t.s[3].y === t.s[4].y
+  && t.s[2].x < t.s[3].x && t.s[3].x < t.s[4].x && t.s[2].h > t.s[0].h && !t.s[5],
+'la MA5608T: ventiladores a la izquierda; arriba las dos de servicio y abajo control 2, control 3 y energía 4');
+t = geo['T2+5'];
+comprobar(t.s[5] && t.s[4].y === t.s[5].y && t.s[4].x < t.s[5].x && Math.abs(t.s[4].w - t.s[5].w) < 0.01 && t.s[4].w < geo.T2.s[4].w,
+  'con dos placas de energía de la mitad, van en 4 y 5');
+await page.evaluate(async (id) => {
+  const d = await (await fetch(`api/olt?red=${id}`)).json();
+  for (const e of d.equipos ?? []) await fetch(`api/olt/equipos/${e.id}?red=${id}`, { method: 'DELETE' });
+}, red);
 await browser.close();
 terminar(todos);

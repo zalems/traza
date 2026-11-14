@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.0
+# Plataforma FTTH · kit 0.12.1
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -359,8 +359,12 @@ cómo se llega a ella). Se indica:
 
 - el **nombre** con que se la va a ver y la **dirección** (IP o nombre) con
   que el servidor llega a ella;
-- el **modelo** (Huawei MA5800 o EA5800, X17, X15, X7 o X2): de ahí sale el
-  dibujo del chasis. Si no se elige, se deduce de dónde tiene las placas;
+- el **modelo**: de ahí sale el dibujo del chasis. Están los Huawei MA5800 y
+  EA5800 (X17, X15, X7 y X2) y los de la familia anterior: MA5680T y MA5600T
+  (el mismo chasis, que viene de 21 pulgadas, con 16 placas de servicio y el
+  control en los slots 9 y 10, o de 19, con 14 y el control en 7 y 8),
+  MA5683T y MA5603T, y MA5608T. Si no se elige, se deduce de dónde tiene las
+  placas de control y de energía; si la OLT no las informa, hay que elegirlo;
 - la **lectura**: puerto UDP (161) y comunidad de SNMP v2c. Alcanza con una
   comunidad de solo lectura;
 - la **consola** (opcional): SSH o Telnet, puerto, usuario y clave. Por ahora
@@ -374,8 +378,14 @@ por SNMP y qué entrega (su nombre, las placas, el chasis, cuántos puertos PON
 y ONT, si da la potencia de los puertos y de las ONT) y si se pudo entrar por
 la consola. Si no anduvo, dice qué revisar. Lo más común:
 
-- en la OLT: `snmp-agent community read LA-COMUNIDAD` y, si esa comunidad
-  tiene una lista de acceso, que incluya la dirección del servidor de traza;
+- en la OLT: que exista la comunidad de lectura (`display snmp-agent
+  community read` la muestra; `snmp-agent community read LA-COMUNIDAD` la
+  crea) y que la OLT acepte SNMP desde la dirección con que le llega el
+  servidor de traza. Una Huawei puede filtrar SNMP por dirección (`sysman
+  firewall snmp`): con el filtro prendido solo les contesta a los rangos
+  permitidos, que se cargan con `sysman ip-access snmp DESDE HASTA` (uno por
+  cada sistema que la lee: traza, otro monitoreo). Prender el filtro sin
+  haber cargado antes esos rangos deja a todos sin respuesta;
 - para una OLT de otra red: en el router que tiene delante, reenviar UDP 161
   (y el puerto de la consola, si se usa) hacia la OLT, mejor limitado a la IP
   pública con que sale el servidor de traza. SNMP v2c no viaja cifrado: si se
@@ -405,7 +415,9 @@ Una OLT que ya viene de un panel también puede tener cargada su conexión
 ("Cargar su conexión", en su tarjeta): sus ONT las sigue dando el panel y de
 la OLT se lee lo que el panel no informa (lo que emite cada puerto PON).
 
-Por ahora se leen OLT Huawei MA5800 y EA5800 (las tablas de HUAWEI-XPON-MIB).
+Por ahora se leen OLT Huawei: MA5800 y EA5800 y la familia anterior (MA5600T,
+MA5680T, MA5603T, MA5683T y MA5608T), que publican las mismas tablas
+(HUAWEI-XPON-MIB).
 
 ### Publicarlo con nombre y HTTPS
 
@@ -714,6 +726,17 @@ mentira (Telnet). Los dibujos de los chasis X17, X7 y X2 siguen las figuras
 de la descripción de hardware de Huawei; el X15 se dibuja como el X17 con dos
 slots menos (su figura no la tuve a la vista).
 
+Los chasis de la familia anterior (0.12.1) siguen las figuras de la
+descripción de hardware de Huawei "SmartAX MA5600T/MA5603T/MA5608T" (edición
+24): la 2-3 (el chasis de 21 pulgadas), la 2-10 (el de 19), la 2-21 (MA5603T)
+y las 2-29 y 2-30 (MA5608T, con una placa de energía o con dos), con las
+medidas de cada placa. Se probaron con la OLT de mentira armada con un juego
+de placas de cada chasis (H801SCUN, H801MCUD, H805GPFD, H802GPBD, H801GPBC,
+H801GICF, H801X2CS, H801PRTE, H801MPWC, H801MPWE, H801CITD): que se reconozca
+el chasis por sus placas, que cada slot quede en su lugar y que ninguno se
+pise con otro. Que la red cargue aunque el mapa de fondo no llegue se prueba
+en Chromium dejando sin respuesta a los servidores de afuera.
+
 No se pudo probar, y hay que mirarlo en el uso real:
 
 - La lectura directa contra una OLT de verdad: al escribirla, ninguna OLT
@@ -725,6 +748,10 @@ No se pudo probar, y hay que mirarlo en el uso real:
   potencia de todas (la pide de a 20, con 10 segundos de espera; si no llega,
   sigue con lo demás y lo avisa) y la hora de las caídas (según la zona que
   se indique para el reloj de la OLT).
+- Una MA5680T (o cualquiera de su familia) de verdad: que entregue por SNMP
+  las mismas tablas que una MA5800 y con qué nombre da cada placa. Si "Probar
+  la conexión" no muestra la línea "Placas", el chasis no se puede deducir:
+  se elige el modelo a mano.
 - La consola por SSH contra una OLT de verdad (las que tienen años usan
   algoritmos que el cliente de hoy trae apagados; traza los habilita si el
   cliente del servidor todavía los tiene).

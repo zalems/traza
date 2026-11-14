@@ -1,5 +1,51 @@
 # Cambios
 
+## 0.12.1 · 13/11/2026
+
+Las OLT Huawei de la familia anterior a la MA5800 (MA5680T, MA5600T, MA5683T,
+MA5603T y MA5608T) se reconocen y se dibujan con su chasis.
+
+- Cuatro chasis nuevos, con la disposición de slots y las medidas de cada
+  placa de la descripción de hardware de Huawei: MA5680T y MA5600T de 21
+  pulgadas (23 slots: energía 21 y 22 sobre la interfaz universal 0, a la
+  izquierda; servicio 1 a 8 y 11 a 18; control 9 y 10; a la derecha, las dos
+  placas de subida, 19 arriba y 20 abajo; ventiladores arriba) y de 19
+  pulgadas (21 slots: energía 19 y 20, control 7 y 8, subida 17 y 18);
+  MA5683T y MA5603T (placas acostadas, ventiladores a la izquierda: servicio
+  0 a 5, control 6 y 7, subida 8 y 9 lado a lado y, abajo, energía 10 y 11 e
+  interfaz universal 12); MA5608T (servicio 0 y 1 arriba; abajo, control 2 y
+  3 y la energía en 4, o en 4 y 5 si son dos placas de la mitad).
+- El chasis se reconoce solo, por dónde están las placas de control y de
+  energía y por su nombre (las H80x son de esta familia; las H90x, de la
+  MA5800): SCU y MCU son de control; PRT y MPW, de energía; GIU y X2C, de
+  subida; CIT, la interfaz universal. Si la OLT dice ser una MA5680T y no
+  informa sus placas, no se adivina si es la de 21 o la de 19 pulgadas: se
+  elige en "Modelo". En el formulario están los siete modelos nuevos.
+- "Probar la conexión" dice el chasis por su nombre ("MA5680T de 21 pulgadas
+  (ETSI)") y de dónde lo sacó; si se eligió otro modelo, lo avisa. Suma el
+  identificador del equipo (sysObjectID).
+- Si la OLT no responde por SNMP, la ayuda nombra el filtro de SNMP por
+  dirección de Huawei (`sysman firewall snmp`), cómo se agrega el rango del
+  servidor (`sysman ip-access snmp DESDE HASTA`) y la versión (v2c).
+- Si a la OLT no le entra en una respuesta todo lo que se le pide de una vez
+  (contesta "tooBig"), traza le pide de a menos filas en vez de dar la tabla
+  por perdida.
+- Corregido: la red esperaba a que el mapa de fondo terminara de cargar. Con
+  el fondo del IGN o el satélite, que vienen de otros servidores, si ese
+  servidor tardaba o no contestaba (o con poca señal en la calle), la red no
+  aparecía hasta que llegaran sus imágenes. Ahora se carga apenas abre la
+  página y se ve aunque el fondo no llegue.
+- Corregido: si una OLT no entregaba la tabla de sus placas, solo se veía la
+  primera placa con puertos; ahora se ven todas.
+- Corregido: en las placas de subida, el texto de cada puerto ("sin módulo")
+  se salía de su casilla; esas casillas ahora son más anchas.
+- La tarjeta de cada OLT dice qué chasis se dibuja (API: `chasis_nombre` en
+  cada equipo de `GET /api/olt`).
+- Sin cambios en los datos. Volver a 0.12.0: `git checkout ed9a577` y
+  `./instalar.sh` (0.12.0 no conoce los modelos nuevos: una OLT guardada con
+  uno de ellos queda cargada y se sigue leyendo, pero dibujada con un chasis
+  que no es el suyo).
+
 ## 0.12.0 · 13/11/2026 · commit af287bc
 
 Las OLT se cargan desde el visor, traza las lee por su cuenta (SNMP) y cada

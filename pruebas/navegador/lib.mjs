@@ -9,8 +9,9 @@ export const BASE = process.env.FTTH_BASE ?? 'http://127.0.0.1:8080';
 export const CAPTURAS = `${process.env.FTTH_CAPTURAS ?? `${tmpdir()}/traza-capturas`}/`;
 mkdirSync(CAPTURAS, { recursive: true });
 
+// sinFondo: los servidores de afuera (el mapa de fondo) no contestan nunca, como en la calle con mala señal.
 export async function abrir({ ancho = 1280, alto = 800, movil = false, oscuro = false, senal = false, red = 1, escala = 1,
-  usuario = 'prueba', clave = 'Clave-de-prueba-2026' } = {}) {
+  usuario = 'prueba', clave = 'Clave-de-prueba-2026', sinFondo = false } = {}) {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({
     viewport: { width: ancho, height: alto }, colorScheme: oscuro ? 'dark' : 'light', hasTouch: movil, isMobile: movil,
@@ -22,6 +23,7 @@ export async function abrir({ ancho = 1280, alto = 800, movil = false, oscuro = 
       if (s && localStorage.getItem('ftth.senal') === null) localStorage.setItem('ftth.senal', '1');
     } catch { /* sin almacenamiento */ }
   }, [red, senal]);
+  if (sinFondo) await ctx.route((url) => !url.href.startsWith(BASE), () => {}); // el pedido queda esperando
   const page = await ctx.newPage();
   const errores = [];
   page.on('pageerror', (e) => errores.push(`pageerror: ${e.message}`));

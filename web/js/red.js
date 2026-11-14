@@ -299,10 +299,14 @@ export function setupRed({ map, maplibregl, usuario }) {
     emit('capas');
   }
 
+  // Las capas de la red se agregan en cuanto el mapa leyó su estilo. No se espera a que el
+  // mapa termine de cargar ('load', isStyleLoaded): eso incluye los mosaicos del fondo, que
+  // vienen de otros servidores (IGN, satélite) y pueden tardar o no llegar nunca. La red sale
+  // del servidor propio y se tiene que ver igual.
   const listo = new Promise((resolve, reject) => {
     const iniciar = () => addLayers().then(resolve, reject);
-    if (map.isStyleLoaded()) iniciar();
-    else map.once('load', iniciar);
+    if (map.getStyle()) iniciar(); // (sin estilo leído todavía, getStyle() no devuelve nada)
+    else map.once('style.load', iniciar);
   });
 
   // ------------------------------------------------------------------ datos
