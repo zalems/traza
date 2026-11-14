@@ -169,14 +169,16 @@ export function geometria(chasis, puestos = []) {
   return null;
 }
 
-// 172400000 -> '172 Mb/s'; 9500000 -> '9,5 Mb/s'; 1240000000 -> '1,24 Gb/s'.
+// 172400000 -> '172 Mb/s'; 120000000 -> '120 Mb/s'; 9500000 -> '9,5 Mb/s'; 1240000000 -> '1,24 Gb/s'.
 export function bps(valor) {
   if (!Number.isFinite(valor)) return '—';
   const escalas = [[1e9, 'Gb/s'], [1e6, 'Mb/s'], [1e3, 'kb/s']];
   for (const [base, unidad] of escalas) {
     if (valor >= base) {
       const n = valor / base;
-      return `${(n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)).replace(/\.?0+$/, '').replace('.', ',')} ${unidad}`;
+      const texto = n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
+      // Los ceros que sobran son los de después de la coma: '9.50' -> '9,5', pero '120' queda '120'.
+      return `${(texto.includes('.') ? texto.replace(/\.?0+$/, '') : texto).replace('.', ',')} ${unidad}`;
     }
   }
   return `${Math.round(valor)} b/s`;

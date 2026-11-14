@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.1
+# Plataforma FTTH · kit 0.12.2
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -654,7 +654,9 @@ panel.
 potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo, y
 dónde se juntan los recorridos de varios clientes) del visor, y
 `node pruebas/integracion.test.mjs` la medición virtual, la estabilidad y el
-resumen de cada caja (Node 20.19 o más nuevo; el de Debian 13 sirve).
+resumen de cada caja, y `node pruebas/equipos.test.mjs` cómo se escribe un
+tráfico y dónde va cada slot en el frente de cada chasis (Node 20.19 o más
+nuevo; el de Debian 13 sirve).
 Las pruebas en navegador (Chromium con Playwright, contra una instalación de
 prueba con un Wispro y un panel falsos) están en `pruebas/navegador/`, con su
 `LEEME.md`: no son para la instalación en uso.
