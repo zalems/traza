@@ -1,4 +1,4 @@
-# Plataforma FTTH · kit 0.12.5
+# Plataforma FTTH · kit 0.13.0
 
 Plataforma web para registrar de forma gráfica el despliegue de redes FTTH:
 mapa de fondo, login, las herramientas para cargar la red (postes, cajas,
@@ -58,16 +58,55 @@ se consultan recién cuando alguien las elige.
   que pasa por el elemento (sangría), las fibras que no se tocan siguen de
   largo; al unir una, queda cortada ahí. Splitters PLC (1x2 a 1x128, también
   2xN) o desbalanceados (1/99 a 50/50), con salidas fusionadas o con
-  conector; en el nodo, la OLT con sus puertos PON, numerados desde 1 o,
-  como en Huawei, desde 0 (se elige al cargarla; se propone 0 si el nodo o la
-  OLT dicen Huawei). "Ver lista" la muestra como tabla y "Copiar" la deja como texto para mandar por mensaje. Si un
-  cable termina cerca sin quedar pegado, la carta ofrece pegarlo.
-- **Acomodar la carta.** En "Columnas", cada cable y equipo se sube, se baja
-  o se pasa de lado arrastrándolo desde su asa (los seis puntos), con los
-  botones Subir y Bajar o con las flechas del teclado. En "Libre", cada uno
-  va donde se lo deja, sobre una bandeja que se mueve arrastrando el fondo y
-  se acerca con dos dedos, con la rueda y Control o con + y −; "Ajustar"
-  muestra toda la carta y "Reacomodar" vuelve a ponerla en columnas. Lo que
+  conector; en el nodo, las placas de la OLT con sus puertos PON (ver el
+  punto siguiente). "Ver lista" la muestra como tabla y "Copiar" la deja como
+  texto para mandar por mensaje. Si un cable termina cerca sin quedar pegado,
+  la carta ofrece pegarlo.
+- **Las placas de la OLT en el nodo, con su lectura.** En la carta de un nodo,
+  "Agregar placa de OLT" pregunta **qué placa de la OLT es**: ofrece las placas
+  PON de las OLT que traza lee en esa red (las del panel y las leídas directo)
+  y, al elegir una, la placa de la carta toma sus puertos, su numeración y un
+  nombre ("OLT - CARCA 0/13"); las que ya están en el mapa no se ofrecen (una
+  placa real va una sola vez por red). Una placa que ya estaba cargada a mano
+  se vincula tocándola, con "Vincular con la placa real" (o desde "Editar"),
+  sin perder sus uniones; con "Ninguna: la cargo a mano" se desvincula. Sin
+  OLT leída en la red se carga a mano, como antes: cuántos puertos PON tiene y
+  si se numeran desde 1 o, como en Huawei, desde 0. Vinculada, cada puerto es
+  el PON de verdad ("0/13/2") y dice **lo que se lee de él**: sus ONT en línea
+  sobre las que tiene ("37/40"), en verde, naranja (alguna recibe al límite o
+  se quedó sin luz) o rojo (cayeron varias juntas, o todas), también en los
+  puertos que todavía no están unidos a ninguna fibra; al tocarlo, el pie dice
+  cuánto emite, cuánto reciben sus ONT, por qué cayeron las otras y el
+  tráfico, con "Ver sus ONT" (el tablero de la OLT en ese puerto, encima de la
+  carta: al cerrarlo se vuelve) y "En el mapa". La **potencia estimada** de
+  todo lo que cuelga parte de lo que emite de verdad ese puerto (cada módulo
+  emite distinto), y no de un número cargado a mano; la potencia de la placa
+  queda para los puertos que la OLT no informa. Y la **señal** usa la lectura:
+  mientras la luz no pasó por un splitter lleva todas las ONT del puerto, así
+  que la troncal se ve con tráfico aunque los clientes del mapa todavía no
+  estén cruzados con sus ONT, y si el puerto se queda sin ninguna ONT en línea
+  todo lo que cuelga de él se ve caído. En el tablero de la OLT, cada placa del
+  chasis dice en qué nodo del mapa está (o que falta agregarla) y cada puerto
+  lleva a su lugar en la carta.
+- **Lo que alimenta un puerto.** Desde la unión de un puerto PON en la carta
+  ("En el mapa"), desde un puerto del chasis en el tablero o desde una novedad
+  de ese puerto: quedan marcados en el mapa todos los cables por los que va su
+  luz y la ficha dice por qué cable sale, hasta dónde va sin dividirse (el
+  tronco, hasta el primer splitter) y con cuánto llega ahí, y cuántos cables,
+  cajas y clientes alimenta. Si el puerto se quedó sin ninguna ONT en línea,
+  dice dónde buscar: "si es un corte, está en ese primer tramo, entre NODO y
+  BOT-1"; si cayeron varias juntas y el resto sigue, que el problema está
+  después, en una rama.
+- **Acomodar la carta y el zoom.** En "Columnas", cada cable y equipo se
+  sube, se baja o se pasa de lado arrastrándolo desde su asa (los seis
+  puntos), con los botones Subir y Bajar o con las flechas del teclado. En
+  "Libre", cada uno va donde se lo deja, sobre una bandeja que se mueve
+  arrastrando el fondo. En los dos modos hay **zoom**: los botones − y + de
+  abajo a la derecha, dos dedos en el teléfono (se agranda la carta, no la
+  página), o Control y la rueda; el porcentaje del medio vuelve al 100 % y
+  "Ajustar" hace entrar toda la carta. En columnas el diagrama entero se
+  achica o se agranda como una imagen y la carta se desplaza para recorrerlo;
+  "Reacomodar" (en libre) vuelve a ponerla en columnas. Lo que
   se acomoda queda guardado para todos (después de arrastrar o reacomodar,
   "Deshacer" lo vuelve atrás); columnas o libre lo elige cada dispositivo (en
   el teléfono suelen convenir las columnas). Acomodar no le quita a nadie lo
@@ -81,7 +120,9 @@ se consultan recién cuando alguien las elige.
   se pinta con el color de su fibra, rodeado por el de su tubo, y cambia en
   cada empalme. La ficha del cliente dice en qué NAP y puerto está conectado
   y de qué PON viene.
-- **Potencia estimada.** Si la OLT tiene cargada su potencia de salida, el
+- **Potencia estimada.** Si se sabe con cuánto sale la luz del puerto (lo que
+  emite de verdad, cuando la placa del nodo está vinculada con la placa real y
+  la OLT lo informa; si no, la potencia cargada en la placa), el
   recorrido dice con cuánto se llega después de cada fusión, conector y
   splitter, y la ficha del cliente la compara con la potencia medida en la
   ONT (3 dB o más por debajo es para revisar). Se estima con 0,3 dB/km,
@@ -656,11 +697,15 @@ comando `integraciones`), y las OLT cargadas en traza contra una OLT Huawei
 de mentira (`pruebas/olt_falsa.py`: SNMP y Telnet en la misma máquina): la
 lectura por SNMP, cargar, cambiar y quitar una OLT (y que la comunidad y la
 clave no vuelvan a salir), la prueba de conexión, el tablero de una red que
-se lee directo con su historial y su tráfico, y el chasis de una OLT del
-panel.
+se lee directo con su historial y su tráfico, el chasis de una OLT del
+panel, y las placas de la carta de un nodo vinculadas con las reales (lo que
+la API da de cada puerto, qué se acepta al vincular y que una placa real va
+una sola vez por red).
 `node pruebas/fibras.test.mjs` prueba la lógica de fibras, colores, recorridos,
-potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo, y
-dónde se juntan los recorridos de varios clientes) del visor, y
+potencias y señal (qué tiene luz, en qué sentido y con qué clientes abajo,
+dónde se juntan los recorridos de varios clientes y, con una placa vinculada,
+la potencia que parte de lo que emite el puerto y el estado de la luz según
+lo que se lee de él) del visor, y
 `node pruebas/integracion.test.mjs` la medición virtual, la estabilidad y el
 resumen de cada caja, y `node pruebas/equipos.test.mjs` cómo se escribe un
 tráfico y dónde va cada slot en el frente de cada chasis (Node 20.19 o más
@@ -766,6 +811,16 @@ tabla de Huawei sí (y los estándar de 32 bits también), la tabla se lee en
 entra por el puerto de subida (1,73 Gb/s). Una lectura completa de las 973
 ONT lleva unos 42 s (la potencia de cada ONT es lo que más tarda).
 
+Las placas del nodo vinculadas con las reales, el zoom de la carta en columnas
+y "lo que alimenta un puerto" (0.13.0) se probaron con las pruebas de la API,
+las de Node y en Chromium (`placas.mjs`: escritorio, teléfono de 390 × 844 y
+modo oscuro) contra el panel de mentira y contra la OLT de mentira leída
+directo: vincular y desvincular, agregar eligiendo la placa real, la potencia
+que parte de lo que emite el puerto, un puerto que se queda sin ONT en línea
+(en la carta, en el mapa y dónde buscar el corte) y el zoom con botones, con
+Control y la rueda y con dos dedos. Falta verlo con la OLT de verdad y, el
+zoom con dos dedos, en un teléfono de verdad.
+
 No se pudo probar, y hay que mirarlo en el uso real:
 
 - La lectura directa contra una MA5800 o una EA5800 de verdad, y contra las
@@ -781,7 +836,7 @@ No se pudo probar, y hay que mirarlo en el uso real:
   curva de cada ONT.
 
 - Teléfonos reales, Safari y Firefox (en especial arrastrar y pellizcar en
-  la carta en modo libre).
+  la carta, en los dos modos).
 - La medición en vivo por Wispro (`status_ont`) con una ONT real: su
   respuesta se tomó de la documentación de Wispro.
 - Cómo informa el panel una ONT apagada (si conserva su última potencia:

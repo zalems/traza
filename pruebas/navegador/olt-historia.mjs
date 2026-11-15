@@ -7,7 +7,7 @@ const movil = process.argv.includes('movil');
 const sufijo = movil ? '390' : '1280';
 const texto = (page, sel) => page.textContent(sel).then((t) => (t ?? '').replace(/\s+/g, ' ').trim());
 let { browser, page, errores } = await abrir(movil ? { ancho: 390, alto: 844, movil: true } : {});
-const todos = [...errores];
+const todos = [errores]; // los errores de página de cada sesión (se juntan al final)
 
 // --- Resumen con historia
 await page.click('.olt-boton');
@@ -69,7 +69,7 @@ await browser.close();
 
 // --- Un usuario de una sola red, sin OLT: las cajas salen de las cartas
 ({ browser, page, errores } = await abrir({ ...(movil ? { ancho: 390, alto: 844, movil: true } : {}), usuario: 'cuadrilla', clave: 'Clave-cuadrilla-2026', red: null }));
-todos.push(...errores);
+todos.push(errores);
 comprobar(await page.evaluate(() => window.ftth.herramientas.red.state.red === 2), 'entra directo a su red');
 await page.click('.olt-boton');
 await page.waitForFunction(() => /todavía no tiene una OLT/.test(document.querySelector('#olt .olt-cuerpo')?.textContent ?? ''));
@@ -86,4 +86,4 @@ const ajena = await page.evaluate(() => fetch('api/olt?red=1').then((r) => r.sta
 comprobar(ajena === 403, 'la OLT de otra red no se le entrega (403)');
 await page.screenshot({ path: `${CAPTURAS}t30-${sufijo}-cajas-carta.png` });
 await browser.close();
-terminar(todos);
+terminar(todos.flat());

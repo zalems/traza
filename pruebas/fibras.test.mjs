@@ -271,6 +271,115 @@ state.rev += 1;
   assert.equal(F.comunDeClientes(s2, [108, 999]), null);
   assert.equal(F.comunDeClientes(s2, []), null);
   assert.deepEqual([...F.clientesPorCaja(s2)].map(([caja, lista]) => [caja, lista.sort()]), [[103, [105, 106]], [104, [107]]]);
+
+  // --- La placa del nodo vinculada con una placa real de la OLT (0.13.0)
+  const placa = s2.equipos.get(120);
+  const tramoDe = (cable) => F.iluminacion(s2).tramos.find((t) => t.cable === cable);
+  // Sin vincular nada cambia: sin potencia cargada no hay con cuánto estimar, y nada está partido hasta el splitter.
+  assert.equal(F.vinculada(placa), false);
+  assert.equal(F.interfazPuerto(placa, 1), null);
+  assert.equal(F.potenciaPuerto(s2, placa, 1), null);
+  assert.equal(F.lecturaPuerto(s2, placa, 1), null);
+  assert.deepEqual([tramoDe(110).partida, tramoDe(111).partida, tramoDe(113).partida], [false, true, true]);
+  assert.equal(F.estadoLuz(s2, tramoDe(110), null).estado, 'luz');
+  // Vinculada: el puerto se llama como en la OLT y la placa dice de cuál a cuál son.
+  Object.assign(placa, { red: 2, nombre: 'Placa 13', datos: { desde: 0, olt: 'OLT - CARCA', olt_id: 'abc123', placa: '0/13', potencia: 3 } });
+  s2.rev += 1;
+  assert.equal(F.vinculada(placa), true);
+  assert.equal(F.interfazPuerto(placa, 1), '0/13/0');
+  assert.equal(F.etiquetaPuerto(placa, 's', 3), 'OLT - CARCA PON 0/13/2');
+  assert.equal(F.describirEquipo(placa), '16 PON (0/13/0 a 0/13/15)');
+  assert.equal(F.etiquetaExtremo(s2, 'q120:s:16'), 'OLT - CARCA PON 0/13/15');
+  // Todavía sin lecturas: vale la potencia cargada a mano.
+  assert.equal(F.placaReal(s2, placa), null);
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 1), { dbm: 3, leida: false });
+  let luz2 = F.iluminacion(s2);
+  assert.deepEqual([luz2.puertos.get('120:1').potencia0, luz2.puertos.get('120:1').leida], [3, false]);
+  const perdidaK1 = luz2.clientes.get(105).perdida;
+  cerca(luz2.clientes.get(105).potencia, 3 - perdidaK1, 'con la potencia cargada');
+  // Llegan las lecturas (la OLT cambió de nombre: se la encuentra por su número).
+  const puerto0 = { n: 0, interfaz: '0/13/0', estado: 'up', tx: 7.02, entra: 12e6, sale: 119e6, onts: 40, en_linea: 37, fibra: 1, energia: 2, otras: 0,
+    criticas: 1, rx_prom: -22.1, rx_min: -27, ultima_caida: null, nivel: 'atencion' };
+  const leidas = [
+    { red: 9, id: 'abc123', nombre: 'OLT - CARCA', placas: [{ placa: '0/13', slot: 13, nombre: 'DE-OTRA-RED', desde: 0, puertos: [{ n: 0, interfaz: '0/13/0', tx: -3 }] }] },
+    { red: 2, id: 'abc123', nombre: 'CARCARAÑÁ MA5680T', modelo: 'MA5680T', leido: '2026-11-14T23:00:00Z', error: null, placas: [
+      { placa: '0/13', slot: 13, nombre: 'H805GPFD', estado: 'normal', desde: 0, puertos: [puerto0, { n: 1, interfaz: '0/13/1', estado: 'up', tx: 5.1 },
+        { n: 2, interfaz: '0/13/2', estado: 'down' }] },
+      { placa: '0/14', slot: 14, nombre: 'H805GPFD', estado: 'normal', desde: 0, puertos: [{ n: 0, interfaz: '0/14/0', estado: 'up', tx: 5.2 }] }] },
+  ];
+  const antes = F.versionLecturas(s2);
+  F.ponerLecturas(s2, leidas);
+  assert.equal(F.versionLecturas(s2), antes + 1);
+  const real = F.placaReal(s2, placa);
+  assert.deepEqual([real.olt.nombre, real.placa.nombre, real.placa.slot], ['CARCARAÑÁ MA5680T', 'H805GPFD', 13]); // la de su red, no la de otra
+  assert.equal(F.lecturaPuerto(s2, placa, 1), puerto0);
+  assert.equal(F.lecturaPuerto(s2, placa, 2).tx, 5.1);
+  assert.equal(F.lecturaPuerto(s2, placa, 9), null); // un puerto que la OLT no informa
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 1), { dbm: 7.02, leida: true });
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 3), { dbm: 3, leida: false }); // sin lectura de lo que emite: la cargada
+  // La luz se recalcula sola con las lecturas nuevas (el estado de la red no cambió) y parte de lo que emite el puerto.
+  assert.notEqual(F.iluminacion(s2), luz2);
+  luz2 = F.iluminacion(s2);
+  assert.equal(F.iluminacion(s2), luz2);
+  assert.deepEqual([luz2.puertos.get('120:1').potencia0, luz2.puertos.get('120:1').leida], [7.02, true]);
+  cerca(luz2.clientes.get(105).potencia, 7.02 - perdidaK1, 'con lo que emite el puerto');
+  const rK1 = F.recorrido(s2, 105, 'c113:a:1');
+  assert.equal(rK1.pasos[0].motivo, 'olt');
+  const potK1 = F.potencias(s2, rK1);
+  assert.deepEqual([potK1.inicial, potK1.leida], [7.02, true]);
+  cerca(potK1.llega, luz2.clientes.get(105).potencia, 'el recorrido y la luz dan lo mismo');
+  // (la OLT se llama ahora de otra forma: de dónde viene la luz se dice con su nombre de hoy)
+  assert.equal(F.origenLuz(s2, luz2.clientes.get(105)), 'CARCARAÑÁ MA5680T PON 0/13/0');
+  assert.equal(F.etiquetaExtremo(s2, 'q120:s:3'), 'CARCARAÑÁ MA5680T PON 0/13/2');
+  assert.equal(F.nombreOlt(s2, placa), 'CARCARAÑÁ MA5680T');
+  // Cómo está la luz: hasta el primer splitter lleva todo lo del puerto (hay tráfico aunque ningún cliente del mapa
+  // esté cruzado con su ONT); después del splitter, sin datos de los clientes, solo se sabe que hay luz.
+  const troncal = F.estadoLuz(s2, tramoDe(110), null);
+  assert.deepEqual([troncal.estado, troncal.entero, troncal.puerto, troncal.clientes], ['trafico', true, puerto0, 3]);
+  assert.equal(F.textoAbajo(troncal), '40 ONT en el puerto, 37 en línea; en el mapa, 3 clientes abajo');
+  const rama = F.estadoLuz(s2, tramoDe(111), null);
+  assert.deepEqual([rama.estado, rama.entero], ['luz', false]);
+  assert.equal(F.textoAbajo(rama), '2 clientes abajo');
+  // Lo que dicen los clientes cruzados sigue valiendo después del splitter.
+  const estadosK = new Map([[105, { estado: 'online' }], [107, { estado: 'offline' }]]);
+  assert.equal(F.estadoLuz(s2, tramoDe(111), estadosK).estado, 'trafico');
+  assert.equal(F.estadoLuz(s2, tramoDe(112), estadosK).estado, 'caida');
+  const segs = F.segmentosConLuz(s2);
+  const seg = (cable) => segs.find((x) => x.cable === cable);
+  assert.deepEqual([F.estadoSegmento(s2, seg(110), null).estado, F.estadoSegmento(s2, seg(110), null).onts, F.estadoSegmento(s2, seg(110), null).ontsEnLinea],
+    ['trafico', 40, 37]);
+  assert.deepEqual([F.estadoSegmento(s2, seg(111), null).estado, F.estadoSegmento(s2, seg(111), null).onts], ['luz', 0]);
+  // El puerto entero se queda sin ONT en línea: todo lo que cuelga de él está caído, antes y después del splitter.
+  F.ponerLecturas(s2, [{ ...leidas[1], placas: [{ ...leidas[1].placas[0], puertos: [{ ...puerto0, en_linea: 0, fibra: 38, energia: 2, nivel: 'caido', rx_prom: null, rx_min: null }] }] }]);
+  assert.deepEqual([110, 111, 113, 115].map((c) => F.estadoLuz(s2, tramoDe(c), null).estado), ['caida', 'caida', 'caida', 'caida']);
+  assert.equal(F.estadoSegmento(s2, F.segmentosConLuz(s2).find((x) => x.cable === 111), null).estado, 'caida');
+  assert.equal(F.textoAbajo(F.estadoLuz(s2, tramoDe(111), null)), '2 clientes abajo; su puerto PON no tiene ninguna ONT en línea');
+  assert.equal(F.nivelLectura(F.lecturaPuerto(s2, placa, 1)), 'caido');
+  // Las lecturas en palabras y la placa entera en números.
+  F.ponerLecturas(s2, leidas);
+  assert.equal(F.textoLectura(puerto0), '40 ONT, 37 en línea, 3 sin señal (2 sin energía, 1 sin luz) · emite 7,0 dBm · reciben −22,1 dBm (la peor, −27,0)');
+  assert.equal(F.textoLectura(F.lecturaPuerto(s2, placa, 2)), 'en servicio, sin ONT · emite 5,1 dBm');
+  assert.equal(F.textoLectura(F.lecturaPuerto(s2, placa, 3)), 'sin ONT en línea');
+  assert.deepEqual([puerto0, F.lecturaPuerto(s2, placa, 2), F.lecturaPuerto(s2, placa, 3), null].map(F.nivelLectura), ['atencion', 'libre', 'apagado', null]);
+  // Apagadas (sin energía) no es para mirar; sin luz, sí; y lo que ya viene como parcial o caído, tal cual.
+  assert.deepEqual([{ onts: 9, en_linea: 7, energia: 2, fibra: 0, nivel: 'bien' }, { onts: 9, en_linea: 8, energia: 0, fibra: 1, nivel: 'bien' },
+    { onts: 9, en_linea: 3, fibra: 6, nivel: 'parcial' }, { onts: 9, en_linea: 9, nivel: 'bien' }].map(F.nivelLectura), ['bien', 'atencion', 'parcial', 'bien']);
+  assert.deepEqual(F.resumenPlaca(real.placa), { puertos: 3, conOnt: 1, onts: 40, enLinea: 37, caidos: 0, txMin: 5.1, txMax: 7.02 });
+  assert.equal(F.resumenPlaca(null), null);
+  // Qué placas reales ya están en el mapa (para no ofrecerlas de nuevo al agregar).
+  assert.deepEqual([...F.placasEnMapa(s2)].map(([clave, eq]) => [clave, eq.id]), [['2|abc123|0/13', 120]]);
+  // Sin el número de la OLT se la busca por el nombre (sin distinguir mayúsculas); una placa que la OLT ya no informa
+  // queda vinculada pero sin lectura; y si la OLT no está entre las leídas, vale la potencia cargada.
+  placa.datos = { desde: 0, olt: 'carcarañá ma5680t', placa: '0/14', potencia: 3 };
+  assert.equal(F.placaReal(s2, placa).placa.slot, 14);
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 1), { dbm: 5.2, leida: true });
+  placa.datos = { desde: 0, olt: 'CARCARAÑÁ MA5680T', placa: '0/15', potencia: 3 };
+  assert.deepEqual([F.placaReal(s2, placa).olt.id, F.placaReal(s2, placa).placa], ['abc123', null]);
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 1), { dbm: 3, leida: false });
+  placa.datos = { desde: 0, olt: 'Una que ya no está', olt_id: 'ffffff', placa: '0/13', potencia: 3 };
+  assert.equal(F.placaReal(s2, placa), null);
+  assert.deepEqual(F.potenciaPuerto(s2, placa, 1), { dbm: 3, leida: false });
+  assert.equal(F.placasEnMapa(s2).size, 0);
 }
 
 console.log('fibras: TODO OK');

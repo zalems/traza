@@ -28,7 +28,10 @@ usuario no puede ver responde 403.
   PUT    /api/cables/ID
   DELETE /api/cables/ID?version=V      también quita las uniones de sus fibras
   POST   /api/equipos                  {elemento, tipo, nombre, entradas, salidas, datos, notas}: splitter u OLT
-                                       (OLT: datos.desde 0 o 1, cómo se numeran los puertos al mostrarlos)
+                                       (OLT: datos.desde 0 o 1, cómo se numeran los puertos al mostrarlos;
+                                       datos.olt y datos.placa "0/13", la placa real que es, de una OLT que
+                                       traza lee: su puerto N es el PON 0/13/N; una placa real va una sola
+                                       vez por red)
   PUT    /api/equipos/ID
   DELETE /api/equipos/ID?version=V     también quita las uniones de sus puertos
   POST   /api/fusiones                 {elemento, pares: [{a, b}], tipo}: une fibras y puertos en un elemento
@@ -45,7 +48,9 @@ Wispro y el panel de la OLT (se configuran en el servidor, ver "integraciones"):
   GET    /api/integracion/cliente?elemento=ID   el contrato de un cliente y su ONT
   GET    /api/integracion/estados?red=ID|todas  el estado de la ONT de cada cliente del mapa, según el
                                        panel de la OLT (para la vista de señal): {clientes: {ID: {estado,
-                                       rx, cuando, causa, interfaz}}, leido, conectadas, errores}
+                                       rx, cuando, causa, interfaz}}, leido, conectadas, errores, olts};
+                                       olts: las placas PON de cada OLT con lo que se lee de cada puerto
+                                       (emite, ONT, en línea, caídas, tráfico), para las placas vinculadas
   GET    /api/integracion/cajas?red=ID|todas    cada NAP del mapa con su NAP de Wispro (bocas, contratos) y
                                        la lectura de la ONT de cada contrato: {cajas: {ID: {nap, lecturas:
                                        [{rx, estado, interfaz}], sin_lectura}}, leido, conectadas, errores}
@@ -144,6 +149,10 @@ TIPOS_EQUIPO = ("splitter", "olt")
 MODOS_SPLITTER = ("plc", "fbt")
 SALIDAS_PLC = (2, 4, 8, 16, 32, 64, 128)
 MAX_PUERTOS_OLT = 256
+# La placa real que es una placa de OLT de una carta: "0/13" (chasis/slot); su puerto N es el PON 0/13/N.
+PLACA_OLT = re.compile(r"[0-9]{1,3}(/[0-9]{1,3}){0,2}")
+# El número de una OLT en traza: el de las cargadas (hexadecimal) o el del panel (p1).
+ID_OLT = re.compile(r"p[0-9]{1,9}|[0-9a-f]{6,16}")
 TIPOS_UNION = ("fusion", "conector")
 
 EXTREMO_CABLE = re.compile(r"c([1-9][0-9]{0,15}):([ab]):([1-9][0-9]{0,3})")
@@ -1291,6 +1300,17 @@ class Store:
             # desde: cómo se numeran los puertos al mostrarlos (0 en Huawei, 1 en las demás); por dentro van de 1 a N.
             if "desde" in datos and (isinstance(datos["desde"], bool) or datos["desde"] not in (0, 1)):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "Los puertos de la OLT se numeran desde 0 o desde 1.")
+            # olt y placa: la placa real que es este equipo, de una OLT que traza lee (su nombre y "0/13"). Su
+            # puerto N pasa a ser el PON 0/13/N, con lo que se lee de él. olt_id: el número de esa OLT en
+            # traza, para seguir encontrándola si le cambian el nombre.
+            if any(k in datos for k in ("olt", "placa", "olt_id")):
+                olt, placa = datos.get("olt"), datos.get("placa")
+                if not isinstance(olt, str) or len(olt) > 80:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "Para vincular la placa falta decir de qué OLT es.")
+                if not isinstance(placa, str) or not PLACA_OLT.fullmatch(placa):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "La placa real se indica con su chasis y su slot: 0/13.")
+                if "olt_id" in datos and (not isinstance(datos["olt_id"], str) or not ID_OLT.fullmatch(datos["olt_id"])):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "olt_id no es el número de una OLT.")
             return
         modo = datos.get("modo", "plc")
         if modo not in MODOS_SPLITTER:
@@ -1309,6 +1329,23 @@ class Store:
         if "conectores" in datos and not isinstance(datos["conectores"], bool):
             raise ApiError(HTTPStatus.BAD_REQUEST, "conectores tiene que ser sí o no.")
 
+    def _check_placa_libre(self, red_id: int, eq: dict, propio=None):
+        """Una placa real va una sola vez en el mapa de una red: si no, no se sabría cuál de las dos lleva su luz."""
+        datos = eq["datos"]
+        if eq["tipo"] != "olt" or "placa" not in datos:
+            return
+        for row in self.conn().execute(
+                "SELECT q.id, q.nombre, q.datos, e.nombre AS donde FROM equipos q JOIN elementos e ON e.id = q.elemento_id "
+                "WHERE q.red_id = ? AND q.tipo = 'olt' AND q.borrado IS NULL AND e.borrado IS NULL", (red_id,)):
+            otro = json.loads(row["datos"] or "{}")
+            if row["id"] == propio or otro.get("placa") != datos["placa"]:
+                continue
+            if ((otro.get("olt_id") is not None and otro.get("olt_id") == datos.get("olt_id"))
+                    or normalizado(otro.get("olt")) == normalizado(datos["olt"])):
+                raise ApiError(HTTPStatus.CONFLICT,
+                               f"La placa {datos['placa']} de {datos['olt']} ya está en el mapa: es "
+                               f"«{row['nombre'] or 'una placa sin nombre'}», en {row['donde'] or 'un nodo'}.")
+
     def add_equipo(self, element_id: int, fields: dict, usuario: str) -> dict:
         t = now_iso()
         self.begin()
@@ -1325,6 +1362,7 @@ class Store:
                 "notas": fields.get("notas", ""),
             }
             self._check_equipo(elemento, eq)
+            self._check_placa_libre(elemento["red_id"], eq)
             v = self.next_version()
             cur = self.conn().execute(
                 "INSERT INTO equipos (red_id, elemento_id, tipo, nombre, entradas, salidas, datos, notas, creado, creado_por, "
@@ -1361,6 +1399,7 @@ class Store:
                 "notas": fields.get("notas", row["notas"]),
             }
             self._check_equipo(elemento, eq)
+            self._check_placa_libre(row["red_id"], eq, equipo_id)
             # Achicar un equipo no puede dejar uniones en puertos que ya no existen.
             colgadas = []
             for f in self._live_fusions("elemento_id = ? AND (a LIKE ? OR b LIKE ?)",
@@ -4623,8 +4662,10 @@ class Integraciones:
         Cada cliente se cruza con su contrato de Wispro igual que en la ficha (y, si
         no, por la ONT anotada). Varias redes (todas juntas) se leen a la vez; cuentan
         las que tienen el panel conectado. leido: la lectura del panel más vieja de
-        las que se usaron."""
-        out = {"clientes": {}, "errores": [], "leido": None, "conectadas": 0}
+        las que se usaron. olts: las placas PON de las OLT de esas redes con lo que
+        se lee de cada puerto (ver placas_pon), para las placas de las cartas de los
+        nodos que están vinculadas con ellas."""
+        out = {"clientes": {}, "olts": [], "errores": [], "leido": None, "conectadas": 0}
         ids = [r for r in red_ids if self.lee_olt(r)]
         out["conectadas"] = len(ids)
         for r, dw, dp in self._leer_redes(store, ids, out):
@@ -4632,6 +4673,7 @@ class Integraciones:
                 continue
             if dp.leido and (out["leido"] is None or dp.leido < out["leido"]):
                 out["leido"] = dp.leido
+            out["olts"].extend(self.placas_pon(r, dp))
             rows = store.clientes_red(r)
             cruce = Cruce(dw, rows) if dw is not None else None
             for row in rows:
@@ -4649,6 +4691,47 @@ class Integraciones:
                     out["clientes"][str(row["id"])] = {"estado": medida["estado"], "rx": medida["rx"],
                                                        "cuando": medida["cuando"], "causa": medida["causa"],
                                                        "interfaz": medida["interfaz"]}
+        return out
+
+    def placas_pon(self, red_id: int, dp) -> list:
+        """Las placas PON de las OLT de una red y lo que se lee de cada uno de sus
+        puertos: si está en servicio, cuánto emite, el tráfico, sus ONT, cuántas en
+        línea, por qué cayeron las otras y cuánto reciben. Es lo que una placa de OLT
+        cargada en la carta de un nodo toma de la placa real con que está vinculada
+        (datos.olt y datos.placa; su puerto N es el de interfaz placa/N).
+          [{red, id, nombre, modelo, leido, error, placas: [{placa: "0/13", slot, nombre, estado, desde,
+            puertos: [{n, interfaz, estado, tx, entra, sale, onts, en_linea, fibra, energia, otras, criticas,
+                       rx_prom, rx_min, ultima_caida, nivel: caido | parcial | atencion | bien}]}]}]"""
+        u = umbrales_de(dp.umbrales)
+        grupos = {(g["olt"], g["interfaz"]): g for g in resumen_pon([
+            {"olt": m["olt"], "interfaz": m["interfaz"], "rx": m["rx"], "ultima_caida": m["ultima_caida"],
+             "nivel": nivel_ont(m, u), "motivo": tipo_causa(m["causa"])} for m in dp.onts])}
+        out = []
+        for e in self.equipos_json(red_id, dp, False):
+            placas = []
+            for pl in e["placas"]:
+                por_placa = {}  # (una placa de verdad da una sola; se agrupa por lo que dicen sus puertos)
+                for x in pl["puertos"]:
+                    interfaz = x.get("interfaz")
+                    if x["tipo"] != "pon" or not isinstance(interfaz, str) or not PLACA_OLT.fullmatch(interfaz) or "/" not in interfaz:
+                        continue
+                    puerto = {"n": x["puerto"], "interfaz": interfaz, "estado": x.get("estado")}
+                    for campo in ("tx", "entra", "sale"):
+                        if x.get(campo) is not None:
+                            puerto[campo] = x[campo]
+                    g = grupos.get((e["nombre"], interfaz))
+                    if g is not None:
+                        puerto.update({k: g[k] for k in ("onts", "en_linea", "fibra", "energia", "otras", "criticas",
+                                                         "rx_prom", "rx_min", "ultima_caida")})
+                        puerto["nivel"] = g["estado"]
+                    por_placa.setdefault(interfaz.rsplit("/", 1)[0], []).append(puerto)
+                for placa, puertos in por_placa.items():
+                    puertos.sort(key=lambda x: x["n"])
+                    placas.append({"placa": placa, "slot": pl["slot"], "nombre": pl.get("nombre"), "estado": pl.get("estado"),
+                                   "desde": 0 if puertos[0]["n"] == 0 else 1, "puertos": puertos})
+            error = e.get("error") or (None if e.get("leido") else "se está leyendo por primera vez")
+            out.append({"red": red_id, "id": e["id"], "nombre": e["nombre"], "modelo": e.get("chasis_nombre") or e.get("modelo"),
+                        "leido": e.get("leido"), "error": error, "placas": placas})
         return out
 
     def cajas(self, store, red_ids) -> dict:

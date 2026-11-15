@@ -452,6 +452,88 @@ class OltDirectaTest(unittest.TestCase):
         self.assertEqual(data["configurada"]["panel"], False)
         self.assertEqual(data["equipos"][0]["error"], "no se lee: está en pausa")
 
+    def test_placas_del_nodo_vinculadas(self):
+        """La placa de OLT de la carta de un nodo, vinculada con una placa real: lo que la API le da de
+        cada puerto, qué se acepta al vincular y que una placa real va una sola vez por red."""
+        olt = OltFalsa(api, community=COMUNIDAD)
+        self.addCleanup(olt.cerrar)
+        red = self.red("Placas")
+        eq_id = self.cargar(red, olt, consola="")
+        self.assertEqual(self.ok("GET", f"/api/integracion/estados?red={red}")["olts"],
+                         [{"red": red, "id": eq_id, "nombre": "OLT Centro", "modelo": None, "leido": None,
+                           "error": "se está leyendo por primera vez", "placas": []}])
+        self.leer(red)
+        (de_carta,) = self.ok("GET", f"/api/integracion/estados?red={red}")["olts"]
+        self.assertEqual((de_carta["id"], de_carta["nombre"], de_carta["modelo"], de_carta["error"]), (eq_id, "OLT Centro", "MA5800-X2 / EA5800-X2", None))
+        self.assertIsNotNone(de_carta["leido"])
+        # Solo las placas PON (ni la de energía ni las de control), cada una con su chasis/slot y sus 16 puertos desde el 0.
+        self.assertEqual([(x["placa"], x["slot"], x["nombre"], x["estado"], x["desde"], len(x["puertos"])) for x in de_carta["placas"]],
+                         [("0/1", 1, "H901GPHF", "normal", 0, 16), ("0/2", 2, "H902GPSF", "normal", 0, 16)])
+        cero = de_carta["placas"][0]["puertos"][0]
+        self.assertEqual((cero["n"], cero["interfaz"], cero["estado"], cero["tx"], cero["onts"], cero["en_linea"], cero["fibra"],
+                          cero["nivel"], cero["rx_min"]), (0, "0/1/0", "up", 3.2, 3, 3, 0, "bien", -20.7))
+        self.assertAlmostEqual(cero["rx_prom"], -19.6, delta=0.05)
+        libre = de_carta["placas"][0]["puertos"][9]  # un puerto sin ONT: lo que se lee del puerto y nada más
+        self.assertEqual((libre["n"], libre["interfaz"], "onts" in libre, "nivel" in libre), (9, "0/1/9", False, False))
+
+        nodo = self.ok("POST", "/api/elementos", {"red": red, "tipo": "nodo", "nombre": "Central", "lon": -58.17, "lat": -26.17},
+                       status=201)["elemento"]
+
+        def placa(status=201, elemento=nodo, **datos):
+            code, data = self.pedir("POST", "/api/equipos", {"elemento": elemento["id"], "tipo": "olt", "nombre": datos.pop("nombre", "Placa"),
+                                                             "salidas": 16, "datos": {"desde": 0, **datos}})
+            self.assertEqual(code, status, data)
+            return data["equipos"][0] if status == 201 else data
+
+        uno = placa(nombre="Placa 1", olt="OLT Centro", olt_id=eq_id, placa="0/1", potencia=4)
+        self.assertEqual(uno["datos"], {"desde": 0, "olt": "OLT Centro", "olt_id": eq_id, "placa": "0/1", "potencia": 4})
+        # Lo que no es un vínculo: falta la OLT o la placa, o están mal escritas.
+        for datos in ({"placa": "0/2"}, {"olt": "OLT Centro"}, {"olt": "OLT Centro", "placa": "0/"}, {"olt": "OLT Centro", "placa": 2},
+                      {"olt": "OLT Centro", "placa": "slot 2"}, {"olt": 7, "placa": "0/2"}, {"olt": "x" * 81, "placa": "0/2"},
+                      {"olt": "OLT Centro", "placa": "0/2", "olt_id": "../etc"}, {"olt_id": eq_id}):
+            with self.subTest(datos=datos):
+                self.assertIn("error", placa(400, **datos))
+        # Una placa real, una sola vez por red: ni en este nodo ni en otro, aunque la OLT se nombre con otras
+        # mayúsculas o haya cambiado de nombre (se la reconoce por su número).
+        otro_nodo = self.ok("POST", "/api/elementos", {"red": red, "tipo": "nodo", "nombre": "Norte", "lon": -58.18, "lat": -26.18},
+                            status=201)["elemento"]
+        error = placa(409, olt="OLT Centro", placa="0/1")["error"]
+        self.assertEqual(error, "La placa 0/1 de OLT Centro ya está en el mapa: es «Placa 1», en Central.")
+        placa(409, elemento=otro_nodo, olt="olt centro", placa="0/1")
+        placa(409, elemento=otro_nodo, olt="OLT con otro nombre", olt_id=eq_id, placa="0/1")
+        dos = placa(nombre="Placa 2", elemento=otro_nodo, olt="OLT Centro", olt_id=eq_id, placa="0/2")
+        placa(nombre="De otra OLT", elemento=otro_nodo, olt="OLT Sur", placa="0/1")  # el mismo slot de otra OLT sí
+        suelta = placa(nombre="Sin vincular")
+        self.assertEqual(suelta["datos"], {"desde": 0})
+        # Vincular una ya cargada (Editar): a una placa ocupada no; guardarla como está, sí.
+        code, data = self.pedir("PUT", f"/api/equipos/{suelta['id']}", {"datos": {"desde": 0, "olt": "OLT Centro", "olt_id": eq_id, "placa": "0/2"},
+                                                                       "version": suelta["version"]})
+        self.assertEqual((code, data["error"]), (409, "La placa 0/2 de OLT Centro ya está en el mapa: es «Placa 2», en Norte."))
+        uno = self.ok("PUT", f"/api/equipos/{uno['id']}", {"nombre": "Placa uno", "version": uno["version"]})["equipos"][0]
+        self.assertEqual(uno["datos"]["placa"], "0/1")
+        # Al borrar la placa del mapa (o al desvincularla), la real queda libre para otra.
+        self.ok("DELETE", f"/api/equipos/{dos['id']}?version={dos['version']}")
+        suelta = self.ok("PUT", f"/api/equipos/{suelta['id']}", {"datos": {"desde": 0, "olt": "OLT Centro", "olt_id": eq_id, "placa": "0/2"},
+                                                               "version": suelta["version"]})["equipos"][0]
+        self.assertEqual(suelta["datos"]["placa"], "0/2")
+        uno = self.ok("PUT", f"/api/equipos/{uno['id']}", {"datos": {"desde": 0}, "version": uno["version"]})["equipos"][0]
+        self.assertEqual(uno["datos"], {"desde": 0})
+        placa(nombre="Otra vez la 1", olt="OLT Centro", olt_id=eq_id, placa="0/1")
+        # En otra red, la misma OLT y la misma placa no molestan (cada red, lo suyo).
+        otra = self.red("Placas B")
+        nodo_b = self.ok("POST", "/api/elementos", {"red": otra, "tipo": "nodo", "nombre": "B", "lon": -58.2, "lat": -26.2},
+                         status=201)["elemento"]
+        placa(elemento=nodo_b, olt="OLT Centro", placa="0/1")
+        self.assertEqual(self.ok("GET", f"/api/integracion/estados?red={otra}")["olts"], [])  # y esa red no ve la OLT de esta
+        # Un puerto se queda sin luz: la carta lo ve caído, con el motivo.
+        for sn in ("HWTC00000065", "HWTC00000066", "HWTC00000067"):
+            olt.caer(sn, causa=2)
+        self.leer(red)
+        cero = self.ok("GET", f"/api/integracion/estados?red={red}")["olts"][0]["placas"][0]["puertos"][0]
+        self.assertEqual((cero["onts"], cero["en_linea"], cero["fibra"], cero["energia"], cero["nivel"], cero["rx_prom"]),
+                         (3, 0, 3, 0, "caido", None))
+        self.assertIsNotNone(cero["ultima_caida"])
+
     def test_la_familia_ma5600t(self):
         """Una MA5680T (y sus hermanas): se lee con las mismas tablas y se reconoce su chasis."""
         olt = OltFalsa(api, community=COMUNIDAD, placas=chasis_ma5680t(), nombre="MA5680T")
@@ -633,6 +715,15 @@ class OltDirectaTest(unittest.TestCase):
         self.assertEqual((data["pon"][0]["sale"], data["pon"][0]["entra"], data["pon"][0]["tx"]), (172000000.0, 9500000.0, None))
         self.assertEqual(data["onts"][0]["distancia"], 1234.0)
         self.assertNotIn("host_panel", self.ok("GET", f"/api/olt?red={red}", redes=str(red))["equipos"][0])
+        # Para la carta del nodo: de la OLT del panel, solo su placa PON, con lo que el panel sabe de cada puerto.
+        (de_carta,) = self.ok("GET", f"/api/integracion/estados?red={red}")["olts"]
+        self.assertEqual((de_carta["red"], de_carta["id"], de_carta["nombre"], de_carta["modelo"]), (red, "p1", "ALVATIC-MA5800-01", "MA5800-X17"))
+        (pon,) = de_carta["placas"]
+        self.assertEqual((pon["placa"], pon["slot"], pon["nombre"], pon["desde"], len(pon["puertos"])), ("0/18", 18, "H901GPHF", 0, 16))
+        self.assertEqual(pon["puertos"][0], {"n": 0, "interfaz": "0/18/0", "estado": "up", "entra": 9500000.0, "sale": 172000000.0,
+                                             "onts": 1, "en_linea": 1, "fibra": 0, "energia": 0, "otras": 0, "criticas": 0,
+                                             "rx_prom": -21.3, "rx_min": -21.3, "ultima_caida": None, "nivel": "bien"})
+        self.assertEqual(pon["puertos"][5], {"n": 5, "interfaz": "0/18/5", "estado": None})  # sin ONT ni lectura del puerto
         # Se le carga la conexión a esa OLT: sus ONT siguen saliendo del panel y de la OLT se lee lo que el panel no da.
         code, data = self.pedir("POST", "/api/olt/equipos", {"red": red, "equipo": self.equipo(olt, consola="", panel=9)})
         self.assertEqual(code, 400)  # la 9 es de otra empresa
@@ -647,6 +738,8 @@ class OltDirectaTest(unittest.TestCase):
         placas = {x["slot"]: x for x in equipo["placas"]}
         self.assertEqual(placas[18]["puertos"][3]["tx"], 3.41)  # de la OLT, por SNMP
         self.assertEqual(data["pon"][0]["tx"], 3.2)
+        (de_carta,) = self.ok("GET", f"/api/integracion/estados?red={red}")["olts"]
+        self.assertEqual((de_carta["id"], de_carta["placas"][0]["puertos"][3]["tx"]), (eq_id, 3.41))  # y pasa a la carta
         # El historial anota el tráfico de los puertos, también el de subida.
         historia = api.Handler.historia
         historia.anotar(red, api.Handler.integraciones.datos_panel(red)[0])

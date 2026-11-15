@@ -3,12 +3,17 @@
 // uniones entre todo eso, dibujadas como fibras con su protector de empalme.
 // Se une tocando un extremo y después el otro, y una unión hecha se puede pasar
 // a otra fibra. Los cables y los equipos se ordenan en columnas o se acomodan
-// libres sobre la bandeja, con zoom; esa disposición queda guardada para todos.
+// libres sobre la bandeja; esa disposición queda guardada para todos. En los dos
+// modos hay zoom (botones, dos dedos, Control y la rueda). En un nodo, la placa
+// de la OLT se puede vincular con la placa real de una OLT que traza lee: sus
+// puertos pasan a ser los PON de verdad, con lo que se lee de cada uno.
 // También se ve como lista y se copia como texto.
 
 import { api } from './api.js';
 import { CABLES, ELEMENTOS, formatFecha, formatLargo, sugerirNombre } from './modelo.js';
 import * as F from './fibras.js';
+import { dbTexto, haceCuanto } from './integracion.js';
+import { bps } from './equipos.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const RADIO_PEGAR_M = 25; // cables que terminan así de cerca, sin pegar, se ofrecen para pegar
@@ -26,6 +31,9 @@ const PASO_TECLA = 16;
 // Cordón entre dos equipos (patchcord monomodo, amarillo) y adaptadores SC.
 const CORDON = '#e3c21b';
 const ADAPTADOR = { apc: '#2f8f4e', upc: '#2563c9', otro: '#6b7780' };
+// Cómo se pinta lo que se lee de un puerto PON real (los colores de los niveles del tablero).
+const CLASE_NIVEL = { bien: 'nivel-bien', atencion: 'nivel-atencion', parcial: 'nivel-mal', caido: 'nivel-caida', libre: 'nivel-ninguno', apagado: 'nivel-ninguno' };
+const SONDEO_MS = 60 * 1000; // con la carta abierta, las lecturas de la OLT se piden una vez por minuto
 const ASA_SVG = '<svg viewBox="0 0 10 18" aria-hidden="true"><circle cx="2.5" cy="3" r="1.5"/><circle cx="7.5" cy="3" r="1.5"/>'
   + '<circle cx="2.5" cy="9" r="1.5"/><circle cx="7.5" cy="9" r="1.5"/><circle cx="2.5" cy="15" r="1.5"/><circle cx="7.5" cy="15" r="1.5"/></svg>';
 
@@ -200,6 +208,11 @@ export function setupCarta({ root, red, acciones, toast }) {
   let cuadro = null; // donde se miden las líneas: .carta-diagrama (columnas) o .carta-lienzo (libre)
   let visor = null; // modo libre: la bandeja que se mueve y se acerca
   let lienzo = null;
+  let escala = null; // columnas: el envoltorio del diagrama, del tamaño que ocupa con su zoom
+  let zoomCaja = null; // los botones de zoom, sobre la esquina de la carta (en los dos modos)
+  let pellizco = null; // columnas: zoom con dos dedos en curso
+  let refrescoForm = null; // el formulario de una placa de OLT abierto: se rehace su lista de placas reales si llegan lecturas
+  let sondeo = 0; // con la carta abierta, se piden las lecturas de la OLT cada minuto
   let bloques = new Map(); // modo libre: clave -> { el, col, x, y, auto }
   let lineas = null; // las líneas dibujadas (para moverlas mientras se arrastra un bloque)
   let fondo = null; // el grupo con lo que pasa sin cortar
@@ -213,6 +226,7 @@ export function setupCarta({ root, red, acciones, toast }) {
   let restaurandoFoco = false;
   let modoSinGuardar = 'columnas'; // sin almacenamiento (navegación privada), el modo dura lo que la página
   const vistas = new Map(); // elemento -> { tx, ty, z } del modo libre (de cada usuario; no se guarda)
+  const zooms = new Map(); // elemento -> zoom del modo columnas (ídem)
   const pendientes = new Map(); // elemento -> disposición todavía sin confirmar por el servidor
   // Las líneas se recalculan si cambia el tamaño (girar el teléfono, abrir un tubo).
   const observador = 'ResizeObserver' in window ? new ResizeObserver(() => pedirLineas()) : null;
@@ -274,6 +288,8 @@ export function setupCarta({ root, red, acciones, toast }) {
       libre: modoLocal() === 'libre',
       luz: F.iluminacion(s),
       estados: acciones.senal?.estados() ?? null,
+      // Las OLT de esta red que traza lee, con sus placas PON (para vincularlas con las de la carta).
+      olts: F.oltsLeidas(s).filter((o) => o.red === elemento.properties.red),
     };
   }
 
@@ -282,7 +298,7 @@ export function setupCarta({ root, red, acciones, toast }) {
   function senalEn(d, ext) {
     const reg = d.luz.extremos.get(`${elementoId}|${ext}`);
     if (!reg) return null;
-    const abajo = F.estadoAbajo(reg.clientes, d.estados);
+    const abajo = F.estadoLuz(d.s, reg, d.estados);
     return { reg, abajo, estado: abajo.estado };
   }
 
@@ -334,9 +350,20 @@ export function setupCarta({ root, red, acciones, toast }) {
     for (const c of [...d.rotos, ...d.repetidos]) partes.push(`r${c.id}`);
     for (const c of cercanos(d)) partes.push(`p${c.cable.id}:${c.cable.properties.version}`);
     for (const reg of d.luz.porElemento.get(elementoId) ?? []) {
-      const ab = F.estadoAbajo(reg.clientes, d.estados);
-      partes.push(`L${reg.ext}:${ab.estado}:${ab.clientes}:${ab.enLinea}:${ab.caidos}:${reg.perdida.toFixed(1)}:${reg.potencia ?? ''}`);
+      const ab = F.estadoLuz(d.s, reg, d.estados);
+      partes.push(`L${reg.ext}:${ab.estado}:${ab.clientes}:${ab.enLinea}:${ab.caidos}:${reg.perdida.toFixed(1)}:`
+        + `${Number.isFinite(reg.potencia) ? reg.potencia.toFixed(1) : ''}`);
     }
+    // Lo que se lee de las placas vinculadas (cambia solo, cada minuto).
+    for (const e of d.equipos) {
+      if (!F.vinculada(e)) continue;
+      const real = F.placaReal(d.s, e);
+      partes.push(`P${e.id}:${real?.olt.nombre ?? ''}:${real?.placa ? real.placa.nombre ?? '' : '-'}`);
+      for (const x of real?.placa?.puertos ?? []) {
+        partes.push(`${x.n}:${x.estado ?? ''}:${x.onts ?? ''}:${x.en_linea ?? ''}:${x.fibra ?? ''}:${x.nivel ?? ''}:${Number.isFinite(x.tx) ? x.tx.toFixed(1) : ''}`);
+      }
+    }
+    partes.push(`O${d.olts.map((o) => `${o.id}:${o.placas.length}`).join(',')}`);
     return partes.join('|');
   }
 
@@ -372,6 +399,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (!p) return ext;
     if (p.tipo === 'c') return `F${p.n}`;
     const eq = state().equipos.get(p.id);
+    if (F.vinculada(eq)) return `PON ${F.interfazPuerto(eq, p.n)}`;
     if (eq?.tipo === 'olt') return `PON ${F.numeroPuerto(eq, p.n)}`;
     return p.lado === 'e' ? `E${p.n}` : `S${p.n}`;
   }
@@ -380,7 +408,10 @@ export function setupCarta({ root, red, acciones, toast }) {
   function nombreCorto(d, ext) {
     const p = F.parseExtremo(ext);
     if (!p) return ext;
-    if (p.tipo === 'q') return `${state().equipos.get(p.id)?.nombre || 'Equipo'} ${corto(ext)}`;
+    if (p.tipo === 'q') {
+      const eq = state().equipos.get(p.id);
+      return F.vinculada(eq) ? corto(ext) : `${eq?.nombre || 'Equipo'} ${corto(ext)}`; // el PON real ya dice cuál es
+    }
     const punta = d.puntas.find((x) => x.cable.id === p.id && x.lado === p.lado);
     const nombre = punta?.cable.properties.nombre || 'Cable';
     const hacia = punta?.pasante && punta.hacia?.elemento ? ` (hacia ${punta.hacia.elemento.properties.nombre})` : '';
@@ -469,11 +500,17 @@ export function setupCarta({ root, red, acciones, toast }) {
     cab = h('header.carta-cab');
     cuerpo = h('div.carta-cuerpo', { tabindex: '-1' });
     pie = h('footer.carta-pie', { 'aria-live': 'polite' });
-    const panel = h('div.carta-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'carta-titulo' }, cab, cuerpo, pie);
+    zoomCaja = controlesZoom();
+    const panel = h('div.carta-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'carta-titulo' }, cab, cuerpo, zoomCaja, pie);
     root.append(panel);
     cuerpo.addEventListener('click', alTocar);
     cuerpo.addEventListener('pointerdown', alApoyar);
     cuerpo.addEventListener('wheel', alRueda, { passive: false });
+    // En columnas la carta se desplaza con el dedo (nativo) y el zoom va con dos dedos.
+    cuerpo.addEventListener('touchstart', alTocarDos, { passive: true });
+    cuerpo.addEventListener('touchmove', alMoverDos, { passive: false });
+    cuerpo.addEventListener('touchend', alSoltarDos, { passive: true });
+    cuerpo.addEventListener('touchcancel', alSoltarDos, { passive: true });
     for (const tipo of ['gesturestart', 'gesturechange', 'gestureend']) cuerpo.addEventListener(tipo, alGestoSafari);
     cuerpo.addEventListener('keydown', alTeclear);
     // Con el teclado, en el modo libre la bandeja va hasta lo que tiene el foco.
@@ -503,7 +540,9 @@ export function setupCarta({ root, red, acciones, toast }) {
     const conBloques = d.puntas.length || d.equipos.length;
     const herr = h('div.carta-herr', {},
       boton('Agregar splitter', () => abrirForm('splitter')),
-      d.elemento.properties.tipo === 'nodo' ? boton('Agregar OLT', () => abrirForm('olt')) : null,
+      d.elemento.properties.tipo === 'nodo'
+        ? boton('Agregar placa de OLT', () => abrirForm('olt'), { title: 'Una placa de puertos PON: una de las que traza lee de la OLT, o cargada a mano' })
+        : null,
       vista === 'diagrama' && conBloques
         ? h('div.carta-modo', { role: 'group', 'aria-label': 'Cómo se acomoda la carta' },
           boton('Columnas', () => cambiarModo('columnas'), { 'aria-pressed': String(!d.libre), title: 'Cables a los costados, equipos en el medio' }),
@@ -571,14 +610,22 @@ export function setupCarta({ root, red, acciones, toast }) {
       cuerpo.replaceChildren(...lista(d));
       cuerpo.scrollTop = scroll;
       cuadro = null;
+      escala = null;
     } else if (d.libre && (d.puntas.length || d.equipos.length)) {
+      escala = null;
       renderLibre(d);
     } else {
-      const scroll = cuerpo.classList.contains('libre') ? 0 : cuerpo.scrollTop;
+      const libreAntes = cuerpo.classList.contains('libre');
+      const [arriba, izquierda] = libreAntes ? [0, 0] : [cuerpo.scrollTop, cuerpo.scrollLeft];
       soltarLibre();
+      cuadro = null;
+      escala = null;
       cuerpo.className = 'carta-cuerpo carta-bandeja';
       cuerpo.replaceChildren(...diagrama(d));
-      cuerpo.scrollTop = scroll;
+      // Con zoom, el diagrama toma su tamaño antes de volver adonde estaba la carta.
+      if (cuadro) aplicarEscala();
+      cuerpo.scrollTop = arriba;
+      cuerpo.scrollLeft = izquierda;
     }
     if (selector) {
       restaurandoFoco = true;
@@ -590,6 +637,8 @@ export function setupCarta({ root, red, acciones, toast }) {
     }
     if (foco?.tipo !== 'form') renderPie(d);
     ultimaFirma = firma(d);
+    if (cuadro && cuadro !== lienzo) aplicarEscala();
+    pintarZoom();
     pedirLineas();
   }
 
@@ -625,13 +674,15 @@ export function setupCarta({ root, red, acciones, toast }) {
       const puntaDe = new Map(d.puntas.map((p) => [p.key, p]));
       const equipoDe = new Map(d.equipos.map((e) => [`q${e.id}`, e]));
       const svg = svgEl('svg', { class: 'carta-lineas', 'aria-hidden': 'true' });
-      cuadro = h(`div.carta-diagrama${d.equipos.length ? '.con-equipos' : ''}`, {},
+      // (en el teléfono, un costado sin cables no ocupa lugar: lo usan los equipos y el otro costado)
+      cuadro = h(`div.carta-diagrama${d.equipos.length ? '.con-equipos' : ''}${cols.i.length ? '' : '.sin-izq'}${cols.d.length ? '' : '.sin-der'}`, {},
         svg,
         h('div.carta-col', { 'data-col': 'i' }, ...cols.i.map((k) => bloquePunta(d, puntaDe.get(k), 'i'))),
         h('div.carta-col.carta-medio', { 'data-col': 'm' }, ...cols.m.map((k) => bloqueEquipo(d, equipoDe.get(k)))),
         h('div.carta-col', { 'data-col': 'd' }, ...cols.d.map((k) => bloquePunta(d, puntaDe.get(k), 'd'))),
       );
-      out.push(cuadro);
+      escala = h('div.carta-escala', {}, cuadro);
+      out.push(escala);
     }
     const cerca = cercanos(d);
     if (cerca.length) out.push(bloqueCercanos(d, cerca));
@@ -724,9 +775,54 @@ export function setupCarta({ root, red, acciones, toast }) {
       h('div.punta-tubos', {}, ...tubos));
   }
 
+  // De qué placa real es una placa vinculada, en pocas palabras: "OLT - CARCA · 0/13 · H805GPFD"
+  // (y si hoy no hay lectura de esa OLT o de esa placa, lo dice).
+  function textoPlacaReal(d, eq) {
+    const real = F.placaReal(d.s, eq);
+    const partes = [real?.olt.nombre ?? eq.datos.olt, eq.datos.placa];
+    if (real?.placa?.nombre) partes.push(real.placa.nombre);
+    else if (!real) partes.push('sin lectura de esa OLT');
+    else if (!real.placa) partes.push('la OLT no informa esa placa');
+    return partes.join(' · ');
+  }
+
+  // Si un extremo es un puerto de una placa vinculada: su placa, lo que se lee de él y de qué OLT.
+  function puertoReal(d, ext) {
+    const p = F.parseExtremo(ext);
+    if (p?.tipo !== 'q' || p.lado !== 's') return null;
+    const eq = d.s.equipos.get(p.id);
+    if (!F.vinculada(eq)) return null;
+    const real = F.placaReal(d.s, eq);
+    return { eq, n: p.n, interfaz: F.interfazPuerto(eq, p.n), olt: real?.olt ?? null, lectura: F.lecturaPuerto(d.s, eq, p.n) };
+  }
+
+  // "40 ONT, 37 en línea… · emite 5,3 dBm · bajada 119 Mb/s · subida 12,6 Mb/s · leído hace 1 min"
+  function textoPuertoReal(x) {
+    if (!x.lectura) return x.olt ? `PON ${x.interfaz}: la OLT no informa ese puerto` : `PON ${x.interfaz}: sin lectura de ${x.eq.datos.olt} ahora`;
+    const l = x.lectura;
+    const trafico = Number.isFinite(l.sale) || Number.isFinite(l.entra) ? `bajada ${bps(l.sale ?? 0)} · subida ${bps(l.entra ?? 0)}` : null;
+    return [`PON ${x.interfaz}: ${F.textoLectura(l)}`, trafico, x.olt?.leido ? `leído ${haceCuanto(x.olt.leido)}` : null].filter(Boolean).join(' · ');
+  }
+
+  // La placa real entera: "OLT - CARCA · 0/13 · H805GPFD · 430 ONT, 412 en línea · emiten de 5,0 a 7,1 dBm · leída hace 1 min"
+  function textoPlacaLeida(d, eq) {
+    const real = F.placaReal(d.s, eq);
+    const r = F.resumenPlaca(real?.placa);
+    const partes = [textoPlacaReal(d, eq)];
+    if (r) {
+      partes.push(r.onts ? `${r.onts} ONT, ${r.enLinea} en línea${r.caidos ? `, ${plural(r.caidos, 'puerto caído', 'puertos caídos')}` : ''}` : 'sin ONT');
+      if (r.txMin !== null) partes.push(r.txMax - r.txMin < 0.05 ? `emiten ${dbTexto(r.txMin)} dBm` : `emiten de ${dbTexto(r.txMin)} a ${dbTexto(r.txMax)} dBm`);
+      if (real.olt.leido) partes.push(`leída ${haceCuanto(real.olt.leido)}`);
+    } else if (real?.olt.error) {
+      partes.push(real.olt.error);
+    }
+    return partes.join(' · ');
+  }
+
   function bloqueEquipo(d, eq) {
     const marcado = foco?.tipo === 'equipo' && foco.id === eq.id;
     const movido = extremoMovido();
+    const vinculada = F.vinculada(eq);
     const puerto = (lado, n) => {
       const ext = F.extremoEquipo(eq.id, lado, n);
       const f = d.usado.get(ext);
@@ -737,23 +833,33 @@ export function setupCarta({ root, red, acciones, toast }) {
         const fin = F.destino(state(), elementoId, ext);
         if (fin?.motivo === 'cliente') detalle = state().elementos.get(fin.elemento)?.properties.nombre ?? '';
       }
-      const texto = eq.tipo === 'olt' ? `PON ${F.numeroPuerto(eq, n)}` : lado === 'e' ? (eq.entradas > 1 ? `E${n}` : 'E') : String(n);
+      // El puerto de una placa vinculada lleva el nombre que tiene en la OLT: 0/13/2.
+      const texto = vinculada ? F.interfazPuerto(eq, n)
+        : eq.tipo === 'olt' ? `PON ${F.numeroPuerto(eq, n)}` : lado === 'e' ? (eq.entradas > 1 ? `E${n}` : 'E') : String(n);
       const senal = senalEn(d, ext);
-      const etiquetaPto = F.etiquetaPuerto(eq, lado, n);
-      // En la OLT, cuántos clientes tiene abajo cada puerto (y cuántos en línea, si se sabe).
+      const etiquetaPto = F.etiquetaPuerto(eq, lado, n, vinculada ? F.nombreOlt(d.s, eq) : null);
+      // En la OLT, las ONT de cada puerto y cuántas en línea: las de verdad si la placa está
+      // vinculada (esté o no unido el puerto en la carta); si no, los clientes del mapa que tiene abajo.
+      const lectura = vinculada ? F.lecturaPuerto(d.s, eq, n) : null;
+      const nivel = lectura ? F.nivelLectura(lectura) : null;
       let cuenta = null;
-      if (senal && eq.tipo === 'olt' && senal.abajo.clientes) {
-        cuenta = senal.abajo.enLinea || senal.abajo.caidos ? `${senal.abajo.enLinea}/${senal.abajo.clientes}` : `${senal.abajo.clientes} cli`;
+      if (lectura?.onts) {
+        cuenta = h(`span.lectura-dato.${CLASE_NIVEL[nivel] ?? 'nivel-ninguno'}`, { text: `${lectura.en_linea ?? 0}/${lectura.onts}`, 'aria-hidden': 'true' });
+      } else if (senal && eq.tipo === 'olt' && senal.abajo.clientes) {
+        cuenta = h('span.luz-dato', {
+          text: senal.abajo.enLinea || senal.abajo.caidos ? `${senal.abajo.enLinea}/${senal.abajo.clientes}` : `${senal.abajo.clientes} cli`, 'aria-hidden': 'true',
+        });
       }
-      const titulo = [detalle ? `${etiquetaPto}: ${detalle}` : etiquetaPto, senal ? textoSenal(d, senal) : null].filter(Boolean).join(' · ');
-      return h(`button.puerto.${estado}${marcada ? '.elegida' : ''}${senal ? `.luz.luz-${senal.estado}` : ''}`, {
+      const leido = lectura ? F.textoLectura(lectura) : null;
+      const titulo = [detalle ? `${etiquetaPto}: ${detalle}` : etiquetaPto, leido, senal ? textoSenal(d, senal) : null].filter(Boolean).join(' · ');
+      return h(`button.puerto.${estado}${marcada ? '.elegida' : ''}${senal ? `.luz.luz-${senal.estado}` : ''}${nivel ? `.leido.leido-${nivel}` : ''}`, {
         type: 'button',
         'data-ext': ext,
         title: titulo,
-        'aria-label': `${etiquetaPto}: ${f ? `unida con ${etiqueta(f.a === ext ? f.b : f.a)}` : 'libre'}${senal ? `. ${textoSenal(d, senal)}` : ''}`,
+        'aria-label': `${etiquetaPto}: ${f ? `unida con ${etiqueta(f.a === ext ? f.b : f.a)}` : 'libre'}${leido ? `. ${leido}` : ''}${senal ? `. ${textoSenal(d, senal)}` : ''}`,
         'aria-pressed': marcada ? 'true' : null,
       }, punto(null), h('span.puerto-num', { text: texto }),
-      cuenta ? h('span.luz-dato', { text: cuenta, 'aria-hidden': 'true' }) : null,
+      cuenta,
       detalle ? h('small', { text: detalle }) : null);
     };
     const entradas = [];
@@ -761,16 +867,18 @@ export function setupCarta({ root, red, acciones, toast }) {
     const salidas = [];
     for (let n = 1; n <= eq.salidas; n += 1) salidas.push(puerto('s', n));
     const nombre = eq.nombre || (eq.tipo === 'olt' ? 'OLT' : 'Splitter');
-    return h(`section.equipo${eq.tipo === 'olt' ? '.olt' : ''}${eq.datos?.conectores ? '.con-conectores' : ''}${marcado ? '.marcada' : ''}`,
-      { 'data-bloque': `q${eq.id}` },
-      h('div.equipo-tapa', {},
-        asa(`q${eq.id}`, nombre),
-        h('button.equipo-cab', { type: 'button', 'data-accion': 'equipo', 'data-id': String(eq.id) },
-          h('strong', { text: nombre }),
-          h('small', { text: eq.tipo === 'olt' ? `OLT · ${F.describirEquipo(eq)}` : F.describirEquipo(eq) }))),
-      h('div.equipo-puertos', {},
-        h('div.equipo-entradas', {}, ...entradas),
-        h('div.equipo-salidas', {}, ...salidas)));
+    const sinLectura = vinculada && !F.placaReal(d.s, eq)?.placa;
+    return h(`section.equipo${eq.tipo === 'olt' ? '.olt' : ''}${vinculada ? '.vinculada' : ''}${sinLectura ? '.sin-lectura' : ''}`
+      + `${eq.datos?.conectores ? '.con-conectores' : ''}${marcado ? '.marcada' : ''}`,
+    { 'data-bloque': `q${eq.id}` },
+    h('div.equipo-tapa', {},
+      asa(`q${eq.id}`, nombre),
+      h('button.equipo-cab', { type: 'button', 'data-accion': 'equipo', 'data-id': String(eq.id) },
+        h('strong', { text: nombre }),
+        h('small', { text: vinculada ? textoPlacaReal(d, eq) : eq.tipo === 'olt' ? `OLT · ${F.describirEquipo(eq)}` : F.describirEquipo(eq) }))),
+    h('div.equipo-puertos', {},
+      h('div.equipo-entradas', {}, ...entradas),
+      h('div.equipo-salidas', {}, ...salidas)));
   }
 
   function bloqueCercanos(d, cerca) {
@@ -814,7 +922,7 @@ export function setupCarta({ root, red, acciones, toast }) {
         lienzo.append(el);
       }
     }
-    cuerpo.replaceChildren(...(arriba.length ? [h('div.carta-arriba', {}, ...arriba)] : []), visor, controlesZoom());
+    cuerpo.replaceChildren(...(arriba.length ? [h('div.carta-arriba', {}, ...arriba)] : []), visor);
     ubicar(d);
     cuadro = lienzo;
     const v = vistas.get(elementoId);
@@ -855,12 +963,143 @@ export function setupCarta({ root, red, acciones, toast }) {
     }
   }
 
+  // Los botones de zoom: los mismos en columnas y en libre.
   function controlesZoom() {
-    return h('div.carta-zoom', {},
-      boton('−', () => zoomEn(1 / 1.25), { 'aria-label': 'Alejar', title: 'Alejar' }),
-      h('span.zoom-nivel', { 'aria-hidden': 'true' }),
-      boton('+', () => zoomEn(1.25), { 'aria-label': 'Acercar', title: 'Acercar' }),
-      boton('Ajustar', () => ajustarVista(), { title: 'Ver todo el ancho de la carta' }));
+    return h('div.carta-zoom', { role: 'group', 'aria-label': 'Zoom de la carta', hidden: true },
+      boton('−', () => zoomPaso(1 / 1.25), { 'aria-label': 'Alejar', title: 'Alejar' }),
+      boton('100 %', () => zoomCien(), { class: 'zoom-nivel', title: 'Volver al tamaño normal (100 %)' }),
+      boton('+', () => zoomPaso(1.25), { 'aria-label': 'Acercar', title: 'Acercar' }),
+      boton('Ajustar', () => zoomAjustar(), { title: 'Ver toda la carta' }));
+  }
+
+  const zoomActual = () => (visor ? vistaActual().z : zoomColumnas());
+
+  function zoomPaso(factor) {
+    if (visor) zoomEn(factor);
+    else zoomColumnasA(zoomColumnas() * factor);
+  }
+
+  function zoomCien() {
+    if (visor) zoomEn(1 / vistaActual().z);
+    else zoomColumnasA(1);
+  }
+
+  function zoomAjustar() {
+    if (visor) ajustarVista();
+    else ajustarColumnas();
+  }
+
+  // Los botones se ven cuando hay un diagrama con algo, y dicen el zoom de ahora.
+  function pintarZoom() {
+    if (!zoomCaja) return;
+    // (con un formulario abierto no se muestran: en el teléfono taparían la carta que queda a la vista)
+    zoomCaja.hidden = !(vista === 'diagrama' && (visor || escala)) || foco?.tipo === 'form';
+    zoomCaja.classList.toggle('en-columnas', !visor);
+    const z = zoomActual();
+    const nivel = zoomCaja.querySelector('.zoom-nivel');
+    const texto = `${Math.round(z * 100)} %`;
+    if (nivel.textContent !== texto) nivel.textContent = texto;
+    nivel.setAttribute('aria-label', `Zoom ${texto}: volver al 100 %`);
+  }
+
+  // ---- zoom en columnas: el diagrama entero se achica o se agranda, como una imagen
+
+  const zoomColumnas = () => zooms.get(elementoId) ?? 1;
+
+  // El diagrama se dibuja a escala dentro de un envoltorio que ocupa lo que mide ya
+  // escalado: así la carta se desplaza justo lo que hay para ver. Con el 100 % no
+  // se toca nada (queda como siempre, del ancho de la carta).
+  function aplicarEscala() {
+    if (!escala || !cuadro || cuadro === lienzo) return;
+    const z = zoomColumnas();
+    if (z === 1) {
+      if (cuadro.style.transform) {
+        cuadro.style.transform = '';
+        cuadro.style.width = '';
+        escala.style.width = '';
+        escala.style.height = '';
+      }
+      return;
+    }
+    const estilo = getComputedStyle(cuerpo);
+    const ancho = Math.max(240, cuerpo.clientWidth - parseFloat(estilo.paddingLeft) - parseFloat(estilo.paddingRight));
+    cuadro.style.width = `${ancho}px`;
+    cuadro.style.transform = `scale(${z.toFixed(4)})`;
+    escala.style.width = `${(ancho * z).toFixed(1)}px`;
+    escala.style.height = `${(cuadro.offsetHeight * z).toFixed(1)}px`;
+  }
+
+  // Cambia el zoom dejando quieto el punto de la carta que está bajo (x, y) de la
+  // pantalla (el cursor, o el medio de los dos dedos); sin punto, el centro de lo que
+  // se ve. `ancla` es ese punto de la carta cuando ya se conoce (el pellizco lo fija al empezar).
+  function zoomColumnasA(pedido, x = null, y = null, ancla = null) {
+    if (!escala || !cuadro) return;
+    const z0 = zoomColumnas();
+    let z1 = limitar(pedido, ZOOM_MIN, ZOOM_MAX);
+    if (Math.abs(z1 - 1) < 0.035) z1 = 1; // el 100 % "agarra"
+    const marco = cuerpo.getBoundingClientRect();
+    const px = x ?? marco.left + cuerpo.clientWidth / 2;
+    const py = y ?? marco.top + cuerpo.clientHeight / 2;
+    const antes = escala.getBoundingClientRect();
+    const punto = ancla ?? { lx: (px - antes.left) / z0, ly: (py - antes.top) / z0 };
+    if (z1 !== z0) {
+      if (z1 === 1) zooms.delete(elementoId);
+      else zooms.set(elementoId, z1);
+      aplicarEscala();
+      pintarZoom();
+    }
+    const ahora = escala.getBoundingClientRect();
+    cuerpo.scrollLeft += ahora.left + punto.lx * z1 - px;
+    cuerpo.scrollTop += ahora.top + punto.ly * z1 - py;
+  }
+
+  // Ajustar: que entre toda la carta de arriba abajo (si ya entra, queda al 100 %).
+  // Tocándolo otra vez con la carta ya ajustada, vuelve al 100 %.
+  function ajustarColumnas() {
+    if (!escala || !cuadro) return;
+    const estilo = getComputedStyle(cuerpo);
+    // (el relleno de abajo es el lugar de estos botones: lo último de la carta queda arriba de ellos)
+    const alto = cuerpo.clientHeight - parseFloat(estilo.paddingTop) - parseFloat(estilo.paddingBottom);
+    const entero = limitar(alto / Math.max(1, cuadro.offsetHeight), ZOOM_MIN, 1);
+    const z = Math.abs(entero - zoomColumnas()) < 0.01 ? 1 : entero;
+    if (z === 1) zooms.delete(elementoId);
+    else zooms.set(elementoId, z);
+    aplicarEscala();
+    pintarZoom();
+    cuerpo.scrollLeft = 0;
+    cuerpo.scrollTop = Math.max(0, cuerpo.scrollTop + escala.getBoundingClientRect().top - cuerpo.getBoundingClientRect().top - parseFloat(estilo.paddingTop));
+  }
+
+  // Dos dedos sobre la carta en columnas: zoom, y la carta sigue a los dedos.
+  function alTocarDos(ev) {
+    if (visor || vista !== 'diagrama' || !escala || ev.touches.length !== 2) {
+      if (ev.touches.length !== 2) pellizco = null;
+      return;
+    }
+    if (gesto?.tipo === 'columna') cancelarGesto(); // se estaba arrastrando un bloque: vuelve a su lugar
+    const [a, b] = ev.touches;
+    const z0 = zoomColumnas();
+    const r = escala.getBoundingClientRect();
+    pellizco = {
+      d0: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY) || 1,
+      z0,
+      ancla: { lx: ((a.clientX + b.clientX) / 2 - r.left) / z0, ly: ((a.clientY + b.clientY) / 2 - r.top) / z0 },
+    };
+  }
+
+  function alMoverDos(ev) {
+    if (!pellizco || ev.touches.length !== 2) return;
+    if (ev.cancelable) ev.preventDefault(); // ni el zoom de la página ni el desplazamiento del navegador
+    const [a, b] = ev.touches;
+    const d = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY) || 1;
+    zoomColumnasA((pellizco.z0 * d) / pellizco.d0, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2, pellizco.ancla);
+  }
+
+  function alSoltarDos(ev) {
+    if (!pellizco || ev.touches.length >= 2) return;
+    pellizco = null;
+    evitarClick();
+    pedirLineas();
   }
 
   const vistaActual = () => vistas.get(elementoId) ?? { tx: 24, ty: 24, z: 1 };
@@ -871,8 +1110,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     lienzo.style.transform = `translate(${v.tx.toFixed(1)}px, ${v.ty.toFixed(1)}px) scale(${v.z.toFixed(4)})`;
     visor.style.backgroundSize = `${(22 * v.z).toFixed(2)}px ${(22 * v.z).toFixed(2)}px`;
     visor.style.backgroundPosition = `${v.tx.toFixed(1)}px ${v.ty.toFixed(1)}px`;
-    const nivel = cuerpo.querySelector('.zoom-nivel');
-    if (nivel) nivel.textContent = `${Math.round(v.z * 100)} %`;
+    pintarZoom();
   }
 
   function zoomEn(factor, cx = null, cy = null) {
@@ -1035,8 +1273,9 @@ export function setupCarta({ root, red, acciones, toast }) {
     const svg = cuadro.querySelector('svg.carta-lineas');
     if (!svg) return;
     const enLienzo = cuadro === lienzo;
-    const z = enLienzo ? vistaActual().z : 1;
+    const z = enLienzo ? vistaActual().z : zoomColumnas();
     if (!enLienzo) {
+      aplicarEscala(); // si cambió el ancho de la carta (girar el teléfono) o su alto (abrir un tubo)
       // El tamaño va en línea (la regla general de los íconos SVG fija 20 px) y se
       // achica antes de medir: si no, el propio dibujo no deja que el cuadro se achique.
       svg.style.width = '0px';
@@ -1207,7 +1446,7 @@ export function setupCarta({ root, red, acciones, toast }) {
       out.push(h('h3', { text: 'Equipos' }));
       out.push(h('ul.carta-lista', {}, ...d.equipos.map((e) => h('li', {},
         h('strong', { text: `${e.nombre || 'Equipo'} · ${F.describirEquipo(e)}` }),
-        h('span', { text: ` · ${usoEquipo(d, e)}` })))));
+        h('span', { text: ` · ${usoEquipo(d, e)}${F.vinculada(e) ? ` · ${textoPlacaLeida(d, e)}` : ''}` })))));
     }
     const cerca = cercanos(d);
     if (cerca.length) out.push(bloqueCercanos(d, cerca));
@@ -1253,7 +1492,8 @@ export function setupCarta({ root, red, acciones, toast }) {
     let usadas = 0;
     for (let n = 1; n <= e.salidas; n += 1) if (d.usado.has(F.extremoEquipo(e.id, 's', n))) usadas += 1;
     const entrada = e.entradas ? (d.usado.has(F.extremoEquipo(e.id, 'e', 1)) ? 'con entrada' : 'sin entrada') : '';
-    return [entrada, `${usadas} de ${e.salidas} ${e.tipo === 'olt' ? 'puertos' : 'salidas'} usad${usadas === 1 ? 'a' : 'as'}`]
+    const fin = e.tipo === 'olt' ? 'o' : 'a'; // puertos usados, salidas usadas
+    return [entrada, `${usadas} de ${e.salidas} ${e.tipo === 'olt' ? 'puertos' : 'salidas'} usad${fin}${usadas === 1 ? '' : 's'}`]
       .filter(Boolean).join(', ');
   }
 
@@ -1266,7 +1506,9 @@ export function setupCarta({ root, red, acciones, toast }) {
     }
     if (d.equipos.length) {
       lineasTexto.push('', 'Equipos:');
-      for (const e of d.equipos) lineasTexto.push(`- ${e.nombre} ${F.describirEquipo(e)} (${usoEquipo(d, e)})`);
+      for (const e of d.equipos) {
+        lineasTexto.push(`- ${e.nombre} ${F.describirEquipo(e)} (${usoEquipo(d, e)})${F.vinculada(e) ? ` · ${textoPlacaReal(d, e)}` : ''}`);
+      }
     }
     lineasTexto.push('', `Uniones (${d.fusiones.length}):`);
     for (const f of d.fusiones) lineasTexto.push(`- ${etiquetaConLado(d, f.a)} ↔ ${etiquetaConLado(d, f.b)}${f.tipo === 'conector' ? ' [conector]' : ''}`);
@@ -1316,7 +1558,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (!d) return;
     const items = [];
     let texto = '';
-    let detalle = '';
+    let detalle = ''; // una línea o varias
     if (ocupado) {
       texto = 'Guardando…';
     } else if (foco?.tipo === 'error') {
@@ -1346,6 +1588,12 @@ export function setupCarta({ root, red, acciones, toast }) {
       const enPaso = punta?.pasante && estadoFibra(d, punta, p.n) === 'paso';
       texto = `${etiquetaConLado(d, elegido)}: tocá la fibra o el puerto con que se une.`;
       if (enPaso) detalle = 'Está en paso: al unirla queda cortada acá.';
+      // Un puerto de una placa vinculada: lo que se lee de él en la OLT.
+      const real = puertoReal(d, elegido);
+      if (real) {
+        detalle = textoPuertoReal(real);
+        if (real.lectura?.onts && real.olt) items.push(boton('Ver sus ONT', () => acciones.verOntsDePon?.(real.olt, real.interfaz)));
+      }
       items.push(boton('Cancelar', () => soltar()));
     } else if (foco?.tipo === 'mover-elegir') {
       const f = state().fusiones.get(foco.fusion);
@@ -1367,6 +1615,10 @@ export function setupCarta({ root, red, acciones, toast }) {
         texto = `${etiquetaConLado(d, f.a)} ↔ ${etiquetaConLado(d, f.b)}`;
         detalle = `${f.tipo === 'conector' ? 'Conector' : 'Fusión'} · cargada por ${f.creado_por ?? '—'} el ${formatFecha(f.creado)}`
           + (f.modificado !== f.creado ? ` · movida por ${f.modificado_por ?? '—'} el ${formatFecha(f.modificado)}` : '');
+        // Si una punta es un puerto de una placa vinculada, primero lo que se lee de ese puerto.
+        const real = puertoReal(d, f.a) ?? puertoReal(d, f.b);
+        if (real) detalle = [textoPuertoReal(real), detalle];
+        const dePuerto = [f.a, f.b].map(F.parseExtremo).find((x) => x?.tipo === 'q' && d.s.equipos.get(x.id)?.tipo === 'olt') ?? null;
         items.push(
           boton('Pasar a otra fibra', () => {
             foco = { tipo: 'mover-elegir', fusion: f.id };
@@ -1374,6 +1626,9 @@ export function setupCarta({ root, red, acciones, toast }) {
           }),
           boton('Quitar unión', () => quitarUnion(f), { class: 'peligro' }),
           boton('Recorrido', () => acciones.verRecorrido(elementoId, foco.ext ?? f.a, { desdeCarta: true })),
+          // De un puerto de OLT: todo lo que alimenta, marcado en el mapa; y, con la placa vinculada, sus ONT.
+          dePuerto ? boton('En el mapa', () => acciones.verPuertoEnMapa?.(dePuerto.id, dePuerto.n), { title: 'Todo lo que alimenta ese puerto, marcado en el mapa' }) : null,
+          real?.lectura?.onts && real.olt ? boton('Ver sus ONT', () => acciones.verOntsDePon?.(real.olt, real.interfaz)) : null,
           boton('Cerrar', () => soltar()),
         );
       }
@@ -1430,6 +1685,10 @@ export function setupCarta({ root, red, acciones, toast }) {
       if (e) {
         texto = `${e.nombre || 'Equipo'} · ${F.describirEquipo(e)}${e.datos?.conectores ? ' · salidas con conector' : ''}`;
         detalle = usoEquipo(d, e) + (e.notas ? ` · ${e.notas}` : '');
+        // Una placa de OLT: de qué placa real es y lo que se lee de ella; o que todavía no está vinculada.
+        const paraVincular = e.tipo === 'olt' && !F.vinculada(e) && d.olts.some((o) => o.placas.length);
+        if (F.vinculada(e)) detalle = [textoPlacaLeida(d, e), detalle];
+        else if (paraVincular) detalle = [detalle, 'Sin vincular con una placa real de la OLT: con el vínculo, cada puerto muestra lo que se lee de él.'];
         if (foco.borrar) {
           const n = d.fusiones.filter((f) => f.a.startsWith(`q${e.id}:`) || f.b.startsWith(`q${e.id}:`)).length;
           texto = `¿Borrar ${e.nombre || 'el equipo'}?${n ? ` Se quitan también sus ${plural(n, 'unión', 'uniones')}.` : ''}`;
@@ -1439,9 +1698,12 @@ export function setupCarta({ root, red, acciones, toast }) {
             renderPie();
           }));
         } else {
+          const real = F.vinculada(e) ? F.placaReal(d.s, e) : null;
           items.push(
             ...botonesOrden(d, `q${e.id}`),
+            paraVincular ? boton('Vincular con la placa real', () => abrirForm(e.tipo, e), { class: 'primario' }) : null,
             boton('Editar', () => abrirForm(e.tipo, e)),
+            real?.placa ? boton('Ver en la OLT', () => acciones.verPlacaEnOlt?.(real.olt, real.placa)) : null,
             boton('Borrar', () => {
               foco = { tipo: 'equipo', id: e.id, borrar: true };
               renderPie();
@@ -1461,7 +1723,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     // Con teclado, el foco sigue en el pie (en el mismo botón, si sigue estando).
     const enfocado = pie.contains(document.activeElement) ? document.activeElement.textContent : null;
     pie.replaceChildren(...[
-      h('div.carta-pie-texto', {}, h('p', { text: texto }), detalle ? h('small', { text: detalle }) : null),
+      h('div.carta-pie-texto', {}, h('p', { text: texto }), ...[].concat(detalle).filter(Boolean).map((t) => h('small', { text: t }))),
       items.length ? h('div.carta-pie-botones', {}, ...items) : null,
     ].filter(Boolean));
     if (enfocado !== null) {
@@ -1474,6 +1736,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     elegido = null;
     foco = null;
     mover = null;
+    refrescoForm = null;
     render();
   }
 
@@ -1482,7 +1745,7 @@ export function setupCarta({ root, red, acciones, toast }) {
   function alTocar(event) {
     if (ignorarClick) return;
     const b = event.target.closest('button');
-    if (!b || !cuerpo.contains(b) || ocupado || b.closest('.carta-zoom')) return;
+    if (!b || !cuerpo.contains(b) || ocupado) return;
     if (b.dataset.ext) {
       tocarExtremo(b.dataset.ext);
       return;
@@ -1570,7 +1833,7 @@ export function setupCarta({ root, red, acciones, toast }) {
   // ------------------------------------------------- arrastrar y la bandeja
 
   function alApoyar(ev) {
-    if (vista !== 'diagrama' || ocupado || ev.target.closest('.carta-zoom')) return;
+    if (vista !== 'diagrama' || ocupado || pellizco) return;
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     if (cuerpo.classList.contains('libre')) {
       apoyarLibre(ev);
@@ -1584,7 +1847,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (!bloque || !cuadro?.contains(bloque)) return;
     gesto = {
       tipo: 'columna', id: ev.pointerId, x0: ev.clientX, y0: ev.clientY, movido: false,
-      asa: a, bloque, key: bloque.dataset.bloque, scroll0: cuerpo.scrollTop,
+      asa: a, bloque, key: bloque.dataset.bloque, scroll0: cuerpo.scrollTop, scrollX0: cuerpo.scrollLeft,
     };
   }
 
@@ -1746,8 +2009,10 @@ export function setupCarta({ root, red, acciones, toast }) {
   function pintarColumna() {
     const g = gesto;
     if (!g?.ultimo) return;
-    const dx = g.ultimo.x - g.x0;
-    const dy = g.ultimo.y - g.y0 + (cuerpo.scrollTop - g.scroll0);
+    // Lo que se mide en la pantalla se pasa a las medidas del diagrama (su zoom).
+    const z = zoomColumnas();
+    const dx = (g.ultimo.x - g.x0 + (cuerpo.scrollLeft - g.scrollX0)) / z;
+    const dy = (g.ultimo.y - g.y0 + (cuerpo.scrollTop - g.scroll0)) / z;
     g.bloque.style.transform = `translate(${dx}px, ${dy}px)`;
     g.destino = destinoColumna();
     const base = cuadro.getBoundingClientRect();
@@ -1757,10 +2022,12 @@ export function setupCarta({ root, red, acciones, toast }) {
     if (!hijos.length) y = rc.top + 2;
     else if (indice < hijos.length) y = hijos[indice].getBoundingClientRect().top - 8;
     else y = hijos[hijos.length - 1].getBoundingClientRect().bottom + 6;
-    Object.assign(g.hueco.style, { left: `${rc.left - base.left}px`, width: `${rc.width}px`, top: `${y - base.top}px` });
+    // (una columna sin cables puede no tener ancho: el hueco se ve igual)
+    Object.assign(g.hueco.style, { left: `${(rc.left - base.left) / z}px`, width: `${Math.max(rc.width / z, 72)}px`, top: `${(y - base.top) / z}px` });
   }
 
-  // Cerca del borde de arriba o de abajo, la carta se desplaza sola.
+  // Cerca del borde de arriba o de abajo, la carta se desplaza sola; y, con zoom (cuando
+  // es más ancha que la pantalla), también cerca de los costados.
   function desplazarSolo(g) {
     if (gesto !== g || !cuerpo) return;
     if (!g.ultimo) {
@@ -1772,10 +2039,17 @@ export function setupCarta({ root, red, acciones, toast }) {
     let v = 0;
     if (g.ultimo.y < r.top + borde) v = -Math.ceil((r.top + borde - g.ultimo.y) / 4);
     else if (g.ultimo.y > r.bottom - borde) v = Math.ceil((g.ultimo.y - (r.bottom - borde)) / 4);
-    if (v) {
-      const antes = cuerpo.scrollTop;
+    let vx = 0;
+    if (cuerpo.scrollWidth > cuerpo.clientWidth + 1) {
+      const lado = Math.min(borde, r.width / 5);
+      if (g.ultimo.x < r.left + lado) vx = -Math.ceil((r.left + lado - g.ultimo.x) / 4);
+      else if (g.ultimo.x > r.right - lado) vx = Math.ceil((g.ultimo.x - (r.right - lado)) / 4);
+    }
+    if (v || vx) {
+      const antes = [cuerpo.scrollTop, cuerpo.scrollLeft];
       cuerpo.scrollTop += v;
-      if (cuerpo.scrollTop !== antes) pintarColumna();
+      cuerpo.scrollLeft += vx;
+      if (cuerpo.scrollTop !== antes[0] || cuerpo.scrollLeft !== antes[1]) pintarColumna();
     }
     requestAnimationFrame(() => desplazarSolo(g));
   }
@@ -1832,15 +2106,23 @@ export function setupCarta({ root, red, acciones, toast }) {
   }
 
   function alRueda(ev) {
-    if (!visor || !visor.contains(ev.target)) return;
+    if (!visor) {
+      // En columnas la rueda desplaza la carta (lo hace el navegador); con Control, zoom.
+      if (!(ev.ctrlKey || ev.metaKey) || !escala || vista !== 'diagrama') return;
+      ev.preventDefault();
+      const paso = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? cuerpo.clientHeight : 1;
+      zoomColumnasA(zoomColumnas() * Math.exp(-ev.deltaY * paso * 0.0022), ev.clientX, ev.clientY);
+      return;
+    }
+    if (!visor.contains(ev.target)) return;
     ev.preventDefault();
     const v = vistaActual();
     const r = visor.getBoundingClientRect();
-    const escala = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? r.height : 1;
+    const paso = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? r.height : 1;
     if (ev.ctrlKey || ev.metaKey) {
-      zoomEn(Math.exp(-ev.deltaY * escala * 0.0022), ev.clientX - r.left, ev.clientY - r.top);
+      zoomEn(Math.exp(-ev.deltaY * paso * 0.0022), ev.clientX - r.left, ev.clientY - r.top);
     } else {
-      aplicarVista({ ...v, tx: v.tx - ev.deltaX * escala, ty: v.ty - ev.deltaY * escala });
+      aplicarVista({ ...v, tx: v.tx - ev.deltaX * paso, ty: v.ty - ev.deltaY * paso });
     }
   }
 
@@ -1848,7 +2130,17 @@ export function setupCarta({ root, red, acciones, toast }) {
   // rueda con Control. En el teléfono también los manda, junto con los punteros:
   // ahí el pellizco ya se maneja con los punteros y esto solo evita el zoom de la página.
   function alGestoSafari(ev) {
-    if (!visor || !visor.contains(ev.target)) return;
+    if (!visor) {
+      // En columnas: el pellizco del panel táctil de la Mac. En el teléfono ya lo hacen los toques.
+      if (!escala || vista !== 'diagrama') return;
+      ev.preventDefault();
+      if (pellizco || typeof ev.scale !== 'number') return;
+      if (ev.type === 'gesturestart') safari = { z0: zoomColumnas() };
+      else if (ev.type === 'gesturechange' && safari) zoomColumnasA(safari.z0 * ev.scale, ev.clientX ?? null, ev.clientY ?? null);
+      else if (ev.type === 'gestureend') safari = null;
+      return;
+    }
+    if (!visor.contains(ev.target)) return;
     ev.preventDefault();
     if (punteros.size >= 2 || typeof ev.scale !== 'number') return;
     if (ev.type === 'gesturestart') {
@@ -1883,6 +2175,15 @@ export function setupCarta({ root, red, acciones, toast }) {
       } else if (key.startsWith('c')) {
         pasarALado(key, x < 0 ? 'i' : 'd');
       }
+      return;
+    }
+    // Con el foco en la carta misma (no en una fibra): + y − para el zoom, 0 para ajustar.
+    if (ev.target === cuerpo && !visor && escala) {
+      if (ev.key === '+' || ev.key === '=') zoomPaso(1.25);
+      else if (ev.key === '-' || ev.key === '_') zoomPaso(1 / 1.25);
+      else if (ev.key === '0') zoomAjustar();
+      else return;
+      ev.preventDefault();
       return;
     }
     if (ev.target !== visor) return;
@@ -2109,16 +2410,19 @@ export function setupCarta({ root, red, acciones, toast }) {
     elegido = null;
     mover = null;
     foco = { tipo: 'form' };
+    refrescoForm = null;
     const datosEq = equipo?.datos ?? {};
     const nombres = [...state().equipos.values()].filter((e) => e.tipo === tipo).map((e) => e.nombre);
-    const nombre = h('input', { type: 'text', name: 'nombre', maxlength: 80, autocomplete: 'off',
-      value: equipo ? equipo.nombre : sugerirNombre(tipo === 'olt' ? 'OLT' : 'SPL', nombres) });
+    const sugerido = equipo ? null : sugerirNombre(tipo === 'olt' ? 'OLT' : 'SPL', nombres);
+    const nombre = h('input', { type: 'text', name: 'nombre', maxlength: 80, autocomplete: 'off', value: equipo ? equipo.nombre : sugerido });
     const campo = (label, input) => h('label.campo', {}, h('span', { text: label }), input);
     const notas = h('input', { type: 'text', name: 'notas', maxlength: 2000, autocomplete: 'off', value: equipo?.notas ?? '',
       placeholder: 'Marca, bandeja, lo que haga falta' });
     let campos;
     let leer;
+    let primero = nombre; // dónde queda el foco al abrir
     if (tipo === 'olt') {
+      const red = d.elemento.properties.red;
       const puertos = h('input', { type: 'text', inputmode: 'numeric', name: 'salidas', autocomplete: 'off',
         value: String(equipo?.salidas ?? (Number(d.elemento.properties.datos?.puertos_pon) || 16)) });
       const potencia = h('input', { type: 'text', name: 'potencia', autocomplete: 'off', placeholder: '4,5',
@@ -2132,8 +2436,107 @@ export function setupCarta({ root, red, acciones, toast }) {
       const desde = h('select', { name: 'desde' },
         h('option', { value: '1', text: 'Del 1 en adelante (ZTE, V-SOL, Fiberhome…)', selected: desdeActual === '1' }),
         h('option', { value: '0', text: 'Del 0 en adelante (Huawei: 0 a 15)', selected: desdeActual === '0' }));
-      campos = [campo('Nombre', nombre), campo('Puertos PON', puertos), campo('Numeración de los puertos', desde),
-        campo('Potencia de salida (dBm)', potencia), campo('Notas', notas)];
+      // La placa real: una de las placas PON de las OLT que traza lee en esta red. Al elegirla,
+      // la placa de la carta toma sus puertos y su numeración, y cada puerto pasa a ser el PON
+      // de verdad (0/13/2), con lo que se lee de él.
+      const ACTUAL = '=actual'; // el vínculo que ya tiene, cuando hoy no hay lectura de esa OLT o de esa placa
+      const real = h('select', { name: 'placa-real' });
+      const nota = h('p.carta-form-nota', { hidden: true });
+      const campoReal = h('label.campo.campo-ancho', { hidden: true }, h('span', { text: '¿Qué placa de la OLT es?' }), real);
+      const campoPuertos = campo('Puertos PON', puertos);
+      const campoDesde = campo('Numeración de los puertos', desde);
+      const rotuloPotencia = h('span', { text: 'Potencia de salida (dBm)' });
+      let opciones = new Map(); // valor -> { olt, placa, usada }
+      // El nombre que puso el formulario (si el usuario escribe otro, no se lo pisa). Al editar una placa
+      // vinculada que quedó con el nombre propuesto ("OLT - CARCA 0/13"), también se lo considera puesto por él.
+      let nombrePuesto = equipo
+        ? (F.vinculada(equipo) && equipo.nombre === `${equipo.datos.olt} ${equipo.datos.placa}` ? equipo.nombre : null)
+        : sugerido;
+      const cuantos = (pl) => (pl.puertos.length ? pl.puertos[pl.puertos.length - 1].n - pl.desde + 1 : 0);
+      const pintarOpciones = (elegir = real.value) => {
+        const enMapa = F.placasEnMapa(state());
+        const olts = F.oltsLeidas(state()).filter((o) => o.red === red);
+        opciones = new Map();
+        const items = [h('option', { value: '', text: 'Ninguna: la cargo a mano' })];
+        for (const o of olts) {
+          for (const pl of o.placas) {
+            if (!cuantos(pl)) continue;
+            const otra = enMapa.get(`${red}|${o.id}|${pl.placa}`);
+            const usada = otra && otra.id !== equipo?.id ? otra : null;
+            const valor = `${o.id}|${pl.placa}`;
+            opciones.set(valor, { olt: o, placa: pl, usada });
+            const donde = usada ? F.nombreElemento(state(), usada.elemento) : '';
+            items.push(h('option', {
+              value: valor, disabled: Boolean(usada),
+              text: `${o.nombre} · ${pl.placa}${pl.nombre ? ` · ${pl.nombre}` : ''} · ${plural(cuantos(pl), 'puerto', 'puertos')}${usada ? ` · ya está en ${donde}` : ''}`,
+            }));
+          }
+        }
+        // La que ya tiene: por su lectura de ahora o, si no hay, tal como quedó guardada.
+        const mia = equipo && F.vinculada(equipo) ? F.placaReal(state(), equipo) : null;
+        const valorMio = mia?.placa ? `${mia.olt.id}|${equipo.datos.placa}` : null;
+        if (equipo && F.vinculada(equipo) && !valorMio) {
+          items.push(h('option', { value: ACTUAL, text: `${equipo.datos.olt} · ${equipo.datos.placa} · sin lectura ahora` }));
+        }
+        real.replaceChildren(...items);
+        let valor = elegir;
+        if (valor === undefined || valor === null || ![...real.options].some((x) => x.value === valor && !x.disabled)) {
+          // Al abrir: la que ya tiene; en una placa nueva, la primera real que falta en el mapa.
+          valor = equipo ? (valorMio ?? (F.vinculada(equipo) ? ACTUAL : ''))
+            : ([...opciones].find(([, x]) => !x.usada)?.[0] ?? '');
+        }
+        real.value = valor;
+        campoReal.hidden = real.options.length <= 1;
+        // Una OLT de la red que todavía no entregó sus placas: se dice por qué no se ofrecen.
+        const sinPlacas = olts.filter((o) => !o.placas.length);
+        nota.dataset.aviso = sinPlacas.length && real.options.length <= 1
+          ? `${sinPlacas.map((o) => `${o.nombre}: ${o.error ?? 'no informó sus placas PON'}`).join('. ')}. Por ahora la placa se carga a mano y se vincula después, desde Editar.`
+          : '';
+        alElegir();
+      };
+      const alElegir = () => {
+        const x = opciones.get(real.value) ?? null;
+        // Con una placa real elegida, los puertos y su numeración son los de esa placa (lo dice la nota).
+        campoPuertos.hidden = Boolean(x);
+        campoDesde.hidden = Boolean(x);
+        if (x) {
+          const n = cuantos(x.placa);
+          puertos.value = String(n);
+          desde.value = String(x.placa.desde === 0 ? 0 : 1);
+          // El nombre se propone solo mientras sea el que puso el formulario.
+          const propuesto = `${x.olt.nombre} ${x.placa.placa}`;
+          if (nombre.value.trim() === '' || nombre.value === nombrePuesto) {
+            nombre.value = propuesto.slice(0, 80);
+            nombrePuesto = nombre.value;
+          }
+          const r = F.resumenPlaca(x.placa);
+          const hasta = x.placa.desde + n - 1;
+          nota.textContent = [
+            `${plural(n, 'puerto', 'puertos')}, del ${x.placa.placa}/${x.placa.desde} al ${x.placa.placa}/${hasta}`,
+            r.onts ? `${r.onts} ONT, ${r.enLinea} en línea, en ${plural(r.conOnt, 'puerto', 'puertos')}` : 'sin ONT todavía',
+            r.txMin !== null ? (r.txMax - r.txMin < 0.05 ? `emiten ${dbTexto(r.txMin)} dBm` : `emiten de ${dbTexto(r.txMin)} a ${dbTexto(r.txMax)} dBm`)
+              : 'la OLT no informa cuánto emite cada puerto',
+          ].join(' · ');
+          rotuloPotencia.textContent = r.txMin !== null ? 'Potencia de salida (dBm), si un puerto no la informa' : 'Potencia de salida (dBm)';
+        } else if (real.value === ACTUAL) {
+          nota.textContent = `Sigue vinculada con ${equipo.datos.olt} · ${equipo.datos.placa}, que ahora no se está leyendo.`;
+          rotuloPotencia.textContent = 'Potencia de salida (dBm)';
+        } else {
+          nota.textContent = nota.dataset.aviso ?? '';
+          rotuloPotencia.textContent = 'Potencia de salida (dBm)';
+          if (!equipo && nombre.value === nombrePuesto && nombrePuesto !== sugerido) {
+            nombre.value = sugerido;
+            nombrePuesto = sugerido;
+          }
+        }
+        nota.hidden = !nota.textContent;
+      };
+      real.addEventListener('change', alElegir);
+      pintarOpciones(null);
+      refrescoForm = () => pintarOpciones();
+      if (!campoReal.hidden) primero = real;
+      campos = [campoReal, nota, campo('Nombre', nombre), campoPuertos, campoDesde,
+        h('label.campo', {}, rotuloPotencia, potencia), campo('Notas', notas)];
       leer = () => {
         const salidas = Number(puertos.value.trim());
         if (!Number.isInteger(salidas) || salidas < 1 || salidas > 256) throw new Error('Puertos PON: de 1 a 256.');
@@ -2144,6 +2547,13 @@ export function setupCarta({ root, red, acciones, toast }) {
           const v = Number(pot);
           if (!Number.isFinite(v) || v < -10 || v > 15) throw new Error('Potencia: de -10 a 15 dBm.');
           datosNuevos.potencia = v;
+        }
+        const x = opciones.get(real.value) ?? null;
+        if (x) {
+          Object.assign(datosNuevos, { olt: x.olt.nombre, olt_id: x.olt.id, placa: x.placa.placa });
+        } else if (real.value === ACTUAL) {
+          Object.assign(datosNuevos, { olt: datosEq.olt, placa: datosEq.placa });
+          if (datosEq.olt_id) datosNuevos.olt_id = datosEq.olt_id;
         }
         return { tipo: 'olt', nombre: nombre.value.trim(), entradas: 0, salidas, datos: datosNuevos, notas: notas.value.trim() };
       };
@@ -2190,7 +2600,7 @@ export function setupCarta({ root, red, acciones, toast }) {
     }
     const error = h('p.ficha-error', { role: 'alert', hidden: true });
     const form = h('form.carta-form', { autocomplete: 'off', novalidate: true },
-      h('p.carta-form-titulo', {}, h('strong', { text: equipo ? `Editar ${equipo.nombre || 'equipo'}` : (tipo === 'olt' ? 'OLT nueva' : 'Splitter nuevo') })),
+      h('p.carta-form-titulo', {}, h('strong', { text: equipo ? `Editar ${equipo.nombre || 'equipo'}` : (tipo === 'olt' ? 'Placa de OLT nueva' : 'Splitter nuevo') })),
       error,
       h('div.carta-form-campos', {}, ...campos),
       h('div.carta-pie-botones', {},
@@ -2223,6 +2633,7 @@ export function setupCarta({ root, red, acciones, toast }) {
         propio = false;
         if (mia !== apertura) return;
         ocupado = false;
+        refrescoForm = null;
         foco = { tipo: 'equipo', id: res.equipos[0].id };
         render();
         toast(equipo ? `${res.equipos[0].nombre || 'Equipo'} guardado` : `${res.equipos[0].nombre || 'Equipo'} agregado`);
@@ -2245,13 +2656,16 @@ export function setupCarta({ root, red, acciones, toast }) {
     });
     pie.replaceChildren(form);
     render();
-    nombre.focus({ preventScroll: true });
-    nombre.select();
+    primero.focus({ preventScroll: true });
+    if (primero === nombre) nombre.select();
   }
 
   // ------------------------------------------------- abrir y cerrar
 
-  function abrir(id, { ext = null } = {}) {
+  // ext: el extremo que se quiere ver (el de donde salió un recorrido, o un puerto que se
+  // pide desde el tablero de la OLT): si está unido, su unión queda marcada, con lo que
+  // se sabe de ella en el pie; si está libre y `elegir`, queda elegido para unirlo.
+  function abrir(id, { ext = null, elegir = false } = {}) {
     if (elementoId !== id) {
       abiertos.clear();
       vista = 'diagrama';
@@ -2260,17 +2674,29 @@ export function setupCarta({ root, red, acciones, toast }) {
     elegido = null;
     foco = null;
     mover = null;
+    if (ext) {
+      const union = F.indice(state()).usado.get(`${id}|${ext}`);
+      if (union) foco = { tipo: 'union', fusion: union.id, ext };
+      else if (elegir) elegido = ext;
+    }
     gesto = null;
+    pellizco = null;
     rehacer = false;
     punteros.clear();
     apertura += 1;
     ultimaFirma = '';
     armar();
     soltarLibre();
+    escala = null;
     root.hidden = false;
     document.body.classList.add('con-carta');
     render();
     acciones.senal?.pedir();
+    // Con la carta abierta, lo que se lee de la OLT se renueva solo (aunque la señal del mapa esté apagada).
+    clearInterval(sondeo);
+    sondeo = setInterval(() => {
+      if (abierta() && document.visibilityState === 'visible') acciones.senal?.pedir();
+    }, SONDEO_MS);
     // Al volver de un recorrido, se ve el extremo de donde se partió.
     if (ext) {
       const el = cuerpo.querySelector(`[data-ext="${ext}"]`);
@@ -2290,14 +2716,20 @@ export function setupCarta({ root, red, acciones, toast }) {
       enviarDisposicion(id);
     }
     apertura += 1;
+    clearInterval(sondeo);
+    sondeo = 0;
+    refrescoForm = null;
     root.hidden = true;
     root.replaceChildren();
     observador?.disconnect();
     document.body.classList.remove('con-carta');
     cuadro = null;
+    escala = null;
+    zoomCaja = null;
     soltarLibre();
     lineas = null;
     gesto = null;
+    pellizco = null;
     punteros.clear();
     elementoId = null;
     elegido = null;
@@ -2319,7 +2751,9 @@ export function setupCarta({ root, red, acciones, toast }) {
   });
 
   acciones.senal?.on(() => {
-    if (!abierta() || propio || silencio || gesto) return;
+    if (!abierta()) return;
+    if (foco?.tipo === 'form' && !ocupado) refrescoForm?.(); // llegaron las placas de la OLT con el formulario abierto
+    if (propio || silencio || gesto || pellizco) return;
     const d = datos();
     if (d && firma(d) !== ultimaFirma) render();
   });

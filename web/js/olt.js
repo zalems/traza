@@ -277,6 +277,20 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     } else if (n.caja !== undefined && elemento(n.caja)) ir = () => acciones.irAElemento(n.caja);
     else if (clientes.length === 1) ir = () => acciones.irAElemento(clientes[0]);
     else if (clientes.length) ir = () => acciones.irAClientes(clientes);
+    // De un puerto PON, aunque sus clientes no estén cruzados con sus ONT: si la placa del
+    // nodo está vinculada con la real, se sabe por dónde sale ese puerto en el mapa.
+    if (!pista && n.olt && n.interfaz && ['pon-caido', 'caida-grupal', 'pon-degradado'].includes(n.tipo)) {
+      const p = F.puertoEnMapa(s, redVista, n.olt, n.interfaz);
+      const arbol = p ? F.arbolDePuerto(s, p.eq.id, p.n) : null;
+      if (arbol) {
+        const sale = F.nombreElemento(s, arbol.raiz.elemento);
+        const fin = arbol.hasta !== null ? F.nombreElemento(s, arbol.hasta) : 'una punta suelta';
+        if (!arbol.tronco.length) pista = `En el mapa, ese puerto se divide en ${sale} mismo.`;
+        else if (n.tipo === 'pon-caido') pista = `En el mapa, ese puerto sale de ${sale} y va sin dividirse hasta ${fin}: si es un corte, está en ese tramo.`;
+        else pista = `En el mapa, ese puerto sale de ${sale} y va sin dividirse hasta ${fin}; de ahí para abajo se reparte.`;
+        ir = () => acciones.verPuertoEnMapa?.(p.eq.id, p.n);
+      }
+    }
     return { ir, pista };
   }
 
@@ -850,11 +864,30 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     historiaPon: (p) => historiaPon(p, { sinLapsos: true }),
     lapsos,
     horas: () => horas,
+    // La placa de la carta de un nodo vinculada con una placa real (y su nodo), para ir a ella.
+    enMapa: (equipo, placa) => {
+      const prefijo = placa.puertos.find((x) => x.tipo === 'pon' && x.interfaz)?.interfaz.split('/').slice(0, -1).join('/');
+      if (!prefijo) return null;
+      const eq = F.placasEnMapa(red.state).get(`${redVista}|${equipo.id}|${prefijo}`) ?? null;
+      const nodo = eq ? red.state.elementos.get(eq.elemento) : null;
+      if (!nodo) return null;
+      const n = (puerto) => puerto - F.primerPuerto(eq) + 1; // el número de ese puerto en la placa de la carta
+      return {
+        eq, nodo, n,
+        ext: (puerto) => F.extremoEquipo(eq.id, 's', n(puerto)),
+        unido: (puerto) => F.arbolDePuerto(red.state, eq.id, n(puerto)) !== null,
+      };
+    },
+    hayNodos: () => [...red.state.elementos.values()].some((e) => e.properties.tipo === 'nodo' && e.properties.red === redVista),
+    abrirCarta: (nodo, ext) => acciones.abrirCarta?.(nodo.id, ext),
+    verPuertoEnMapa: (eq, n) => acciones.verPuertoEnMapa?.(eq.id, n),
   });
 
   // --------------------------------------------------------- abrir, cerrar
 
-  function abrir(cual = null) {
+  // cual: la pestaña. Desde la carta de un nodo se abre en la red de ese nodo (`red`), en las
+  // ONT de un puerto PON (`pon`: 'OLT|0/13/2') o en una placa del chasis (`placa`: { olt, slot }).
+  function abrir(cual = null, { red: redPedida = null, pon = null, placa = null } = {}) {
     const lista = redes();
     const actual = acciones.redActual();
     if (!actual) {
@@ -863,7 +896,8 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
     }
     volverA = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (cual && PESTANAS.some(([k]) => k === cual)) pestana = cual;
-    const nueva = actual.todas ? (lista.some((r) => r.id === redVista) ? redVista : lista[0]?.id ?? null) : actual.id;
+    let nueva = actual.todas ? (lista.some((r) => r.id === redVista) ? redVista : lista[0]?.id ?? null) : actual.id;
+    if (actual.todas && redPedida !== null && lista.some((r) => r.id === redPedida)) nueva = redPedida;
     if (nueva !== redVista) {
       redVista = nueva;
       datos = null;
@@ -872,6 +906,11 @@ export function setupOlt({ root, red, senal, acciones, toast }) {
       ponAbierto = null;
       filtro = { texto: '', estado: 'todas', pon: '', orden: 'puerto', grupo: null, mostradas: PAGINA };
     }
+    if (pon) {
+      filtro = { texto: '', estado: 'todas', pon, orden: filtro.orden, grupo: null, mostradas: PAGINA };
+      ontAbierta = null;
+    }
+    if (placa) equiposUI.mostrar(placa);
     error = null;
     textoCopia = null;
     root.hidden = false;

@@ -1715,6 +1715,18 @@ button.integ-mini:hover {
   text-wrap: pretty;
 }
 
+/* un aviso suelto en una ficha (dónde buscar el corte de un puerto PON) */
+.ficha-aviso {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--signal);
+  border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  background: color-mix(in srgb, var(--signal) 11%, transparent);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
 .integ-avisos li.bien {
   border-left-color: #2b9a43;
   background: color-mix(in srgb, #2b9a43 12%, transparent);
@@ -2291,6 +2303,7 @@ button.integ-enlace:hover {
 
 .carta-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(1180px, 100%);
   min-height: 0;
@@ -2303,6 +2316,7 @@ button.integ-enlace:hover {
 }
 
 .carta-cab {
+  grid-row: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -2389,6 +2403,8 @@ button.integ-enlace:hover {
 }
 
 .carta-cuerpo {
+  grid-row: 2;
+  grid-column: 1;
   min-height: 0;
   overflow: auto;
   padding: 14px 16px 28px;
@@ -2399,9 +2415,23 @@ button.integ-enlace:hover {
   outline: none;
 }
 
-/* La bandeja: los cables y los equipos se apoyan sobre ella. */
+/* La bandeja: los cables y los equipos se apoyan sobre ella. Con el dedo se
+   desplaza; el zoom con dos dedos lo hace la carta (no el navegador con toda la página).
+   Abajo queda lugar para que los botones de zoom no tapen lo último. */
 .carta-cuerpo.carta-bandeja {
+  padding-bottom: 68px;
   background: var(--bandeja);
+  touch-action: pan-x pan-y;
+}
+
+/* El diagrama en columnas con zoom: se dibuja a escala dentro de este envoltorio,
+   que mide lo que ocupa ya escalado (carta.js le pone el ancho y el alto). */
+.carta-escala {
+  margin: 0 auto;
+}
+
+.carta-escala > .carta-diagrama {
+  transform-origin: 0 0;
 }
 
 /* Tres columnas: lo que llega (izquierda), los equipos y lo que sale (derecha).
@@ -2514,6 +2544,46 @@ button.integ-enlace:hover {
 .equipo.olt .luz-dato {
   background: color-mix(in srgb, var(--luz-c) 30%, transparent);
   color: #ffffff;
+}
+
+/* Una placa vinculada con la placa real de la OLT: en cada puerto, sus ONT en línea
+   sobre las que tiene (lo que se lee de verdad), del color de cómo está el puerto. */
+.lectura-dato {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--nivel) 42%, transparent);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* (sobre el chasis oscuro, el rojo de un puerto caído va más claro para que se lea) */
+.equipo.olt .lectura-dato.nivel-caida {
+  --nivel: #ff6b5f;
+}
+
+/* un puerto real sin ONT o apagado se ve más quieto; uno caído, con su nombre en rojo */
+.puerto.leido-libre .puerto-num,
+.puerto.leido-apagado .puerto-num {
+  opacity: 0.62;
+}
+
+.puerto.leido-caido .puerto-num {
+  color: #ff8a80;
+}
+
+/* la placa vinculada lleva una línea de color arriba: verde con lectura, gris sin ella */
+.equipo.olt.vinculada .equipo-tapa {
+  box-shadow: inset 0 3px 0 var(--senal-trafico);
+  border-radius: 9px 9px 0 0;
+}
+
+.equipo.olt.vinculada.sin-lectura .equipo-tapa {
+  box-shadow: inset 0 3px 0 var(--nivel-ninguno);
 }
 
 /* protector de empalme: tubo transparente con su varilla de acero */
@@ -2988,6 +3058,12 @@ button.integ-enlace:hover {
   background: rgb(255 255 255 / 0.06);
 }
 
+/* sobre el chasis oscuro, el puerto que se señala o se elige se aclara apenas (el texto sigue en blanco) */
+.equipo.olt .puerto:hover,
+.equipo.olt .puerto.elegida {
+  background: rgb(255 255 255 / 0.13);
+}
+
 .equipo-puertos {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3141,18 +3217,28 @@ button.integ-enlace:hover {
   cursor: grab;
 }
 
+/* Los botones de zoom: sobre la esquina de abajo a la derecha de la carta, en los
+   dos modos (van en el panel, en la misma celda que el cuerpo, y no se desplazan). */
 .carta-zoom {
-  position: absolute;
+  grid-row: 2;
+  grid-column: 1;
+  align-self: end;
+  justify-self: end;
+  position: relative;
   z-index: 6;
-  right: 12px;
-  bottom: 12px;
   display: flex;
   align-items: center;
   gap: 4px;
+  margin: 0 12px 12px 0;
   padding: 4px;
   border-radius: 10px;
   background: var(--paper);
   box-shadow: var(--shadow);
+}
+
+/* en columnas, al lado de la barra de desplazamiento y no encima */
+.carta-zoom.en-columnas {
+  margin-right: 22px;
 }
 
 .carta-zoom button {
@@ -3171,12 +3257,14 @@ button.integ-enlace:hover {
   background: var(--paper-dim);
 }
 
-.zoom-nivel {
-  min-width: 3.6em;
+.carta-zoom button.zoom-nivel {
+  min-width: 4.2em;
+  padding: 2px 6px;
+  border-color: transparent;
   color: var(--muted);
   font-size: 12.5px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
 /* ---- avisos, vacía, cercanos, lista */
@@ -3278,6 +3366,7 @@ button.integ-enlace:hover {
 
 /* la barra de abajo: qué está elegido y qué se puede hacer (invertida, como el cartel del modo) */
 .carta-pie {
+  grid-row: 3;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3350,6 +3439,14 @@ button.integ-enlace:hover {
   margin: 0;
 }
 
+/* Guardar y Cancelar quedan a la vista aunque el formulario sea más alto que su lugar. */
+.carta-form > .carta-pie-botones {
+  position: sticky;
+  bottom: 0;
+  padding: 6px 0 2px;
+  background: var(--ink);
+}
+
 .carta-form-campos {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -3359,6 +3456,24 @@ button.integ-enlace:hover {
 .carta-pie .campo > span {
   color: var(--paper);
   opacity: 0.85;
+}
+
+/* qué placa real es (la lista de las que traza lee) y lo que se sabe de la elegida */
+.carta-form .campo-ancho,
+.carta-form-nota {
+  grid-column: 1 / -1;
+}
+
+.carta-form-nota {
+  margin: -2px 0 2px;
+  font-size: 13px;
+  opacity: 0.86;
+  text-wrap: pretty;
+}
+
+.carta-form input:disabled,
+.carta-form select:disabled {
+  opacity: 0.6;
 }
 
 .check-campo {
@@ -3443,9 +3558,9 @@ button.integ-enlace:hover {
     font-size: 12px;
   }
 
-  .carta-zoom {
-    right: 8px;
-    bottom: 8px;
+  .carta-zoom,
+  .carta-zoom.en-columnas {
+    margin: 0 8px 8px 0;
   }
 }
 
@@ -3459,6 +3574,32 @@ button.integ-enlace:hover {
 
   .carta-diagrama.con-equipos {
     grid-template-columns: minmax(0, 1fr) minmax(88px, 0.8fr) minmax(0, 1fr);
+  }
+
+  /* Sin cables de un costado (un nodo con todo hacia el mismo lado), ese costado no
+     ocupa lugar: los equipos y el otro costado se reparten el ancho. */
+  .carta-diagrama.con-equipos.sin-izq {
+    grid-template-columns: 0 minmax(120px, 1fr) minmax(0, 1.25fr);
+  }
+
+  .carta-diagrama.con-equipos.sin-der {
+    grid-template-columns: minmax(0, 1.25fr) minmax(120px, 1fr) 0;
+  }
+
+  .carta-diagrama.con-equipos.sin-izq.sin-der {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+  }
+
+  /* la placa vinculada dice más en cada puerto (0/13/2 y sus ONT): un poco más apretado */
+  .equipo.olt.vinculada .puerto {
+    gap: 4px;
+    padding: 2px 3px;
+    font-size: 12px;
+  }
+
+  .lectura-dato {
+    padding: 0 3px;
+    font-size: 10.5px;
   }
 
   .punta-cab strong {

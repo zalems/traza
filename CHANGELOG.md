@@ -1,5 +1,86 @@
 # Cambios
 
+## 0.13.0 · 14/11/2026 · commit PENDIENTE
+
+Las placas de la OLT del nodo, vinculadas con las placas reales; lo que
+alimenta cada puerto, en el mapa; y zoom en la carta también en columnas.
+
+- **Vincular la placa del nodo con la placa real.** En la carta de empalme de
+  un nodo, la placa de la OLT (el bloque oscuro con sus puertos PON) se puede
+  vincular con una placa de verdad de una OLT que traza lee en esa red, del
+  panel o leída directo: tocándola, "Vincular con la placa real" (o "Editar")
+  pregunta **qué placa de la OLT es** y ofrece sus placas PON ("OLT - CARCA ·
+  0/13 · H805GPFD · 16 puertos"). Las uniones ya hechas no se tocan. Con
+  "Ninguna: la cargo a mano" se desvincula.
+- **Agregar placa de OLT** (antes "Agregar OLT") pregunta lo mismo y ya viene
+  con la primera placa real que falta en el mapa: toma sus puertos, su
+  numeración y un nombre ("OLT - CARCA 0/13"). Una placa real va una sola vez
+  por red: las que ya están no se ofrecen, y la API tampoco las acepta dos
+  veces. Sin una OLT leída en la red se carga a mano, como antes.
+- **Cada puerto, con lo que se lee de él.** Vinculada, cada puerto es el PON
+  de verdad ("0/13/2") y muestra sus ONT en línea sobre las que tiene
+  ("37/40"), en verde, en naranja (alguna recibe al límite o se quedó sin luz)
+  o en rojo (cayeron varias juntas, o todas); también los puertos que todavía
+  no están unidos a ninguna fibra, así se ve cuáles falta cablear en el mapa.
+  Al tocarlo, el pie dice cuánto emite, cuánto reciben sus ONT, por qué
+  cayeron las otras y el tráfico, con "Ver sus ONT" (el tablero de la OLT en
+  ese puerto, encima de la carta: al cerrarlo se vuelve). La placa dice de qué
+  placa real es, sus ONT y hace cuánto se leyó; con la carta abierta la
+  lectura se renueva sola cada minuto.
+- **La potencia estimada parte de lo que emite cada puerto.** Si la OLT
+  informa cuánto emite el módulo de cada puerto (las leídas directo), la
+  potencia estimada en fibras, cajas, recorridos y clientes sale de ese valor,
+  puerto por puerto, y el recorrido lo dice ("el puerto emite 5,3 dBm, leído de
+  la OLT"). La potencia cargada en la placa queda para los puertos que no lo
+  informan (las OLT del panel sin su conexión cargada).
+- **La señal usa la lectura del puerto.** Mientras la luz no pasó por un
+  splitter lleva todas las ONT del puerto: la troncal se ve con tráfico
+  aunque ningún cliente del mapa esté cruzado con su ONT, y si el puerto se
+  queda sin ninguna ONT en línea, todo lo que cuelga de él se ve caído (en el
+  mapa, en la carta y en la ficha del cable). Después del splitter sigue
+  valiendo lo que dicen las ONT de los clientes cruzados.
+- **Lo que alimenta un puerto, en el mapa.** "En el mapa", en el pie de la
+  unión de un puerto PON (también en una placa sin vincular): quedan marcados
+  todos los cables por los que va su luz, y la ficha dice por qué cable sale,
+  hasta dónde va sin dividirse y con cuánto llega ahí, y cuántos cables,
+  cajas y clientes alimenta. Si el puerto se quedó sin ONT en línea, dice
+  dónde buscar el corte ("está en ese primer tramo, entre NODO y BOT-1"); si
+  cayeron varias juntas y el resto sigue, que está después, en una rama.
+- **En el tablero de la OLT.** En *Equipos*, cada placa PON dice en qué nodo
+  del mapa está (o que falta agregarla) y cada puerto lleva a su lugar en la
+  carta de ese nodo o a lo que alimenta. Las novedades de un puerto (caído,
+  ONT que cayeron juntas, potencia que bajó) dicen por dónde sale ese puerto
+  en el mapa aunque sus clientes no estén cruzados, y "Ver en el mapa" lo
+  marca.
+- **Zoom en la carta, también en columnas.** Los botones − y + (abajo a la
+  derecha), dos dedos en el teléfono (se agranda la carta, no la página) o
+  Control y la rueda; el porcentaje vuelve al 100 % y "Ajustar" hace entrar
+  toda la carta. El diagrama entero se achica o se agranda como una imagen,
+  con las uniones en su lugar, y se puede seguir uniendo y acomodando con
+  zoom. En libre ya estaba; ahora los botones son los mismos en los dos modos.
+- **En el teléfono**, un costado de la carta sin cables ya no ocupa lugar (lo
+  usan los equipos y el otro costado), y "Guardar" y "Cancelar" de los
+  formularios de la carta quedan a la vista aunque el formulario sea alto.
+- Arreglos menores: "3 de 16 puertos usados" (decía "usadas"); el puerto de la
+  OLT que se señala o se elige ya no queda con el texto blanco sobre fondo
+  claro.
+- **Las pruebas en navegador no informaban los errores de la página** en las
+  que abren más de una sesión (`humo`, `olt-historia`, `equipos`): la lista de
+  errores se copiaba al abrir, cuando todavía estaba vacía. Ahora se juntan al
+  final. Al corregirlo no apareció ningún error escondido en lo que ya estaba
+  publicado; sí uno de este kit (Control y la rueda en columnas), ya corregido.
+  Prueba nueva: `placas.mjs`.
+- API: en los equipos de tipo `olt`, `datos.olt` (el nombre de la OLT),
+  `datos.olt_id` (su número en traza) y `datos.placa` ("0/13"); se validan y
+  una misma placa real no se acepta dos veces en una red (409).
+  `GET /api/integracion/estados` suma `olts`: las placas PON de cada OLT de la
+  red con lo que se lee de cada puerto (estado, emite, tráfico, ONT, en línea,
+  causas de caída, cuánto reciben).
+- Sin cambios en el esquema de datos. Las placas ya cargadas quedan como
+  están hasta que se las vincule. Volver a 0.12.5: `git checkout f659cde` y
+  `./instalar.sh` (las placas vinculadas se verían como cargadas a mano: el
+  vínculo queda guardado y esa versión no lo usa).
+
 ## 0.12.5 · 14/11/2026 · commit 0eb8c5e
 
 La placa de la OLT vuelve a su lugar en la carta de empalme del nodo.
