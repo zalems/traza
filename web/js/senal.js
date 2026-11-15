@@ -1,7 +1,8 @@
 // La señal en el mapa: qué cables llevan luz de una OLT según las cartas de
 // empalme, hacia dónde va (flechas) y si hay tráfico (clientes con la ONT en línea,
-// según el panel de la OLT). Los cables sin luz muestran el sentido de la red, del
-// nodo hacia afuera. Se prende y se apaga con un botón del mapa; la carta y las
+// según el panel de la OLT; y, si la placa del nodo está vinculada con la placa real,
+// según lo que se lee de cada puerto PON). Los cables sin luz muestran el sentido de
+// la red, del nodo hacia afuera. Se prende y se apaga con un botón del mapa; la carta y las
 // fichas usan los mismos datos (el estado de las ONT se pide una vez por minuto).
 // Con la señal prendida, cada NAP lleva un anillo del color de cómo reciben sus
 // clientes y, al acercar, la potencia promedio y las bocas libres. Debajo del botón
@@ -282,6 +283,8 @@ export function setupSenal({ map, red, irA, abrirOlt }) {
       .then((res) => {
         if (red.state.red !== redId) return null;
         estados = new Map(Object.entries(res.clientes ?? {}).map(([k, v]) => [Number(k), v]));
+        // Lo que se lee de cada puerto PON, para las placas de los nodos vinculadas con las reales.
+        F.ponerLecturas(red.state, res.olts ?? []);
         estadosDe = redId;
         leido = res.leido ?? null;
         conectadas = res.conectadas ?? 0;
@@ -388,13 +391,14 @@ export function setupSenal({ map, red, irA, abrirOlt }) {
       const coords = cable.geometry.coordinates.slice(seg.desde, seg.hasta + 1);
       if (seg.sentido < 0) coords.reverse();
       if (coords.length < 2) continue;
-      const abajo = F.estadoAbajo(seg.clientes, est);
+      // Por las ONT de los clientes de abajo y, si el puerto PON está vinculado con el real, por lo que se lee de él.
+      const abajo = F.estadoSegmento(s, seg, est);
       if (abajo.estado === 'trafico') hayTrafico = true;
       features.push({
         type: 'Feature',
         properties: {
           cable: seg.cable, estado: abajo.estado, fibras: seg.fibras.size, total: cable.properties.fibras,
-          clientes: abajo.clientes, enLinea: abajo.enLinea, caidos: abajo.caidos,
+          clientes: abajo.clientes, enLinea: abajo.enLinea, caidos: abajo.caidos, onts: abajo.onts, ontsEnLinea: abajo.ontsEnLinea,
         },
         geometry: { type: 'LineString', coordinates: coords },
       });
@@ -596,6 +600,7 @@ export function setupSenal({ map, red, irA, abrirOlt }) {
   red.on('datos', () => programar());
   red.on('cargada', () => {
     estados = new Map();
+    F.ponerLecturas(red.state, []);
     estadosDe = null;
     leido = null;
     conectadas = null;

@@ -341,9 +341,17 @@ export function ladosDeCarta(state, elemento, lista) {
 export const primerPuerto = (eq) => (eq?.tipo === 'olt' && eq.datos?.desde === 0 ? 0 : 1);
 export const numeroPuerto = (eq, n) => n - 1 + primerPuerto(eq);
 
+// Una placa de OLT de la carta de un nodo puede estar vinculada con una placa real
+// de una OLT que traza lee (datos.olt, su nombre, y datos.placa, "0/13": chasis y
+// slot). Su puerto N es entonces el PON 0/13/N, y de él se sabe lo que se lee.
+export const vinculada = (eq) => eq?.tipo === 'olt' && typeof eq.datos?.placa === 'string' && eq.datos.placa !== ''
+  && typeof eq.datos?.olt === 'string' && eq.datos.olt !== '';
+export const interfazPuerto = (eq, n) => (vinculada(eq) ? `${eq.datos.placa}/${numeroPuerto(eq, n)}` : null);
+
 export function describirEquipo(eq) {
   if (eq.tipo === 'olt') {
     const desde = primerPuerto(eq);
+    if (vinculada(eq)) return `${eq.salidas} PON (${eq.datos.placa}/${desde} a ${eq.datos.placa}/${desde + eq.salidas - 1})`;
     return `${eq.salidas} PON (${desde} a ${desde + eq.salidas - 1})`;
   }
   const datos = eq.datos ?? {};
@@ -351,8 +359,12 @@ export function describirEquipo(eq) {
   return `PLC ${eq.entradas}x${eq.salidas}`;
 }
 
-export function etiquetaPuerto(eq, lado, n) {
+// olt: cómo se llama hoy la OLT de una placa vinculada (si se sabe; si no, como se
+// llamaba cuando se la vinculó).
+export function etiquetaPuerto(eq, lado, n, olt = null) {
   const nombre = eq.nombre || (eq.tipo === 'olt' ? 'OLT' : 'Splitter');
+  // El puerto de una placa vinculada se llama como en la OLT: "OLT - CARCA PON 0/13/2".
+  if (vinculada(eq)) return `${olt || eq.datos.olt} PON ${interfazPuerto(eq, n)}`;
   if (eq.tipo === 'olt') return `${nombre} PON ${numeroPuerto(eq, n)}`;
   if (lado === 'e') return eq.entradas > 1 ? `${nombre} entrada ${n}` : `${nombre} entrada`;
   if (eq.datos?.modo === 'fbt') {
@@ -369,11 +381,95 @@ export function etiquetaExtremo(state, ext) {
   if (!p) return ext;
   if (p.tipo === 'q') {
     const eq = state.equipos.get(p.id);
-    return eq ? etiquetaPuerto(eq, p.lado, p.n) : 'equipo borrado';
+    return eq ? etiquetaPuerto(eq, p.lado, p.n, nombreOlt(state, eq)) : 'equipo borrado';
   }
   const cable = state.cables.get(p.id);
   if (!cable) return 'cable borrado';
   return `${cable.properties.nombre || 'Cable'} ${etiquetaFibra(cable.properties, p.n)}`;
+}
+
+// ------------------------------------------------- lo que se lee de las OLT
+
+// Las placas PON de las OLT que traza lee y, de cada puerto, lo que se sabe (la
+// señal lo trae una vez por minuto: `olts` de /api/integracion/estados):
+//   [{ red, id, nombre, modelo, leido, error, placas: [{ placa: '0/13', slot, nombre, desde,
+//      puertos: [{ n, interfaz, estado, tx, entra, sale, onts, en_linea, fibra, energia, otras,
+//                  criticas, rx_prom, rx_min, ultima_caida, nivel }] }] }]
+// Van aparte del estado de la red (que es lo cargado a mano): cambian solas, cada minuto.
+const lecturas = new WeakMap(); // estado de la red -> { version, olts }
+
+export function ponerLecturas(state, olts) {
+  lecturas.set(state, { version: (lecturas.get(state)?.version ?? 0) + 1, olts: Array.isArray(olts) ? olts : [] });
+}
+
+export const versionLecturas = (state) => lecturas.get(state)?.version ?? 0;
+export const oltsLeidas = (state) => lecturas.get(state)?.olts ?? [];
+
+const igualNombre = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+
+// La OLT y la placa leídas con que está vinculada una placa de la carta: { olt, placa }
+// (placa: null si esa OLT hoy no la informa). null si no está vinculada o si esa OLT
+// no está entre las que se leen. A la OLT se la busca por su número en traza y, si
+// no, por su nombre (así el vínculo sigue si la renombran o si la vuelven a cargar).
+export function placaReal(state, eq) {
+  if (!vinculada(eq)) return null;
+  const olts = oltsLeidas(state).filter((o) => o.red === eq.red);
+  const olt = olts.find((o) => eq.datos.olt_id && o.id === eq.datos.olt_id) ?? olts.find((o) => igualNombre(o.nombre, eq.datos.olt));
+  if (!olt) return null;
+  return { olt, placa: olt.placas.find((x) => x.placa === eq.datos.placa) ?? null };
+}
+
+// Cómo se llama hoy la OLT de una placa vinculada (null si no está entre las leídas).
+export function nombreOlt(state, eq) {
+  return placaReal(state, eq)?.olt.nombre ?? null;
+}
+
+// Lo que se lee del puerto real de un puerto de la carta (null si no hay).
+export function lecturaPuerto(state, eq, n) {
+  const placa = placaReal(state, eq)?.placa;
+  if (!placa) return null;
+  const numero = numeroPuerto(eq, n);
+  return placa.puertos.find((x) => x.n === numero) ?? null;
+}
+
+// Con cuánto sale la luz de un puerto de OLT: lo que emite de verdad su módulo, si la
+// placa está vinculada y la OLT lo informa; si no, la potencia cargada a mano en la
+// placa. { dbm, leida } o null.
+export function potenciaPuerto(state, eq, n) {
+  const tx = lecturaPuerto(state, eq, n)?.tx;
+  if (Number.isFinite(tx)) return { dbm: tx, leida: true };
+  return Number.isFinite(eq?.datos?.potencia) ? { dbm: eq.datos.potencia, leida: false } : null;
+}
+
+// La placa real entera, en números: puertos con ONT, ONT, en línea y entre cuánto y
+// cuánto emiten sus puertos. null si no hay lectura de esa placa.
+export function resumenPlaca(placa) {
+  if (!placa) return null;
+  const out = { puertos: placa.puertos.length, conOnt: 0, onts: 0, enLinea: 0, caidos: 0, txMin: null, txMax: null };
+  for (const x of placa.puertos) {
+    if (x.onts) {
+      out.conOnt += 1;
+      out.onts += x.onts;
+      out.enLinea += x.en_linea ?? 0;
+      if (x.nivel === 'caido') out.caidos += 1;
+    }
+    if (Number.isFinite(x.tx)) {
+      out.txMin = out.txMin === null ? x.tx : Math.min(out.txMin, x.tx);
+      out.txMax = out.txMax === null ? x.tx : Math.max(out.txMax, x.tx);
+    }
+  }
+  return out;
+}
+
+// Las placas de OLT de las cartas vinculadas con cada placa real: `${red}|${olt.id}|${placa}` -> equipo.
+export function placasEnMapa(state) {
+  const out = new Map();
+  for (const eq of state.equipos.values()) {
+    if (!vinculada(eq) || !state.elementos.has(eq.elemento)) continue;
+    const real = placaReal(state, eq);
+    if (real) out.set(`${eq.red}|${real.olt.id}|${eq.datos.placa}`, eq);
+  }
+  return out;
 }
 
 // ------------------------------------------------------- secuencias
@@ -637,14 +733,17 @@ export function perdidaSplitter(eq, salida) {
 }
 
 // Pérdida de cada paso de un recorrido y lo acumulado desde su comienzo (la
-// central, si se llega). Si el recorrido sale de una OLT con su potencia
-// cargada, también la potencia estimada después de cada paso. Llegar a un
-// cliente suma el conector de la ONT.
+// central, si se llega). Si el recorrido sale de un puerto de OLT del que se sabe
+// con cuánto sale la luz (lo que emite de verdad, si su placa está vinculada con
+// la real; si no, la potencia cargada en la placa), también la potencia estimada
+// después de cada paso; `leida` dice si ese punto de partida es una lectura.
+// Llegar a un cliente suma el conector de la ONT.
 export function potencias(state, resultado) {
   const pasos = resultado.pasos;
   const primero = pasos[0];
   const olt = primero?.motivo === 'olt' ? state.equipos.get(primero.equipo) ?? null : null;
-  const inicial = Number.isFinite(olt?.datos?.potencia) ? olt.datos.potencia : null;
+  const sale = olt ? potenciaPuerto(state, olt, primero.puerto) : null;
+  const inicial = sale ? sale.dbm : null;
   let acumulada = 0;
   let incompleta = false;
   const porPaso = pasos.map((paso) => {
@@ -661,7 +760,7 @@ export function potencias(state, resultado) {
     acumulada += perdida;
     return { perdida, acumulada, potencia: inicial === null ? null : inicial - acumulada };
   });
-  return { porPaso, total: acumulada, olt, inicial, llega: inicial === null ? null : inicial - acumulada, incompleta };
+  return { porPaso, total: acumulada, olt, inicial, leida: Boolean(sale?.leida), llega: inicial === null ? null : inicial - acumulada, incompleta };
 }
 
 // Hasta dónde llega lo que sale de un extremo (por su unión): el último paso.
@@ -717,20 +816,24 @@ export const nombreElemento = (state, id) => {
 // cortar) y se abre en las salidas de los splitters. De cada tramo de fibra con luz
 // se sabe hacia dónde va (de `ini` a `fin`, los puntos del cable), la pérdida y la
 // potencia estimadas al entrar y al llegar, de qué OLT y puerto viene y qué clientes
-// quedan abajo. Se calcula una vez por estado de la red.
+// quedan abajo. La potencia parte de lo que emite de verdad el puerto, si su placa
+// está vinculada con la real y la OLT lo informa (`leida`); si no, de la cargada a
+// mano en la placa. `partida` dice si la luz ya pasó por un splitter: hasta ahí
+// lleva todo lo del puerto. Se calcula una vez por estado de la red y de las lecturas.
 //
 //   tramos     [{ cable, fibra, desde, hasta, ini, fin, metros, coords, perdida,
-//                 perdidaFin, potencia, potenciaFin, raiz, clientes, termina }]
+//                 perdidaFin, potencia, potenciaFin, raiz, clientes, termina, partida }]
 //   extremos   `${elemento}|${extremo}` -> { sentido: sale | llega | entra | paso,
-//                 perdida, potencia, raiz, clientes, incompleta }
+//                 perdida, potencia, raiz, clientes, incompleta, partida }
 //   clientes   cliente -> { perdida, potencia, raiz } (con el conector de la ONT)
-//   puertos    `${equipo}:${n}` -> el puerto PON (raíz): { olt, puerto, potencia0, clientes }
+//   puertos    `${equipo}:${n}` -> el puerto PON (raíz): { olt, puerto, potencia0, leida, clientes }
 //   porCable   cable -> [tramos]
 //   porElemento elemento -> [extremos con luz en ese elemento]
 //   conflictos [{ elemento, ext, motivo }]: dos-fuentes | otra-olt | contramano
 export function iluminacion(state) {
   const idx = indice(state);
-  if (idx.luz) return idx.luz;
+  const version = versionLecturas(state);
+  if (idx.luz && idx.luz.lecturas === version) return idx.luz;
   const km = PERDIDAS.fibraKm / 1000;
   const tramos = [];
   const extremos = new Map();
@@ -759,6 +862,7 @@ export function iluminacion(state) {
       // Lo que pasa de largo tiene abajo lo mismo que su tramo.
       clientes: sentido === 'paso' ? padre.clientes : new Set(),
       incompleta: incompleta || Boolean(padre?.incompleta),
+      partida: Boolean(padre?.partida),
     };
     extremos.set(clave, reg);
     anotar(reg);
@@ -767,13 +871,14 @@ export function iluminacion(state) {
 
   for (const eq of [...state.equipos.values()].sort((a, b) => a.id - b.id)) {
     if (eq.tipo !== 'olt' || !state.elementos.has(eq.elemento)) continue;
-    const potencia0 = Number.isFinite(eq.datos?.potencia) ? eq.datos.potencia : null;
     for (let n = 1; n <= eq.salidas; n += 1) {
       const ext = extremoEquipo(eq.id, 's', n);
       if (!idx.usado.has(`${eq.elemento}|${ext}`)) continue;
+      const sale = potenciaPuerto(state, eq, n);
+      const potencia0 = sale ? sale.dbm : null;
       const raiz = {
         tipo: 'extremo', elemento: eq.elemento, ext, sentido: 'sale', perdida: 0, potencia: potencia0, padre: null,
-        olt: eq.id, puerto: n, potencia0, clientes: new Set(), incompleta: false,
+        olt: eq.id, puerto: n, potencia0, leida: Boolean(sale?.leida), clientes: new Set(), incompleta: false, partida: false,
       };
       raiz.raiz = raiz;
       extremos.set(`${eq.elemento}|${ext}`, raiz);
@@ -808,7 +913,7 @@ export function iluminacion(state) {
         tipo: 'tramo', cable: p.id, fibra: p.n, desde: elemento, hasta: t.hasta, ini: t.ini, fin: t.fin, metros: t.metros,
         coords: t.coords, pasaPor: t.pasaPor, perdida: reg.perdida, perdidaFin, potencia: reg.potencia,
         potenciaFin: conPotencia(raiz, perdidaFin), padre: reg, raiz, clientes: new Set(), incompleta: reg.incompleta,
-        termina: r.siguiente ? 'union' : r.fin?.motivo ?? null,
+        termina: r.siguiente ? 'union' : r.fin?.motivo ?? null, partida: reg.partida,
       };
       tramos.push(tramo);
       if (!porCableLuz.has(p.id)) porCableLuz.set(p.id, []);
@@ -853,6 +958,7 @@ export function iluminacion(state) {
       const l = perdidaSplitter(eq, s);
       const salida = extremoEquipo(eq.id, 's', s);
       const r = marcar(elemento, salida, 'sale', reg.perdida + (l ?? 0), reg, raiz, l === null);
+      if (r) r.partida = true; // de un splitter para abajo ya no va todo lo del puerto
       if (r && idx.usado.has(`${elemento}|${salida}`)) cola.push({ elemento, ext: salida, direccion: 'union', reg: r });
     }
   }
@@ -862,9 +968,55 @@ export function iluminacion(state) {
     for (let x = llegada.padre; x; x = x.padre) x.clientes.add(llegada.elemento);
   }
 
-  const out = { rev: state.rev, tramos, extremos, clientes, puertos, porCable: porCableLuz, porElemento, conflictos, segmentos: null };
+  const out = { rev: state.rev, lecturas: version, tramos, extremos, clientes, puertos, porCable: porCableLuz, porElemento, conflictos, segmentos: null };
   idx.luz = out;
   return out;
+}
+
+// Lo que alimenta un puerto PON según las cartas: todos los tramos con su luz y,
+// aparte, el tronco, que va del puerto al primer splitter (por ahí pasa todo lo del
+// puerto: si se quedó sin ninguna ONT en línea, el corte está en el tronco). null si
+// ese puerto no está unido a nada.
+//   { raiz, tramos, tronco, metros (del tronco), hasta (el elemento donde termina el
+//     tronco, o null si queda en una punta suelta), cables, cajas, clientes }
+export function arbolDePuerto(state, equipoId, n) {
+  const luz = iluminacion(state);
+  const raiz = luz.puertos.get(`${equipoId}:${n}`);
+  if (!raiz) return null;
+  const tramos = luz.tramos.filter((t) => t.raiz === raiz);
+  const tronco = tramos.filter((t) => !t.partida);
+  const cajas = new Set();
+  for (const [elemento, regs] of luz.porElemento) {
+    if (state.elementos.get(elemento)?.properties.tipo === 'nap' && regs.some((r) => r.raiz === raiz)) cajas.add(elemento);
+  }
+  return {
+    raiz,
+    tramos,
+    tronco,
+    metros: tronco.reduce((a, t) => a + t.metros, 0),
+    hasta: tronco.length ? tronco[tronco.length - 1].hasta : raiz.elemento,
+    cables: new Set(tramos.map((t) => t.cable)),
+    cajas,
+    clientes: raiz.clientes,
+  };
+}
+
+// Dónde está en el mapa un puerto PON real (el de una OLT leída, por su interfaz
+// "0/13/2"): la placa de la carta vinculada con su placa y el número de ese puerto en
+// ella. null si esa placa no está en el mapa.
+export function puertoEnMapa(state, redId, oltNombre, interfaz) {
+  const corte = String(interfaz ?? '').lastIndexOf('/');
+  if (corte < 0) return null;
+  const placa = interfaz.slice(0, corte);
+  const numero = Number(interfaz.slice(corte + 1));
+  for (const eq of state.equipos.values()) {
+    if (!vinculada(eq) || eq.red !== redId || eq.datos.placa !== placa || !state.elementos.has(eq.elemento)) continue;
+    const real = placaReal(state, eq);
+    if (!(real ? igualNombre(real.olt.nombre, oltNombre) : igualNombre(eq.datos.olt, oltNombre))) continue;
+    const n = numero - primerPuerto(eq) + 1;
+    return n >= 1 && n <= eq.salidas ? { eq, n } : null;
+  }
+  return null;
 }
 
 // Dónde se juntan los recorridos de la luz de varios clientes: el elemento (caja,
@@ -1011,6 +1163,50 @@ export function estadoAbajo(clientes, estados) {
   };
 }
 
+// Cómo está la luz en un punto (un extremo o un tramo de `iluminacion`): lo que
+// dicen las ONT de los clientes que tiene abajo y, si el puerto PON del que sale
+// está vinculado con el real, lo que se lee de ese puerto. Mientras la luz no pasó
+// por un splitter lleva todas las ONT del puerto: con alguna en línea hay tráfico
+// y con todas caídas no (aunque en el mapa no haya ningún cliente cruzado con su
+// ONT). Y si el puerto entero se quedó sin ONT en línea, todo lo que cuelga de él
+// está caído. Devuelve lo de estadoAbajo más { puerto, entero } si hay lectura.
+export function estadoLuz(state, reg, estados, clientes = reg?.clientes) {
+  const abajo = estadoAbajo(clientes, estados);
+  const raiz = reg?.raiz;
+  const eq = raiz ? state.equipos.get(raiz.olt) : null;
+  const puerto = eq ? lecturaPuerto(state, eq, raiz.puerto) : null;
+  if (!puerto?.onts) return abajo;
+  abajo.puerto = puerto;
+  abajo.entero = !reg.partida;
+  if (!puerto.en_linea) abajo.estado = 'caida';
+  else if (!reg.partida) abajo.estado = 'trafico';
+  return abajo;
+}
+
+// Lo mismo para un segmento de cable con luz (de `segmentosConLuz`), que puede llevar
+// fibras de varios puertos: con tráfico si alguna lo tiene; caído si ninguna lo tiene
+// y alguna está caída. onts y ontsEnLinea: las de los puertos que pasan enteros.
+export function estadoSegmento(state, seg, estados) {
+  const abajo = estadoAbajo(seg.clientes, estados);
+  let trafico = abajo.estado === 'trafico';
+  let caida = abajo.estado === 'caida';
+  const puertos = new Set();
+  for (const t of seg.tramos) {
+    const e = estadoLuz(state, t, estados);
+    if (e.estado === 'trafico') trafico = true;
+    else if (e.estado === 'caida') caida = true;
+    if (e.puerto && e.entero) puertos.add(e.puerto);
+  }
+  abajo.estado = trafico ? 'trafico' : caida ? 'caida' : 'luz';
+  abajo.onts = 0;
+  abajo.ontsEnLinea = 0;
+  for (const x of puertos) {
+    abajo.onts += x.onts;
+    abajo.ontsEnLinea += x.en_linea ?? 0;
+  }
+  return abajo;
+}
+
 const numeroComa = (x) => Math.abs(x).toFixed(1).replace('.', ',');
 
 // "≈ −14,2 dBm" si la OLT tiene cargada su potencia; si no, lo que se perdió desde ella.
@@ -1025,16 +1221,61 @@ export function textoPotencia(reg) {
 export function origenLuz(state, reg) {
   const raiz = reg?.raiz;
   const eq = raiz ? state.equipos.get(raiz.olt) : null;
-  return eq ? etiquetaPuerto(eq, 's', raiz.puerto) : 'una OLT';
+  return eq ? etiquetaPuerto(eq, 's', raiz.puerto, nombreOlt(state, eq)) : 'una OLT';
 }
 
-// "8 clientes abajo, 7 en línea"
+// "8 clientes abajo, 7 en línea". Con la lectura del puerto real (estadoLuz), antes de
+// un splitter: "40 ONT en el puerto, 37 en línea; en el mapa, 8 clientes abajo".
 export function textoAbajo(abajo) {
-  if (!abajo?.clientes) return 'sin clientes abajo';
-  const partes = [`${abajo.clientes} cliente${abajo.clientes === 1 ? '' : 's'} abajo`];
-  if (abajo.enLinea || abajo.caidos) {
-    partes.push(`${abajo.enLinea} en línea`);
-    if (abajo.caidos) partes.push(`${abajo.caidos} sin señal`);
+  const partes = [];
+  if (abajo?.clientes) {
+    partes.push(`${abajo.clientes} cliente${abajo.clientes === 1 ? '' : 's'} abajo`);
+    if (abajo.enLinea || abajo.caidos) {
+      partes.push(`${abajo.enLinea} en línea`);
+      if (abajo.caidos) partes.push(`${abajo.caidos} sin señal`);
+    }
   }
-  return partes.join(', ');
+  const delMapa = partes.join(', ');
+  const p = abajo?.puerto;
+  if (p && abajo.entero) {
+    return `${p.onts} ONT en el puerto, ${p.en_linea ?? 0} en línea${delMapa ? `; en el mapa, ${delMapa}` : ''}`;
+  }
+  if (p && !p.en_linea) return `${delMapa || 'sin clientes abajo'}; su puerto PON no tiene ninguna ONT en línea`;
+  // Varias fibras juntas (un cable): las ONT de los puertos que pasan enteros por ahí.
+  if (!p && abajo?.onts) {
+    return `${abajo.onts} ONT en sus puertos PON, ${abajo.ontsEnLinea} en línea${delMapa ? `; en el mapa, ${delMapa}` : ''}`;
+  }
+  return delMapa || 'sin clientes abajo';
+}
+
+// Lo que se lee de un puerto PON real, en una línea: "40 ONT, 37 en línea, 3 sin señal
+// (2 sin energía, 1 sin luz) · emite 5,3 dBm · reciben −22,1 dBm (la peor, −27,0)".
+export function textoLectura(p) {
+  if (!p) return '';
+  const db = (x) => `${x < -0.05 ? '−' : ''}${numeroComa(x)}`;
+  const partes = [];
+  if (p.onts) {
+    const caidas = p.onts - (p.en_linea ?? 0);
+    const causas = [p.energia ? `${p.energia} sin energía` : null, p.fibra ? `${p.fibra} sin luz` : null,
+      p.otras ? `${p.otras} por otra causa` : null].filter(Boolean).join(', ');
+    partes.push(`${p.onts} ONT, ${p.en_linea ?? 0} en línea${caidas ? `, ${caidas} sin señal${causas ? ` (${causas})` : ''}` : ''}`);
+  } else {
+    partes.push(p.estado === 'up' ? 'en servicio, sin ONT' : p.estado === 'down' ? 'sin ONT en línea' : 'sin ONT');
+  }
+  if (Number.isFinite(p.tx)) partes.push(`emite ${db(p.tx)} dBm`);
+  if (Number.isFinite(p.rx_prom)) partes.push(`reciben ${db(p.rx_prom)} dBm${Number.isFinite(p.rx_min) && p.en_linea > 1 ? ` (la peor, ${db(p.rx_min)})` : ''}`);
+  return partes.join(' · ');
+}
+
+// Cómo está un puerto PON real, para pintarlo: caido (tiene ONT y ninguna en línea),
+// parcial (cayeron varias juntas), atencion (alguna recibe al límite o se quedó sin
+// luz; las que están apagadas, sin energía, no cuentan), bien, libre (en servicio,
+// sin ONT) o apagado.
+export function nivelLectura(p) {
+  if (!p) return null;
+  if (p.onts) {
+    if (p.nivel === 'caido' || p.nivel === 'parcial') return p.nivel;
+    return p.nivel === 'atencion' || p.fibra > 0 ? 'atencion' : 'bien';
+  }
+  return p.estado === 'up' ? 'libre' : p.estado ? 'apagado' : 'libre';
 }

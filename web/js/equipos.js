@@ -235,8 +235,10 @@ function s(tag, attrs = {}, ...hijos) {
   return el;
 }
 
-export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, datos, repintar, pedir, irAOnts, historiaPon, lapsos, horas }) {
+export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, datos, repintar, pedir, irAOnts, historiaPon, lapsos, horas,
+  enMapa = () => null, hayNodos = () => false, abrirCarta = null, verPuertoEnMapa = null }) {
   let elegido = null; // { equipo, slot, puerto } lo que se mira del chasis
+  let porMostrar = null; // { olt, slot }: una placa pedida desde afuera (la carta de un nodo), hasta que llegue su OLT
   let historia = false; // las curvas del puerto elegido, a la vista
   let form = null; // el formulario de conexión, abierto: { id, v, error, guardando, probando, prueba, quitar }
   const traficos = new Map(); // `${red}|${olt}|${puerto}|${horas}` -> { datos | error }
@@ -504,9 +506,28 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     const que = [ROLES[placa.rol] ? `Placa de ${ROLES[placa.rol]}` : 'Placa', MODO_PLACA[placa.modo] ?? null,
       placa.puertos.length ? `${placa.puertos.length} puertos` : null, placa.detalle ?? (ESTADO_PLACA[placa.estado] || null),
       Number.isFinite(placa.temperatura) ? `${placa.temperatura} °C` : null].filter(Boolean).join(' · ');
+    // Una placa PON: en qué nodo del mapa está cargada (la placa de su carta vinculada con esta) o que falta.
+    let mapa = null;
+    if (placa.puertos.some((p) => p.tipo === 'pon')) {
+      const m = enMapa(equipo, placa);
+      if (m) {
+        const dePon = puerto?.tipo === 'pon';
+        const ext = dePon ? m.ext(puerto.puerto) : null;
+        const unido = dePon && m.unido(puerto.puerto);
+        mapa = h('p.olt-nota.chasis-en-mapa', {},
+          `En el mapa: «${m.eq.nombre || 'placa'}», en ${m.nodo.properties.nombre || 'un nodo'}`,
+          dePon && !unido ? '; este puerto todavía no está unido a ninguna fibra. ' : '. ',
+          abrirCarta ? boton(ext ? 'Ver este puerto en su carta' : 'Ver su carta', () => abrirCarta(m.nodo, ext), { class: 'olt-enlace' }) : null,
+          unido && verPuertoEnMapa ? ' · ' : null,
+          unido && verPuertoEnMapa ? boton('Ver lo que alimenta', () => verPuertoEnMapa(m.eq, m.n(puerto.puerto)), { class: 'olt-enlace' }) : null);
+      } else if (hayNodos()) {
+        mapa = h('p.olt-nota.chasis-en-mapa', { text: 'Todavía no está en el mapa: se agrega desde la carta de empalme de un nodo, con «Agregar placa de OLT».' });
+      }
+    }
     return h('div.chasis-detalle', {},
       h('h4.chasis-placa-titulo', { text: `Slot ${placa.slot}${placa.nombre ? ` · ${placa.nombre}` : ''}` }),
       h(`p.olt-nota${placa.estado === 'normal' ? '' : '.alerta'}`, { text: que }),
+      mapa,
       // Los puertos de subida dicen más que los de PON («sin módulo», «1,15 Gb/s»): van más anchos.
       placa.puertos.length ? h(`div.chasis-chips${placa.puertos.some((p) => p.tipo !== 'pon') ? '.anchos' : ''}`, { role: 'group', 'aria-label': `Puertos de la placa del slot ${placa.slot}` },
         ...placa.puertos.map((p) => chip(equipo, placa, p))) : null,
@@ -548,6 +569,14 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
   function pintar() {
     if (form) return [formulario()];
     const lista = equipos();
+    if (porMostrar) {
+      const e = lista.find((x) => x.nombre === porMostrar.olt);
+      if (e) {
+        elegido = { equipo: e.id, slot: porMostrar.slot, puerto: null };
+        historia = false;
+        porMostrar = null;
+      }
+    }
     const partes = lista.map(tarjeta);
     if (!lista.length) {
       partes.push(h('p.olt-vacio', { text: 'Esta red todavía no tiene una OLT cargada.' }),
@@ -814,9 +843,15 @@ export function setupEquipos({ h, boton, grafico, toast, redVista, nombreRed, da
     abrirFormulario,
     // Mientras se escribe en el formulario, una lectura nueva no lo rehace.
     escribiendo: () => Boolean(form),
+    // Lo que se pide ver desde afuera: una placa de una OLT, por su nombre y su slot.
+    mostrar: (placa) => {
+      form = null;
+      porMostrar = placa;
+    },
     cerrar: () => {
       form = null;
       elegido = null;
+      porMostrar = null;
       historia = false;
     },
   };

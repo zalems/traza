@@ -12,7 +12,7 @@ const COMUNIDAD = 'lectura-e2e';
 const CLAVE = 'Clave-olt-e2e';
 
 let { browser, page, errores } = await abrir(opciones);
-const todos = [...errores];
+const todos = [errores]; // los errores de página de cada sesión (se juntan al final)
 const foto = (nombre) => page.screenshot({ path: `${CAPTURAS}t32-${sufijo}-${nombre}.png` });
 const texto = (sel) => page.textContent(sel).then((t) => (t ?? '').replace(/\s+/g, ' ').trim());
 // Dónde está cada slot en el dibujo (en milímetros del chasis).
@@ -109,7 +109,7 @@ await browser.close();
 
 // --- Una red sin OLT: se carga una desde el visor
 ({ browser, page, errores } = await abrir({ ...opciones, red }));
-todos.push(...errores);
+todos.push(errores);
 await page.evaluate(() => window.ftth.herramientas.olt.abrir('resumen'));
 await page.waitForSelector('.olt-vacio');
 comprobar(/todavía no tiene una OLT de dónde leer/.test(await texto('.olt-cuerpo')), 'una red sin OLT lo dice');
@@ -227,7 +227,7 @@ await browser.close();
 
 // --- Quien no administra la ve, pero no la toca
 ({ browser, page, errores } = await abrir({ ...opciones, usuario: 'cuadrilla', clave: 'Clave-cuadrilla-2026', red: null }));
-todos.push(...errores);
+todos.push(errores);
 await page.evaluate(() => window.ftth.herramientas.olt.abrir('equipos'));
 await page.waitForSelector('.chasis-x2', { timeout: 45000 });
 comprobar(await page.locator('.olt-equipo-cab button').count() === 0 && await page.locator('.olt-equipo-agregar').count() === 0,
@@ -239,7 +239,7 @@ await browser.close();
 
 // --- Quitarla
 ({ browser, page, errores } = await abrir({ ...opciones, red }));
-todos.push(...errores);
+todos.push(errores);
 await page.evaluate(() => window.ftth.herramientas.olt.abrir('equipos'));
 await page.waitForSelector('.olt-equipo-cab button');
 await page.click('.olt-equipo-cab button:has-text("Conexión")');
@@ -364,4 +364,4 @@ await page.evaluate(async (id) => {
   for (const e of d.equipos ?? []) await fetch(`api/olt/equipos/${e.id}?red=${id}`, { method: 'DELETE' });
 }, red);
 await browser.close();
-terminar(todos);
+terminar(todos.flat());

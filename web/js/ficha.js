@@ -291,11 +291,18 @@ export function setupFicha({ root, red, acciones }) {
       for (let k = 1; k <= e.salidas; k += 1) if (idx.usado.has(`${feature.id}|${F.extremoEquipo(e.id, 's', k)}`)) n += 1;
       return n;
     };
+    // De una placa vinculada con la placa real de la OLT, lo que se lee de ella.
+    const leido = (e) => {
+      if (!F.vinculada(e)) return '';
+      const r = F.resumenPlaca(F.placaReal(s, e)?.placa);
+      if (!r) return ' · sin lectura de la OLT ahora';
+      return r.onts ? ` · ${r.onts} ONT, ${r.enLinea} en línea` : ' · sin ONT';
+    };
     return {
       uniones: uniones.length,
       equipos,
       texto: [plural(cables, 'cable', 'cables'), plural(uniones.length, 'unión', 'uniones')].join(' · '),
-      equiposTexto: equipos.map((e) => `${e.nombre || 'Equipo'}: ${F.describirEquipo(e)}, ${usadas(e)} de ${e.salidas} ${e.tipo === 'olt' ? 'puertos' : 'salidas'} en uso`),
+      equiposTexto: equipos.map((e) => `${e.nombre || 'Equipo'}: ${F.describirEquipo(e)}, ${usadas(e)} de ${e.salidas} ${e.tipo === 'olt' ? 'puertos' : 'salidas'} en uso${leido(e)}`),
     };
   }
 
@@ -984,7 +991,7 @@ export function setupFicha({ root, red, acciones }) {
         conexion = h('div.ficha-conexion', {},
           h('p', {}, h('strong', { text: `${donde} · ${F.etiquetaExtremo(s, con.union.a)}` })),
           h('p.ficha-sub', { text: origen
-            ? `Llega desde ${F.etiquetaPuerto(origen, 's', con.origen.puerto)} (${F.nombreElemento(s, con.origen.elemento)}).`
+            ? `Llega desde ${F.etiquetaPuerto(origen, 's', con.origen.puerto, F.nombreOlt(s, origen))} (${F.nombreElemento(s, con.origen.elemento)}).`
             : 'Según la carta de empalme. Del otro lado el pelo todavía no llega a una OLT.' }),
           estimada,
           botones(boton('Ver recorrido', () => acciones.verRecorrido(feature.id, con.ext))));
@@ -1167,7 +1174,7 @@ export function setupFicha({ root, red, acciones }) {
         text: `Con luz de ${F.origenLuz(s, t)}: de ${F.nombreElemento(s, t.desde)} hacia `
           + `${t.hasta !== null ? F.nombreElemento(s, t.hasta) : 'la punta suelta'} · `
           + `${F.textoPotencia({ ...t, potencia: t.potenciaFin, perdida: t.perdidaFin })} al llegar · `
-          + `${F.textoAbajo(F.estadoAbajo(t.clientes, estados))}`,
+          + `${F.textoAbajo(F.estadoLuz(s, t, estados))}`,
       }));
       detalle.replaceChildren(...[
         h('p', {}, h('strong', { text: F.etiquetaFibra(props, n) })),
@@ -1188,7 +1195,7 @@ export function setupFicha({ root, red, acciones }) {
         if (tramosLuz) {
           const abajo = new Set();
           for (const t of tramosLuz) for (const c of t.clientes) abajo.add(c);
-          luz = F.estadoAbajo(abajo, estados).estado;
+          luz = F.estadoSegmento(s, { clientes: abajo, tramos: tramosLuz }, estados).estado;
         }
         const b = h(`button.fibra-chip${usada ? '.usada' : ''}${luz ? `.luz.luz-${luz}` : ''}`, {
           type: 'button',
@@ -1226,7 +1233,7 @@ export function setupFicha({ root, red, acciones }) {
     }
     const abajo = new Set();
     for (const t of tramos) for (const c of t.clientes) abajo.add(c);
-    const estado = F.estadoAbajo(abajo, acciones.senal?.estados() ?? null);
+    const estado = F.estadoSegmento(s, { clientes: abajo, tramos }, acciones.senal?.estados() ?? null);
     return `${fibras.size} de ${feature.properties.fibras} fibras con luz${hacia} · ${F.textoAbajo(estado)}`;
   }
 
@@ -1338,8 +1345,10 @@ export function setupFicha({ root, red, acciones }) {
         const eq = paso.equipo ? s.equipos.get(paso.equipo) : null;
         // El primer paso es de donde viene el pelo; el último, adonde llega.
         const textos = {
-          olt: () => ({ texto: `${nombre(paso.elemento)}: ${eq ? F.etiquetaPuerto(eq, 's', paso.puerto) : 'OLT'}`,
-            sub: primero ? 'Sale de la OLT' : 'Llega a la OLT' }),
+          // Si la placa está vinculada con la real, lo que se lee de ese puerto.
+          olt: () => ({ texto: `${nombre(paso.elemento)}: ${eq ? F.etiquetaPuerto(eq, 's', paso.puerto, F.nombreOlt(s, eq)) : 'OLT'}`,
+            sub: [primero ? 'Sale de la OLT' : 'Llega a la OLT', eq ? F.textoLectura(F.lecturaPuerto(s, eq, paso.puerto)) : '']
+              .filter(Boolean).join(' · ') }),
           cliente: () => ({ texto: `${primero ? 'Desde' : 'Llega a'} ${nombre(paso.elemento)}`, sub: 'Cliente' }),
           'sin-union': () => ({ texto: `${primero ? 'Desde' : 'Termina en'} ${nombre(paso.elemento)}`,
             sub: s.elementos.get(paso.elemento)?.properties.tipo === 'nodo'
@@ -1387,8 +1396,14 @@ export function setupFicha({ root, red, acciones }) {
     });
     const balance = [];
     if (pot.total >= 0.05) balance.push(`Pérdida estimada: ${formatDb(pot.total)}${pot.incompleta ? ' (sin un splitter de tamaño desconocido)' : ''}`);
-    if (pot.llega !== null) balance.push(`llega con ≈ ${formatDbm(pot.llega)} (la OLT sale con ${formatDbm(pot.inicial)})`);
-    else if (pot.olt) balance.push('cargá la potencia de la OLT para estimar con cuánto llega');
+    if (pot.llega !== null) {
+      balance.push(`llega con ≈ ${formatDbm(pot.llega)} (${pot.leida ? `el puerto emite ${formatDbm(pot.inicial)}, leído de la OLT` : `la OLT sale con ${formatDbm(pot.inicial)}`})`);
+    } else if (pot.olt) {
+      const hayPlacas = F.oltsLeidas(s).some((o) => o.red === pot.olt.red && o.placas.length);
+      balance.push(F.vinculada(pot.olt) ? 'la OLT no informa cuánto emite ese puerto: cargale la potencia a la placa para estimar con cuánto llega'
+        : hayPlacas ? 'vinculá la placa con la placa real de la OLT (o cargale la potencia) para estimar con cuánto llega'
+          : 'cargá la potencia de la OLT para estimar con cuánto llega');
+    }
     abrir('recorrido', [
       h('p.ficha-sub', { text: partes.join(' · ') }),
       balance.length ? h('p.rec-balance', { text: balance.join(' · ') }) : null,
@@ -1400,6 +1415,48 @@ export function setupFicha({ root, red, acciones }) {
       ),
     ], { titulo: 'Recorrido del pelo', chip: F.etiquetaExtremo(s, ext), id: `r${elementoId}:${ext}` });
     actual = { recorrido: { elementoId, ext } };
+  }
+
+  // Lo que alimenta un puerto PON (queda marcado en el mapa): de dónde sale, hasta
+  // dónde va sin dividirse (el tronco: por ahí pasa todo lo del puerto) y qué cuelga
+  // de él. Con la placa vinculada con la real, lo que se lee del puerto y, si cayó
+  // entero o en parte, dónde buscar el corte.
+  function verPuerto({ equipo, n, arbol, volver }) {
+    const s = red.state;
+    const nombre = (id) => F.nombreElemento(s, id);
+    const lectura = F.lecturaPuerto(s, equipo, n);
+    const primero = arbol.tronco[0] ?? null;
+    const cable = primero ? s.cables.get(primero.cable)?.properties : null;
+    const fin = arbol.hasta !== null ? nombre(arbol.hasta) : 'una punta suelta';
+    const ultimo = arbol.tronco[arbol.tronco.length - 1] ?? null;
+    const tronco = primero
+      ? `Sale de ${nombre(arbol.raiz.elemento)} por ${cable ? `${cable.nombre || 'un cable'} · ${F.etiquetaFibra(cable, primero.fibra)}` : 'un cable'}`
+        + ` y va sin dividirse ${formatLargo(arbol.metros)} hasta ${fin}`
+        + `${Number.isFinite(ultimo.potenciaFin) ? `, adonde llega con ≈ ${formatDbm(ultimo.potenciaFin)}` : ''}.`
+      : `Se divide en ${nombre(arbol.raiz.elemento)} mismo, sin salir por ningún cable antes.`;
+    const cuelga = `En el mapa alimenta ${plural(arbol.cables.size, 'cable', 'cables')}, ${plural(arbol.cajas.size, 'caja', 'cajas')} y `
+      + `${plural(arbol.clientes.size, 'cliente', 'clientes')}.`;
+    let corte = null;
+    if (lectura?.onts && !lectura.en_linea) {
+      corte = primero
+        ? `El puerto se quedó sin ninguna ONT en línea: si es un corte, está en ese primer tramo, entre ${nombre(arbol.raiz.elemento)} y ${fin} (o en el puerto mismo).`
+        : 'El puerto se quedó sin ninguna ONT en línea.';
+    } else if (lectura?.nivel === 'parcial') {
+      corte = `Cayeron juntas ${lectura.onts - lectura.en_linea} de sus ${lectura.onts} ONT y el resto sigue en línea: el problema está después de ${fin}, en una de las ramas.`;
+    }
+    abrir('recorrido', [
+      lectura ? h('p.rec-balance', { text: F.textoLectura(lectura) }) : null,
+      h('p.ficha-sub', { text: tronco }),
+      h('p.ficha-sub', { text: cuelga }),
+      corte ? h('p.ficha-aviso', { text: corte }) : null,
+      !lectura && !F.vinculada(equipo) && F.oltsLeidas(s).some((o) => o.red === equipo.red && o.placas.length)
+        ? h('p.ficha-nota', { text: 'La placa no está vinculada con una placa real de la OLT: con el vínculo acá se ve cuántas ONT tiene el puerto y si cayó.' }) : null,
+      botones(
+        volver ? boton('Ver la carta del nodo', volver, { class: 'primario' }) : null,
+        boton('Cerrar', () => acciones.cancelar()),
+      ),
+    ].filter(Boolean), { titulo: 'Lo que alimenta el puerto', chip: F.etiquetaPuerto(equipo, 's', n, F.nombreOlt(s, equipo)), id: `p${equipo.id}:${n}` });
+    actual = { puerto: { equipo: equipo.id, n } };
   }
 
   // -------------------------------------------------------------- redes
@@ -2029,6 +2086,7 @@ export function setupFicha({ root, red, acciones }) {
     formCable,
     verCable,
     verRecorrido,
+    verPuerto,
     redes,
     usuarios,
     importarWispro,

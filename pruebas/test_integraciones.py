@@ -365,7 +365,7 @@ class IntegracionesTest(unittest.TestCase):
         sin_panel, _ = self.red_con_caja("Estados C")
         self.configurar(sin_panel, panel=False)
         self.assertEqual(self.ok("GET", f"/api/integracion/estados?red={sin_panel}"),
-                         {"clientes": {}, "errores": [], "leido": None, "conectadas": 0})
+                         {"clientes": {}, "olts": [], "errores": [], "leido": None, "conectadas": 0})
         # Todas juntas: las conectadas al panel.
         todas = self.ok("GET", "/api/integracion/estados?red=todas")
         self.assertGreaterEqual(todas["conectadas"], 2)

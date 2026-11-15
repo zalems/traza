@@ -1,7 +1,7 @@
 // Humo: entrar, cargar la red, prender la señal y abrir una caja; y que la red cargue aunque el mapa de fondo no llegue.
 import { abrir, comprobar, terminar, CAPTURAS } from './lib.mjs';
 let { browser, page, errores } = await abrir({ senal: true });
-const todos = [...errores];
+const todos = [errores]; // los errores de página de cada sesión (se juntan al final)
 const n = await page.evaluate(() => window.ftth.herramientas.red.state.elementos.size);
 comprobar(n >= 75, `la red cargó (${n} elementos)`);
 await page.waitForSelector('.senal-leyenda:not([hidden])');
@@ -18,10 +18,10 @@ await browser.close();
 // El mapa de fondo viene de otros servidores (IGN, satélite): si no contestan, la red se tiene que ver igual.
 // (abrir espera a que la red cargue: si dependiera del fondo, se quedaría esperando.)
 ({ browser, page, errores } = await abrir({ sinFondo: true, movil: true, ancho: 390, alto: 844, usuario: 'cuadrilla', clave: 'Clave-cuadrilla-2026', red: null }));
-todos.push(...errores);
+todos.push(errores);
 const sinFondo = await page.evaluate(() => ({ red: window.ftth.herramientas.red.state.red, elementos: window.ftth.herramientas.red.state.elementos.size,
   capas: Boolean(window.ftth.map.getLayer('red-elementos')) }));
 comprobar(sinFondo.red !== null && sinFondo.elementos >= 1 && sinFondo.capas, `con el mapa de fondo sin contestar, la red carga igual (${sinFondo.elementos} elementos)`);
 await page.screenshot({ path: `${CAPTURAS}t00-sin-fondo.png` });
 await browser.close();
-terminar(todos);
+terminar(todos.flat());

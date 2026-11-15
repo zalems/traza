@@ -10,7 +10,7 @@ import { setupFicha } from './ficha.js';
 import { setupCarta } from './carta.js';
 import { setupSenal } from './senal.js';
 import { setupOlt } from './olt.js';
-import { recorrido } from './fibras.js';
+import { arbolDePuerto, coloresDeTramo, extremoEquipo, recorrido } from './fibras.js';
 
 const RED_KEY = 'ftth.red';
 // Quien administra puede mirar todas las redes juntas en un solo mapa (ahí no se carga nada nuevo).
@@ -259,12 +259,12 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
     },
 
     // --- carta de empalme y recorridos
-    abrirCarta(feature, ext = null) {
+    abrirCarta(feature, ext = null, opciones = {}) {
       setModo('ver');
       red.limpiarRecorrido();
       ficha.cerrar();
       red.seleccionar('elemento', feature.id);
-      carta.abrir(feature.id, { ext });
+      carta.abrir(feature.id, { ext, ...opciones });
     },
     // Al cerrar la carta vuelve la ficha del elemento (o un aviso si ya no existe).
     alCerrarCarta(id, aviso) {
@@ -281,6 +281,15 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
       carta.cerrar({ silencioso: true });
       acciones.seleccionar('cable', cableId);
     },
+    // De un puerto de una placa vinculada, a sus ONT en el tablero de la OLT (encima de
+    // la carta: al cerrarlo se vuelve a ella).
+    verOntsDePon(oltLeida, interfaz) {
+      olt.abrir('onts', { red: oltLeida.red, pon: `${oltLeida.nombre}|${interfaz}` });
+    },
+    // Y de la placa, a su lugar en el chasis dibujado.
+    verPlacaEnOlt(oltLeida, placa) {
+      olt.abrir('equipos', { red: oltLeida.red, placa: { olt: oltLeida.nombre, slot: placa.slot } });
+    },
     verRecorrido(elementoId, ext, { desdeCarta = false } = {}) {
       const resultado = recorrido(red.state, elementoId, ext);
       if (carta.abierta()) carta.cerrar({ silencioso: true });
@@ -295,6 +304,30 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
       });
       red.resaltarRecorrido(resultado.segmentos);
       encuadrar(resultado.lineas.flat(), elemento?.geometry.coordinates);
+    },
+    // Lo que alimenta un puerto PON según las cartas, marcado en el mapa (desde la carta
+    // del nodo o desde el tablero de la OLT). false si ese puerto no está unido a nada.
+    verPuertoEnMapa(equipoId, n) {
+      const eq = red.state.equipos.get(equipoId);
+      const arbol = eq ? arbolDePuerto(red.state, equipoId, n) : null;
+      if (!arbol) {
+        toast('Ese puerto todavía no está unido a ninguna fibra en el mapa');
+        return false;
+      }
+      if (carta.abierta()) carta.cerrar({ silencioso: true });
+      olt.cerrar({ devolverFoco: false });
+      setModo('ver');
+      red.seleccionar(null);
+      const nodo = red.state.elementos.get(eq.elemento);
+      ficha.verPuerto({
+        equipo: eq,
+        n,
+        arbol,
+        volver: nodo ? () => acciones.abrirCarta(red.state.elementos.get(eq.elemento) ?? nodo, extremoEquipo(eq.id, 's', n)) : null,
+      });
+      red.resaltarRecorrido(arbol.tramos.map((t) => ({ coords: t.coords, ...coloresDeTramo(red.state, t) })));
+      encuadrar(arbol.tramos.flatMap((t) => t.coords), nodo?.geometry.coordinates);
+      return true;
     },
     limpiarRecorrido() {
       red.limpiarRecorrido();
@@ -450,6 +483,15 @@ export function setupHerramientas({ map, maplibregl, usuario, administra = true,
         map.jumpTo({ center: f.geometry.coordinates, zoom: Math.max(map.getZoom(), 17) });
         acciones.seleccionar('elemento', id);
       },
+      // La carta de empalme de un nodo, en un puerto de su placa (desde el chasis de la OLT).
+      abrirCarta(id, ext = null) {
+        const f = red.state.elementos.get(id);
+        if (!f) return;
+        olt.cerrar({ devolverFoco: false });
+        map.jumpTo({ center: f.geometry.coordinates, zoom: Math.max(map.getZoom(), 17) });
+        acciones.abrirCarta(f, ext, { elegir: true });
+      },
+      verPuertoEnMapa: (equipoId, n) => acciones.verPuertoEnMapa(equipoId, n),
       irAClientes(ids) {
         const puntos = ids.map((id) => red.state.elementos.get(id)?.geometry.coordinates).filter(Boolean);
         if (!puntos.length) return;
