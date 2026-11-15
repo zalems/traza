@@ -2517,6 +2517,13 @@ export function setupCarta({ root, red, acciones, toast }) {
             r.txMin !== null ? (r.txMax - r.txMin < 0.05 ? `emiten ${dbTexto(r.txMin)} dBm` : `emiten de ${dbTexto(r.txMin)} a ${dbTexto(r.txMax)} dBm`)
               : 'la OLT no informa cuánto emite cada puerto',
           ].join(' · ');
+          // Una placa ya cargada con otra numeración: sus puertos se corren de nombre (el primero pasa a
+          // ser el primero de la real). Si tenía uniones, conviene mirar que hayan quedado donde van.
+          const desdeMio = equipo ? (datosEq.desde === 0 ? 0 : 1) : null;
+          if (equipo && !F.vinculada(equipo) && desdeMio !== x.placa.desde) {
+            nota.textContent += `. Ojo: esta placa numeraba sus puertos desde ${desdeMio} y la real, desde ${x.placa.desde}: su primer puerto `
+              + `(PON ${desdeMio}) pasa a ser el ${x.placa.placa}/${x.placa.desde}, y así los demás. Después de guardar, mirá que cada unión haya quedado en el puerto que corresponde.`;
+          }
           rotuloPotencia.textContent = r.txMin !== null ? 'Potencia de salida (dBm), si un puerto no la informa' : 'Potencia de salida (dBm)';
         } else if (real.value === ACTUAL) {
           nota.textContent = `Sigue vinculada con ${equipo.datos.olt} · ${equipo.datos.placa}, que ahora no se está leyendo.`;

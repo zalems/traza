@@ -331,9 +331,21 @@ comprobar(/^16 puertos, del 0\/1\/0 al 0\/1\/15 · 12 ONT, 12 en línea, en 4 pu
   `y dice lo que emiten sus puertos (${await texto('#carta .carta-form-nota')})`);
 await page.locator('#carta .carta-form').getByRole('button', { name: 'Agregar' }).click();
 await page.waitForSelector('#carta .equipo.olt.vinculada .puerto');
-let deLaNueva = await page.$$eval('#carta .equipo.olt .puerto', (l) => l.map((b) => b.textContent.replace(/\s+/g, ' ').trim()));
+let deLaNueva = await page.$$eval('#carta .equipo.olt.vinculada .puerto', (l) => l.map((b) => b.textContent.replace(/\s+/g, ' ').trim()));
 comprobar(deLaNueva.length === 16 && deLaNueva[0] === '0/1/03/3' && deLaNueva[3] === '0/1/33/3' && deLaNueva[4] === '0/1/4',
   `agregada con sus 16 puertos, del 0/1/0 al 0/1/15, y las ONT de cada uno (${deLaNueva.slice(0, 5).join(', ')}…)`);
+// Una placa ya cargada que numeraba sus puertos desde 1: al vincularla con una real (que numera desde 0), el formulario avisa que se corren.
+const manual = await api('api/equipos', 'POST', { elemento: preparar.nodo, tipo: 'olt', nombre: 'Cargada a mano', salidas: 16, datos: {} });
+await page.waitForSelector(`#carta [data-bloque="q${manual.data.equipos[0].id}"]`, { timeout: 15000 });
+await page.click(`#carta [data-bloque="q${manual.data.equipos[0].id}"] .equipo-cab`);
+await boton('Vincular con la placa real').click();
+await page.waitForSelector('#carta .carta-form select[name="placa-real"]');
+const paraLaManual = await page.$$eval('#carta select[name="placa-real"] option', (o) => o.map((x) => `${x.textContent}${x.disabled ? ' [no]' : ''}`));
+await page.selectOption('#carta select[name="placa-real"]', { index: 2 });
+comprobar(/0\/1 .*ya está en Central E2E \[no\]/.test(paraLaManual[1])
+  && /Ojo: esta placa numeraba sus puertos desde 1 y la real, desde 0: su primer puerto \(PON 1\) pasa a ser el 0\/2\/0/.test(await texto('#carta .carta-form-nota')),
+  'al vincular una placa que numeraba desde 1 con una real que numera desde 0, el formulario avisa que los puertos se corren');
+await page.locator('#carta .carta-form').getByRole('button', { name: 'Cancelar' }).click();
 // Se une el puerto 0/1/0 con la fibra 1 del cable: la luz parte de lo que emite ese puerto (3,2 dBm).
 await page.click('#carta .equipo.olt .puerto');
 comprobar(/PON 0\/1\/0: 3 ONT, 3 en línea · emite 3,2 dBm/.test(await pie()), 'un puerto todavía sin unir ya dice sus ONT y cuánto emite');
