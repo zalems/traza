@@ -1,6 +1,6 @@
 # Cambios
 
-## 0.13.0 · 15/11/2026 · commit PENDIENTE
+## 0.13.0 · 15/11/2026 · commit 2db614f
 
 Las placas de la OLT del nodo, vinculadas con las placas reales; lo que
 alimenta cada puerto, en el mapa; y zoom en la carta también en columnas.
